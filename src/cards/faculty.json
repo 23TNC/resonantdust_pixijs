@@ -1,0 +1,31 @@
+{
+  "card_type": 2,
+  "cards": [
+    {
+      "name": "Corpus",
+      "style": {
+        "color": [ "#E67E7E", "#ecd6aa" ]
+      },
+      "flags": [
+        [ "woodcutter", false, true, false ],
+        [ "forager",    false, true, false ]
+      ]
+    },
+    {
+      "name": "Anima",
+      "style": {
+        "color": [ "#7D96E3", "#ecd6aa" ]
+      },
+      "flags": [
+      ]
+    },
+    {
+      "name": "Soller",
+      "style": {
+        "color": [ "#97e3a7", "#ecd6aa" ]
+      },
+      "flags": [
+      ]
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+[
+  {
+    "id": "soul_forest_work_faculty",
+    "self": [ "Soul" ],
+    "tile": [ "Forest" ],
+    "cards": {
+      "discipline": [ "Work" ],
+      "faculty": [ "Faculty" ]
+    },
+    "condition": {
+      "and": [
+        { "if": [ "discipline.ready" ] },
+        { "if": [ "faculty.ready" ] },
+        { 
+          "or": [
+             { "ge": [ "tile.wood", "3" ] },
+             { "ge": [ "tile.food", "2" ] } 
+          ] 
+        },
+        { "ge": [ "cards.labor", "3" ] },
+        { "ge": [ "cards.corpus", "3"] }
+      ]
+    },
+    "craft_time": { "value": [ "30" ] },
+    "on_start": [
+      { "set": [ "discipline.ready", "false" ] },
+      { "set": [ "discipline.progress_visible", "true" ] }
+    ],
+    "on_complete": [
+      { 
+        "if": [
+          { "and": [ "tile.wood", "cards.wood" ] },
+          { "give": [ "self.card_id", "log", { "rand": [ "0", "3" ] } ] }
+        ]
+      },
+      {
+        "if": [
+          { "and": [ "tile.food", "cards.food" ] },
+          { "give": [ "self.card_id", "food", { "rand": [ "1", "3" ] } ] }
+        ]
+      },
+      {
+        "enqueue": [ "fatigue", { "cards": { "faculty": "faculty.card_id" } } ]
+      },
+      { "set": [ "discipline.ready", "true" ] },
+      { "set": [ "discipline.progress_visible", "false" ] }
+    ]
+  },
+  {
+    "id": "fatigue",
+    "cards": {
+      "faculty": [ "faculty" ]
+    },
+    "condition": { "gt": [ "faculty.max_fatigue", "0" ] },
+    "craft_time": { "value": [ "faculty.max_fatigue" ] },
+    "on_start": [
+      { "set": [ "faculty.ready", "false" ] },
+      { "set": [ "faculty.progress_visible", "true" ] }
+    ],
+    "on_complete": [
+      { "set": [ "faculty.ready", "true" ] },
+      { "set": [ "faculty.progress_visible", "false" ] }
+    ]
+  }
+]

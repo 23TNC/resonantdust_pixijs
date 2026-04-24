@@ -1,0 +1,23 @@
+{
+  "card_type": 1,
+  "cards": [
+    {
+      "name": "Might",
+      "style": {
+        "color": [ "#E67E7E", "#ecd6aa" ]
+      }
+    },
+    {
+      "name": "Finesse",
+      "style": {
+        "color": [ "#97e3a7", "#ecd6aa" ]
+      }
+    },
+    {
+      "name": "Insight",
+      "style": {
+        "color": [ "#7D96E3", "#ecd6aa" ]
+      }
+    }
+  ]
+}

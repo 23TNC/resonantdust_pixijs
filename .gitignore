@@ -13,13 +13,6 @@
 /build/
 bin/
 dist/
-/spacetime/server/spacetimedb/target/
-/spacetime/config
-/spacetime/data
-
-# spacetimedb data
-/spacetime-data/*
-/spacetime-keys/*
 
 # Exported games
 *.pck
@@ -62,4 +55,4 @@ Thumbs.db
 *.swp
 
 # npm
-pixijs/node_modules/*
+node_modules/*
