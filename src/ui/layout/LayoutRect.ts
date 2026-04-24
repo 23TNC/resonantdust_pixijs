@@ -1,10 +1,11 @@
-import { Container, Graphics, Rectangle } from "pixi.js";
+import { Container, Graphics, Point, Rectangle } from "pixi.js";
 
 interface LayoutRectOptions {
   originX?: number;
   originY?: number;
   alignX?: number;
   alignY?: number;
+  layoutId?: string;
 }
 
 export class LayoutRect extends Container {
@@ -14,9 +15,12 @@ export class LayoutRect extends Container {
   public originY: number;
   public alignX: number;
   public alignY: number;
+  public depth: number;
+  public layoutId?: string;
 
   private padding: number;
   private debugGraphics: Graphics | null;
+  private layoutChildren: LayoutRect[];
 
   constructor(
     x: number,
@@ -33,11 +37,14 @@ export class LayoutRect extends Container {
     this.originY = options.originY ?? 0;
     this.alignX = options.alignX ?? 0;
     this.alignY = options.alignY ?? 0;
+    this.layoutId = options.layoutId;
+    this.depth = 0;
 
     this.outerRect = new Rectangle(0, 0, width, height);
     this.innerRect = new Rectangle(0, 0, 0, 0);
     this.hitArea = this.innerRect;
     this.debugGraphics = null;
+    this.layoutChildren = [];
 
     this.position.set(x, y);
     this.updateRects();
@@ -59,6 +66,59 @@ export class LayoutRect extends Container {
     this.originX = originX;
     this.originY = originY;
     this.updateRects();
+  }
+
+  public setDepth(depth: number): void {
+    this.depth = depth;
+
+    if (this.parent instanceof LayoutRect) {
+      this.parent.sortLayoutChildren();
+    }
+  }
+
+  public addLayoutChild(child: LayoutRect): LayoutRect {
+    if (!this.layoutChildren.includes(child)) {
+      this.layoutChildren.push(child);
+    }
+
+    if (child.parent !== this) {
+      this.addChild(child);
+    }
+
+    this.sortLayoutChildren();
+    return child;
+  }
+
+  public removeLayoutChild(child: LayoutRect): LayoutRect {
+    this.layoutChildren = this.layoutChildren.filter((item) => item !== child);
+
+    if (child.parent === this) {
+      this.removeChild(child);
+    }
+
+    return child;
+  }
+
+  public containsGlobalPoint(globalX: number, globalY: number): boolean {
+    const localPoint = this.toLocal(new Point(globalX, globalY));
+    return this.innerRect.contains(localPoint.x, localPoint.y);
+  }
+
+  public hitTestLayout(globalX: number, globalY: number): LayoutRect | null {
+    if (!this.containsGlobalPoint(globalX, globalY)) {
+      return null;
+    }
+
+    for (let index = this.layoutChildren.length - 1; index >= 0; index -= 1) {
+      const child = this.layoutChildren[index];
+      const hit = child.hitTestLayout(globalX, globalY);
+
+      if (hit) {
+        return hit;
+      }
+    }
+
+    return this;
   }
 
   public updateRects(): void {
@@ -138,5 +198,13 @@ export class LayoutRect extends Container {
         width: 1,
         alpha: 1,
       });
+  }
+
+  private sortLayoutChildren(): void {
+    this.layoutChildren.sort((a, b) => a.depth - b.depth);
+
+    for (let index = 0; index < this.layoutChildren.length; index += 1) {
+      this.addChild(this.layoutChildren[index]);
+    }
   }
 }
