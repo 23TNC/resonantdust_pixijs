@@ -1,6 +1,6 @@
 import { Application } from "pixi.js";
 import { setApp } from "./app";
-import { bootstrap as loadDebugData } from "./spacetime/debug_data";
+import { bootstrap as loadDebugData } from "./spacetime/DebugData";
 import { LoginScene, SceneManager } from "./scenes";
 
 async function startApp(): Promise<void> {
