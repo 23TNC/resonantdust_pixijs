@@ -1,19 +1,8 @@
 import { Rectangle } from "pixi.js";
 import { getApp } from "../../app/AppContext";
-import { LayoutRect } from "./LayoutRect";
+import { LayoutRect, type LayoutRectOptions } from "./LayoutRect";
 
-export type LayoutPadding =
-  | number
-  | {
-      top?: number;
-      right?: number;
-      bottom?: number;
-      left?: number;
-    };
-
-export interface LayoutRootOptions {
-  debug?: boolean;
-}
+export interface LayoutRootOptions extends LayoutRectOptions {}
 
 type AppResizeSource = {
   on(event: "resize", callback: () => void): void;
@@ -34,16 +23,18 @@ export class LayoutRoot extends LayoutRect {
     this.resize(width, height);
   };
 
-  public constructor(
-    width: number,
-    height: number,
-    padding: LayoutPadding = 0,
-    options: LayoutRootOptions = {},
-  ) {
-    super(0, 0, width, height, padding, options);
+  public constructor(options: LayoutRootOptions = {}) {
+    super({
+      ...options,
+      x: options.x ?? 0,
+      y: options.y ?? 0,
+      width: options.width ?? 0,
+      height: options.height ?? 0,
+      padding: options.padding ?? 0,
+    });
 
-    this.screenWidth = Math.max(0, width);
-    this.screenHeight = Math.max(0, height);
+    this.screenWidth = Math.max(0, options.width ?? 0);
+    this.screenHeight = Math.max(0, options.height ?? 0);
 
     this.bindAppResize();
   }
@@ -125,7 +116,7 @@ export class LayoutRoot extends LayoutRect {
     this.screenWidth = Math.max(0, width);
     this.screenHeight = Math.max(0, height);
 
-    this.setOuterRect(0, 0, this.screenWidth, this.screenHeight);
+    this.setLayout(0, 0, this.screenWidth, this.screenHeight);
     this.invalidateLayout();
     this.invalidateRender();
   }
@@ -147,7 +138,7 @@ export class LayoutRoot extends LayoutRect {
     this.renderLayoutTree();
   }
 
-  public hitTestLayout(x: number, y: number): LayoutRect | null {
+  public override hitTestLayout(x: number, y: number): LayoutRect | null {
     return this.hitTestRecursive(this, x, y);
   }
 

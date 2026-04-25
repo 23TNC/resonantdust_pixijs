@@ -12,14 +12,7 @@ export class GameView extends LayoutRoot {
   public readonly viewId: number;
 
   public constructor(options: GameViewOptions) {
-    super(
-      options.width,
-      options.height,
-      options.padding ?? 0,
-      {
-        debug: options.debug,
-      },
-    );
+    super(options);
 
     this.viewId = options.viewId;
   }

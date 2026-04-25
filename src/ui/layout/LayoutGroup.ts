@@ -1,21 +1,15 @@
 import { Point } from "pixi.js";
-import { LayoutRect } from "./LayoutRect";
+import {
+  LayoutRect,
+  type LayoutPadding,
+  type LayoutRectOptions,
+} from "./LayoutRect";
 
 export type LayoutDirection = "row" | "column";
 
-export type LayoutPadding =
-  | number
-  | {
-      top?: number;
-      right?: number;
-      bottom?: number;
-      left?: number;
-    };
-
-export interface LayoutGroupOptions {
+export interface LayoutGroupOptions extends LayoutRectOptions {
+  direction: LayoutDirection;
   gap?: number;
-  originX?: number;
-  originY?: number;
 }
 
 export interface LayoutChildOptions {
@@ -45,21 +39,10 @@ export class LayoutGroup extends LayoutRect {
   private childConfigs = new Map<LayoutRect, LayoutChildConfig>();
   private childRanges: LayoutChildRange[] = [];
 
-  public constructor(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    direction: LayoutDirection,
-    padding: LayoutPadding = 0,
-    options: LayoutGroupOptions = {},
-  ) {
-    super(x, y, width, height, padding, {
-      originX: options.originX,
-      originY: options.originY,
-    });
+  public constructor(options: LayoutGroupOptions) {
+    super(options);
 
-    this.direction = direction;
+    this.direction = options.direction;
     this.gap = Math.max(0, options.gap ?? 0);
   }
 
@@ -260,28 +243,19 @@ export class LayoutGroup extends LayoutRect {
   }
 }
 
+export interface LayoutRowOptions extends Omit<LayoutGroupOptions, "direction"> {}
+export interface LayoutColumnOptions extends Omit<LayoutGroupOptions, "direction"> {}
+
 export class LayoutRow extends LayoutGroup {
-  public constructor(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    padding: LayoutPadding = 0,
-    options: LayoutGroupOptions = {},
-  ) {
-    super(x, y, width, height, "row", padding, options);
+  public constructor(options: LayoutRowOptions = {}) {
+    super({ ...options, direction: "row" });
   }
 }
 
 export class LayoutColumn extends LayoutGroup {
-  public constructor(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    padding: LayoutPadding = 0,
-    options: LayoutGroupOptions = {},
-  ) {
-    super(x, y, width, height, "column", padding, options);
+  public constructor(options: LayoutColumnOptions = {}) {
+    super({ ...options, direction: "column" });
   }
 }
+
+export type { LayoutPadding };

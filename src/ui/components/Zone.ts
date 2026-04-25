@@ -15,15 +15,6 @@ import {
   type ZoneId,
 } from "@/spacetime/Data";
 
-type LayoutPadding =
-  | number
-  | {
-      top?: number;
-      right?: number;
-      bottom?: number;
-      left?: number;
-    };
-
 export interface ZoneCoord {
   zoneQ: number;
   zoneR: number;
@@ -48,16 +39,8 @@ export class Zone extends LayoutHex {
   private cacheTexture: RenderTexture | null = null;
   private readonly cacheSprite = new Sprite();
 
-  public constructor(
-    zone_id: ZoneId,
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    padding: LayoutPadding = 0,
-    options: ZoneOptions = {},
-  ) {
-    super(x, y, width, height, padding, options);
+  public constructor(zone_id: ZoneId, options: ZoneOptions = {}) {
+    super(options);
 
     const zone = client_zones[zone_id];
 
@@ -368,7 +351,7 @@ export class Zone extends LayoutHex {
       return;
     }
 
-    const tile = new Tile(0, 0, 0, 0, 0, {
+    const tile = new Tile({
       q,
       r,
       ...(cardId != null

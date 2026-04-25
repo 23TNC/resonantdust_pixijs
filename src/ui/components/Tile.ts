@@ -1,16 +1,7 @@
 import { Graphics, Text } from "pixi.js";
-import { LayoutRect } from "@/ui/layout";
+import { LayoutRect, type LayoutRectOptions } from "@/ui/layout";
 import { client_cards, type CardId } from "@/spacetime/Data";
 import { getDefinitionByPacked } from "@/data/definitions/CardDefinitions";
-
-type LayoutPadding =
-  | number
-  | {
-      top?: number;
-      right?: number;
-      bottom?: number;
-      left?: number;
-    };
 
 export interface TileStyle {
   fill?: number | string;
@@ -20,7 +11,7 @@ export interface TileStyle {
   labelFill?: number | string;
 }
 
-export interface TileOptions {
+export interface TileOptions extends LayoutRectOptions {
   q?: number;
   r?: number;
   card_id?: CardId;
@@ -45,18 +36,8 @@ export class Tile extends LayoutRect {
   private readonly labelTile = new Text({ text: "" });
   private style: Required<TileStyle>;
 
-  public constructor(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    padding: LayoutPadding = 0,
-    options: TileOptions = {},
-  ) {
-    super(x, y, width, height, padding, {
-      originX: options.originX,
-      originY: options.originY,
-    });
+  public constructor(options: TileOptions = {}) {
+    super(options);
 
     this.q = options.q ?? 0;
     this.r = options.r ?? 0;

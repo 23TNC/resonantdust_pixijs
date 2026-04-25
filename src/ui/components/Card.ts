@@ -1,9 +1,10 @@
 import { Container, Graphics, Sprite, Text, Texture } from "pixi.js";
-import { LayoutRect } from "@/ui/layout/LayoutRect";
+import { LayoutRect, type LayoutRectOptions } from "@/ui/layout/LayoutRect";
 import { getDefinitionByPacked } from "@/data/definitions/CardDefinitions";
 import { client_cards, type CardId } from "@/spacetime/Data";
 
-export interface CardOptions {
+export interface CardOptions extends LayoutRectOptions {
+  card_id: CardId;
   texture?: Texture;
   titleHeightRatio?: number;
   cornerRadius?: number;
@@ -25,22 +26,15 @@ export class Card extends LayoutRect {
   private spriteContainer = new Container();
   private sprite: Sprite | null = null;
 
-  public constructor(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    card_id: CardId,
-    options: CardOptions = {},
-  ) {
-    super(x, y, width, height, 0);
+  public constructor(options: CardOptions) {
+    super(options);
 
-    this.card_id = card_id;
+    this.card_id = options.card_id;
 
     const definition = this.getDefinition();
     const colors = normalizeCardColors(definition?.style?.color);
 
-    this.name = definition?.name ?? `Card ${card_id}`;
+    this.name = definition?.name ?? `Card ${this.card_id}`;
     this.bodyBackgroundColor = colors[0] ?? 0x1f2937;
     this.titleBackgroundColor = colors[1] ?? 0x111827;
     this.titleTextColor = colors[2] ?? 0xf9fafb;

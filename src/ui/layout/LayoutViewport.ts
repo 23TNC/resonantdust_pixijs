@@ -1,18 +1,7 @@
 import { Container, Point, Rectangle, ScissorMask } from "pixi.js";
-import { LayoutRect } from "./LayoutRect";
+import { LayoutRect, type LayoutRectOptions } from "./LayoutRect";
 
-type LayoutPadding =
-  | number
-  | {
-      top?: number;
-      right?: number;
-      bottom?: number;
-      left?: number;
-    };
-
-export interface LayoutViewportOptions {
-  originX?: number;
-  originY?: number;
+export interface LayoutViewportOptions extends LayoutRectOptions {
   scissorClipping?: boolean;
   cull?: boolean;
 }
@@ -33,18 +22,8 @@ export class LayoutViewport extends LayoutRect {
   private scissorClippingEnabled: boolean;
   private cullEnabled: boolean;
 
-  public constructor(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    padding: LayoutPadding = 0,
-    options: LayoutViewportOptions = {},
-  ) {
-    super(x, y, width, height, padding, {
-      originX: options.originX,
-      originY: options.originY,
-    });
+  public constructor(options: LayoutViewportOptions = {}) {
+    super(options);
 
     this.scissorClippingEnabled = options.scissorClipping ?? true;
     this.cullEnabled = options.cull ?? true;

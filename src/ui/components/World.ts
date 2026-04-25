@@ -1,5 +1,5 @@
 import { Point, Rectangle } from "pixi.js";
-import { LayoutViewport, LayoutViewportOptions } from "@/ui/layout";
+import { LayoutViewport, type LayoutViewportOptions } from "@/ui/layout";
 import {
   client_cards,
   packZone,
@@ -8,15 +8,6 @@ import {
   type ZoneId,
 } from "@/spacetime/Data";
 import { Zone } from "./Zone";
-
-export type LayoutPadding =
-  | number
-  | {
-      top?: number;
-      right?: number;
-      bottom?: number;
-      left?: number;
-    };
 
 export interface WorldOptions extends LayoutViewportOptions {
   hexSize?: number;
@@ -35,41 +26,28 @@ export class World extends LayoutViewport {
   private hexSize: number;
   private zoneSize: number;
 
-  public constructor(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    padding: LayoutPadding = 0,
-    options: WorldOptions = {},
-  ) {
-    super(x, y, width, height, padding, options);
+  public constructor(options: WorldOptions = {}) {
+    super(options);
 
     this.hexSize = Math.max(1, options.hexSize ?? 32);
     this.zoneSize = Math.max(1, Math.floor(options.zoneSize ?? 8));
   }
 
   public createZone(zone_id: ZoneId): Zone {
-    const { zone_q, zone_r } = unpackZone(zone_id);
     const bounds = this.getZoneLocalBounds();
 
-    return new Zone(
-      zone_id,
-      0,
-      0,
-      bounds.width,
-      bounds.height,
-      {
+    return new Zone(zone_id, {
+      width: bounds.width,
+      height: bounds.height,
+      padding: {
         top: -bounds.y,
         left: -bounds.x,
         right: 0,
         bottom: 0,
       },
-      {
-        hexSize: this.hexSize,
-        zoneSize: this.zoneSize,
-      },
-    );
+      hexSize: this.hexSize,
+      zoneSize: this.zoneSize,
+    });
   }
 
   public addZone(zone: Zone): Zone {

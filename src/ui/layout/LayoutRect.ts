@@ -17,6 +17,10 @@ export interface LayoutRectPaddingValues {
 }
 
 export interface LayoutRectOptions {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
   originX?: number;
   originY?: number;
   padding?: LayoutPadding;
@@ -45,27 +49,20 @@ export class LayoutRect extends Container {
 
   private debugGraphics: Graphics | null = null;
 
-  public constructor(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    padding: LayoutPadding = 0,
-    options: LayoutRectOptions = {},
-  ) {
+  public constructor(options: LayoutRectOptions = {}) {
     super();
 
     this.originX = options.originX ?? 0;
     this.originY = options.originY ?? 0;
 
-    this.position.set(x, y);
+    this.position.set(options.x ?? 0, options.y ?? 0);
     this.outerRect.x = 0;
     this.outerRect.y = 0;
-    this.outerRect.width = Math.max(0, width);
-    this.outerRect.height = Math.max(0, height);
+    this.outerRect.width = Math.max(0, options.width ?? 0);
+    this.outerRect.height = Math.max(0, options.height ?? 0);
     this.hitArea = this.innerRect;
 
-    this.setPaddingValues(options.padding ?? padding);
+    this.setPaddingValues(options.padding ?? 0);
     this.updateRects();
 
     if (options.debug) {

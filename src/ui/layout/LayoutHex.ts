@@ -1,43 +1,22 @@
 import { Point, Rectangle } from "pixi.js";
-import { LayoutRect } from "./LayoutRect";
+import { LayoutRect, type LayoutRectOptions } from "./LayoutRect";
 
 export interface HexCoord {
   q: number;
   r: number;
 }
 
-export interface LayoutHexOptions {
+export interface LayoutHexOptions extends LayoutRectOptions {
   hexSize?: number;
-  originX?: number;
-  originY?: number;
 }
-
-type LayoutPadding =
-  | number
-  | {
-      top?: number;
-      right?: number;
-      bottom?: number;
-      left?: number;
-    };
 
 export class LayoutHex extends LayoutRect {
   private hexSize: number;
   private childHexes = new Map<LayoutRect, HexCoord>();
   private childrenByHex = new Map<string, LayoutRect[]>();
 
-  public constructor(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    padding: LayoutPadding = 0,
-    options: LayoutHexOptions = {},
-  ) {
-    super(x, y, width, height, padding, {
-      originX: options.originX,
-      originY: options.originY,
-    });
+  public constructor(options: LayoutHexOptions = {}) {
+    super(options);
 
     this.hexSize = Math.max(1, options.hexSize ?? 32);
   }
