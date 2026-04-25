@@ -1,6 +1,7 @@
 import { Application } from "pixi.js";
-import { bootstrap as loadDebugData } from './spacetime/debug_data';
-import { GameView } from "./ui/game_view";
+import { setApp } from "./app";
+import { bootstrap as loadDebugData } from "./spacetime/debug_data";
+import { LoginScene, SceneManager } from "./scenes";
 
 async function startApp(): Promise<void> {
   const root = document.getElementById("app");
@@ -23,30 +24,24 @@ async function startApp(): Promise<void> {
   await app.init({
     antialias: true,
     background: 0x0b111b,
-    width: Math.max(1, root.clientWidth),
-    height: Math.max(1, root.clientHeight),
+    resizeTo: root,
   });
+
+  setApp(app);
 
   root.appendChild(app.canvas);
   app.canvas.style.display = "block";
 
   loadDebugData();
-  const viewedId: number = 1;
-  const gameView = new GameView({ app, viewedId });
 
-  const resizeApp = (): void => {
-    gameView.resize(root.clientWidth, root.clientHeight);
-  };
+  const sceneManager = new SceneManager(app.stage);
+  sceneManager.setScene(new LoginScene(sceneManager));
 
-  const resizeObserver = new ResizeObserver(() => {
-    resizeApp();
+  app.ticker.add((ticker) => {
+    sceneManager.update(ticker);
   });
 
-  resizeObserver.observe(root);
-  window.addEventListener("resize", resizeApp);
-
-  console.log("[respoiler] debug data loaded, rendering game view");
-  gameView.render();
+  console.log("[respoiler] debug data loaded, entering login scene");
 }
 
 void startApp();

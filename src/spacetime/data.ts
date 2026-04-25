@@ -2,7 +2,7 @@
 import {
   getCardDefinition as getLoadedCardDefinition,
   type CardDefinition,
-} from "../cards/definitions";
+} from "@/data/cards/definitions";
 
 export type CardId = number;
 export type PlayerId = number;
@@ -78,11 +78,21 @@ export const server_zones: Record<ZoneId, ServerZone> = {};
 export const client_cards: Record<CardId, ClientCard> = {};
 export const client_cards_by_zone: Record<ZoneId, Set<CardId>> = {};
 
+export let player_id = 0;
+export let player_name = "";
 export let observer_id = 0;
 export let viewed_id = 0;
 export let selected_card_id = 0;
 export let selected_zone = 0;
 export let selected_position = 0;
+
+export function setPlayerId(id: number): void {
+  player_id = id;
+}
+
+export function setPlayerName(name: string): void {
+  player_name = name;
+}
 
 export function setViewedId(id: number): void {
   viewed_id = id;

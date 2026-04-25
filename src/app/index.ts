@@ -1,0 +1,1 @@
+export { setApp, getApp } from "./AppContext";
