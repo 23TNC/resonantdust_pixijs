@@ -28,8 +28,8 @@ let initialized = false;
 
 export function unpackDefinition(definition: number): { card_type: number; definition_id: number } {
   return {
-    card_type: (definition >>> 16) & 0xffff,
-    definition_id: definition & 0xffff,
+    card_type: (definition >>> 12) & 0x0f,
+    definition_id: definition & 0x0fff,
   };
 }
 

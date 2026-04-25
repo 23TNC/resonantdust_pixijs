@@ -1,17 +1,16 @@
 import { Container, Graphics, Sprite, Text, Texture } from "pixi.js";
 import { LayoutRect } from "@/ui/layout/LayoutRect";
+import { getDefinitionByPacked } from "@/data/definitions/CardDefinitions";
+import { client_cards, type CardId } from "@/spacetime/Data";
 
 export interface CardOptions {
-  name: string;
-  titleBackgroundColor: number;
-  titleTextColor: number;
-  bodyBackgroundColor: number;
   texture?: Texture;
   titleHeightRatio?: number;
   cornerRadius?: number;
 }
 
 export class Card extends LayoutRect {
+  public readonly card_id: CardId;
   public name: string;
   public titleBackgroundColor: number;
   public titleTextColor: number;
@@ -31,14 +30,20 @@ export class Card extends LayoutRect {
     y: number,
     width: number,
     height: number,
-    options: CardOptions,
+    card_id: CardId,
+    options: CardOptions = {},
   ) {
     super(x, y, width, height, 0);
 
-    this.name = options.name;
-    this.titleBackgroundColor = options.titleBackgroundColor;
-    this.titleTextColor = options.titleTextColor;
-    this.bodyBackgroundColor = options.bodyBackgroundColor;
+    this.card_id = card_id;
+
+    const definition = this.getDefinition();
+    const colors = normalizeCardColors(definition?.style?.color);
+
+    this.name = definition?.name ?? `Card ${card_id}`;
+    this.bodyBackgroundColor = colors[0] ?? 0x1f2937;
+    this.titleBackgroundColor = colors[1] ?? 0x111827;
+    this.titleTextColor = colors[2] ?? 0xf9fafb;
     this.titleHeightRatio = options.titleHeightRatio ?? 0.22;
     this.cornerRadius = options.cornerRadius ?? 8;
 
@@ -70,6 +75,22 @@ export class Card extends LayoutRect {
     this.redrawCard();
   }
 
+  public refreshFromClientCard(): void {
+    const definition = this.getDefinition();
+    if (!definition) {
+      return;
+    }
+
+    const colors = normalizeCardColors(definition.style.color);
+
+    this.setName(definition.name);
+    this.setColors(
+      colors[1] ?? this.titleBackgroundColor,
+      colors[2] ?? this.titleTextColor,
+      colors[0] ?? this.bodyBackgroundColor,
+    );
+  }
+
   public setName(name: string): void {
     this.name = name;
     this.titleText.text = name;
@@ -86,6 +107,15 @@ export class Card extends LayoutRect {
     this.bodyBackgroundColor = bodyBackgroundColor;
     this.titleText.style.fill = titleTextColor;
     this.redrawCard();
+  }
+
+  private getDefinition() {
+    const card = client_cards[this.card_id];
+    if (!card) {
+      return undefined;
+    }
+
+    return getDefinitionByPacked(card.definition);
   }
 
   public setTexture(texture: Texture | null): void {
@@ -212,4 +242,29 @@ export class Card extends LayoutRect {
     this.sprite.x = 0;
     this.sprite.y = 0;
   }
+}
+
+function normalizeCardColors(colors: readonly string[] | undefined): number[] {
+  if (!colors) {
+    return [];
+  }
+
+  const normalized: number[] = [];
+  for (const rawColor of colors) {
+    const parsedColor = parseColorNumber(rawColor);
+    if (parsedColor != null) {
+      normalized.push(parsedColor);
+    }
+  }
+
+  return normalized;
+}
+
+function parseColorNumber(rawColor: string): number | null {
+  const normalizedHex = rawColor.trim().replace(/^#/, "");
+  if (!/^[0-9a-fA-F]{6}$/.test(normalizedHex)) {
+    return null;
+  }
+
+  return Number.parseInt(normalizedHex, 16);
 }

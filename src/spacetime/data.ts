@@ -1,8 +1,4 @@
 // pixijs/src/spacetime/data.ts
-import {
-  getCardDefinition as getLoadedCardDefinition,
-  type CardDefinition,
-} from "@/data/cards/definitions";
 
 export type CardId = number;
 export type PlayerId = number;
@@ -22,8 +18,6 @@ export interface ServerCard {
 export interface ClientCard extends ServerCard {
   card_type: number;
   definition_id: number;
-  colors: number[];
-
   stale: boolean;
   dirty: boolean;
   selected: boolean;
@@ -45,10 +39,13 @@ export interface ServerPlayer {
   player_id: PlayerId;
   name: string;
   soul_id: CardId;
+  zone: ZoneId;
+  position: PackedPosition;
 }
 
 export interface ServerAction {
   card_id: CardId;
+  soul_id: CardId;
   recipe: number;
   start: number;
   end: number;
@@ -70,10 +67,46 @@ export interface ServerZone {
   t7: bigint;
 }
 
+export type ZoneTileDefinitionIds = number[][];
+export type ZoneTileDefinitions = number[][];
+
+export interface ClientZone extends ServerZone {
+  zone_q: number;
+  zone_r: number;
+  z: number;
+  card_type: number;
+  category: number;
+  tile_definition_ids: ZoneTileDefinitionIds;
+  tile_definitions: ZoneTileDefinitions;
+  stale: boolean;
+  dirty: boolean;
+}
+
 export const server_cards: Record<CardId, ServerCard> = {};
 export const server_players: Record<PlayerId, ServerPlayer> = {};
 export const server_actions: Record<CardId, ServerAction> = {};
 export const server_zones: Record<ZoneId, ServerZone> = {};
+
+export const client_zones: Record<ZoneId, ClientZone> = {};
+
+export const ACTION_FLAG_STARTED = 1 << 0;
+export const ACTION_FLAG_COMPLETED = 1 << 1;
+
+export function isActionVisibleToSoul(action: ServerAction, soul_id: CardId): boolean {
+  return action.soul_id === 0 || action.soul_id === soul_id;
+}
+
+export function isActionRunning(action: ServerAction): boolean {
+  return (action.flags & ACTION_FLAG_STARTED) !== 0 && (action.flags & ACTION_FLAG_COMPLETED) === 0;
+}
+
+export function getActionProgress(action: ServerAction, now_seconds: number): number {
+  if ((action.flags & ACTION_FLAG_STARTED) === 0) return 0;
+  if ((action.flags & ACTION_FLAG_COMPLETED) !== 0) return 1;
+
+  const duration = Math.max(1, action.end - action.start);
+  return Math.min(1, Math.max(0, (now_seconds - action.start) / duration));
+}
 
 export const client_cards: Record<CardId, ClientCard> = {};
 export const client_cards_by_zone: Record<ZoneId, Set<CardId>> = {};
@@ -158,10 +191,6 @@ export function resolveZoneTileDefinition(zoneDefinition: number, tileDefinition
   return packDefinition(card_type, definition_id);
 }
 
-export function getCardDefinition(definition: number): CardDefinition | undefined {
-  return getLoadedCardDefinition(definition);
-}
-
 export function packZone(zone_q: number, zone_r: number, z: number): number {
   const q = zone_q & 0xfff;
   const r = zone_r & 0xfff;
@@ -233,19 +262,10 @@ export function buildClientCard(server: ServerCard, previous?: ClientCard): Clie
 
   const card_type = decodeCardType(server.definition);
   const definition_id = decodeDefinitionId(server.definition);
-  const definition = getCardDefinition(server.definition);
-  const colors = normalizeCardColors(definition?.style?.color);
-
-  if (card_type >= 1 && card_type <= 5 && colors[2] == null) {
-    colors[2] = 0x0b1a2a;
-  }
-
   return {
     ...server,
     card_type,
     definition_id,
-    colors,
-
     stale: false,
     dirty: true,
     selected: previous?.selected ?? false,
@@ -264,33 +284,71 @@ export function buildClientCard(server: ServerCard, previous?: ClientCard): Clie
   };
 }
 
-function normalizeCardColors(colors: Array<number | string> | undefined): number[] {
-  if (!colors) {
-    return [];
-  }
-
-  const normalized: number[] = [];
-  for (const rawColor of colors) {
-    const parsedColor = parseColorNumber(rawColor);
-    if (parsedColor != null) {
-      normalized.push(parsedColor);
-    }
-  }
-
-  return normalized;
+function getZoneRows(zone: ServerZone): bigint[] {
+  return [zone.t0, zone.t1, zone.t2, zone.t3, zone.t4, zone.t5, zone.t6, zone.t7];
 }
 
-function parseColorNumber(rawColor: number | string): number | null {
-  if (typeof rawColor === "number") {
-    return rawColor;
+export function unpackZoneTileDefinitionIds(zone: ServerZone): ZoneTileDefinitionIds {
+  return getZoneRows(zone).map((row) => {
+    const tile_definition_ids: number[] = [];
+
+    for (let local_q = 0; local_q < 8; local_q += 1) {
+      tile_definition_ids.push(Number((row >> BigInt(local_q * 8)) & 0xffn));
+    }
+
+    return tile_definition_ids;
+  });
+}
+
+export function buildClientZone(server: ServerZone, previous?: ClientZone): ClientZone {
+  const { zone_q, zone_r, z } = unpackZone(server.zone);
+  const card_type = decodeZoneCardType(server.definition);
+  const category = decodeZoneCategory(server.definition);
+  const tile_definition_ids = unpackZoneTileDefinitionIds(server);
+  const tile_definitions = tile_definition_ids.map((row) => (
+    row.map((tile_definition_id) => resolveZoneTileDefinition(server.definition, tile_definition_id))
+  ));
+
+  return {
+    ...server,
+    zone_q,
+    zone_r,
+    z,
+    card_type,
+    category,
+    tile_definition_ids,
+    tile_definitions,
+    stale: false,
+    dirty: previous ? true : true,
+  };
+}
+
+export function markClientZonesStale(): void {
+  for (const key in client_zones) {
+    client_zones[Number(key)].stale = true;
+  }
+}
+
+export function upsertClientZone(server: ServerZone): void {
+  const previous = client_zones[server.zone];
+  client_zones[server.zone] = buildClientZone(server, previous);
+}
+
+export function removeClientZone(zone: ZoneId): void {
+  delete client_zones[zone];
+}
+
+export function syncClientZonesFromServer(): void {
+  for (const key in server_zones) {
+    upsertClientZone(server_zones[Number(key)]);
   }
 
-  const normalizedHex = rawColor.trim().replace(/^#/, "");
-  if (!/^[0-9a-fA-F]{6}$/.test(normalizedHex)) {
-    return null;
+  for (const key in client_zones) {
+    const zone = Number(key);
+    if (!(zone in server_zones)) {
+      removeClientZone(zone);
+    }
   }
-
-  return Number.parseInt(normalizedHex, 16);
 }
 
 export function markClientCardsStale(): void {

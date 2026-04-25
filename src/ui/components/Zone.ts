@@ -2,6 +2,18 @@ import { Rectangle, RenderTexture, Sprite } from "pixi.js";
 import { getApp } from "@/app";
 import { HexCoord, LayoutHex, LayoutHexOptions } from "@/ui/layout";
 import { LayoutRect } from "@/ui/layout";
+import { Tile } from "@/ui/components/Tile";
+import {
+  client_cards,
+  client_cards_by_zone,
+  client_zones,
+  decodeZoneCardType,
+  packDefinition,
+  packPosition,
+  type CardId,
+  type PackedPosition,
+  type ZoneId,
+} from "@/spacetime/Data";
 
 type LayoutPadding =
   | number
@@ -20,9 +32,11 @@ export interface ZoneCoord {
 
 export interface ZoneOptions extends LayoutHexOptions {
   zoneSize?: number;
+  autoBuildTiles?: boolean;
 }
 
 export class Zone extends LayoutHex {
+  public readonly zone_id: ZoneId;
   public readonly zoneQ: number;
   public readonly zoneR: number;
   public readonly z: number;
@@ -35,9 +49,7 @@ export class Zone extends LayoutHex {
   private readonly cacheSprite = new Sprite();
 
   public constructor(
-    zoneQ: number,
-    zoneR: number,
-    z: number,
+    zone_id: ZoneId,
     x: number,
     y: number,
     width: number,
@@ -47,13 +59,49 @@ export class Zone extends LayoutHex {
   ) {
     super(x, y, width, height, padding, options);
 
-    this.zoneQ = zoneQ;
-    this.zoneR = zoneR;
-    this.z = z;
+    const zone = client_zones[zone_id];
+
+    this.zone_id = zone_id;
+    this.zoneQ = zone?.zone_q ?? 0;
+    this.zoneR = zone?.zone_r ?? 0;
+    this.z = zone?.z ?? 0;
     this.zoneSize = Math.max(1, Math.floor(options.zoneSize ?? 8));
 
     this.cacheSprite.eventMode = "none";
     this.addChild(this.cacheSprite);
+
+    if (options.autoBuildTiles ?? true) {
+      this.syncTilesFromClientZone();
+    }
+  }
+
+  public syncTilesFromClientZone(): void {
+    const zone = client_zones[this.zone_id];
+    if (!zone) {
+      return;
+    }
+
+    const cardType = decodeZoneCardType(zone.definition);
+    const dynamicTilesByPosition = this.collectDynamicTileCards(cardType);
+
+    for (let r = 0; r < this.zoneSize; r += 1) {
+      for (let q = 0; q < this.zoneSize; q += 1) {
+        const position = packPosition(q, r);
+        const cardId = dynamicTilesByPosition.get(position);
+        const definition = cardId != null
+          ? client_cards[cardId]?.definition
+          : this.getStaticTileDefinition(q, r);
+
+        if (definition == null) {
+          continue;
+        }
+
+        this.upsertTile(q, r, cardId, definition);
+      }
+    }
+
+    this.invalidateLayout();
+    this.invalidateRender();
   }
 
   public addTile<T extends LayoutRect>(tile: T, q: number, r: number): T {
@@ -206,11 +254,11 @@ export class Zone extends LayoutHex {
   }
 
   public getZoneKey(): string {
-    return Zone.zoneKey(this.zoneQ, this.zoneR, this.z);
+    return String(this.zone_id);
   }
 
-  public static zoneKey(zoneQ: number, zoneR: number, z: number): string {
-    return `${zoneQ},${zoneR},${z}`;
+  public static zoneKey(zone_id: ZoneId): string {
+    return String(zone_id);
   }
 
   protected override redraw(): void {
@@ -235,6 +283,101 @@ export class Zone extends LayoutHex {
     this.cacheSprite.texture = this.cacheTexture;
     this.cacheSprite.x = 0;
     this.cacheSprite.y = 0;
+  }
+
+  private collectDynamicTileCards(cardType: number): Map<PackedPosition, CardId> {
+    const result = new Map<PackedPosition, CardId>();
+    const cardIds = client_cards_by_zone[this.zone_id];
+
+    if (!cardIds) {
+      return result;
+    }
+
+    for (const cardId of cardIds) {
+      const card = client_cards[cardId];
+      if (!card || card.card_type !== cardType) {
+        continue;
+      }
+
+      result.set(card.position, cardId);
+    }
+
+    return result;
+  }
+
+  private getStaticTileDefinition(q: number, r: number): number | null {
+    const zone = client_zones[this.zone_id];
+    if (!zone) {
+      return null;
+    }
+
+    const tileDefinitions = zone.tile_definitions as number[][] | undefined;
+    if (tileDefinitions?.[r]?.[q] != null) {
+      return tileDefinitions[r][q];
+    }
+
+    const tileDefinitionIds = zone.tile_definition_ids as number[][] | undefined;
+    if (tileDefinitionIds?.[r]?.[q] != null) {
+      const cardType = decodeZoneCardType(zone.definition);
+      const category = zone.definition & 0x0f;
+      return packDefinition(cardType, ((category & 0x0f) << 8) | tileDefinitionIds[r][q]);
+    }
+
+    const row = this.getStaticTileRow(r);
+    if (row == null) {
+      return null;
+    }
+
+    const tileDefinitionId = Number((row >> BigInt(q * 8)) & 0xffn);
+    const cardType = decodeZoneCardType(zone.definition);
+    const category = zone.definition & 0x0f;
+
+    return packDefinition(cardType, ((category & 0x0f) << 8) | tileDefinitionId);
+  }
+
+  private getStaticTileRow(r: number): bigint | null {
+    const zone = client_zones[this.zone_id];
+    if (!zone) {
+      return null;
+    }
+
+    switch (r) {
+      case 0: return zone.t0;
+      case 1: return zone.t1;
+      case 2: return zone.t2;
+      case 3: return zone.t3;
+      case 4: return zone.t4;
+      case 5: return zone.t5;
+      case 6: return zone.t6;
+      case 7: return zone.t7;
+      default: return null;
+    }
+  }
+
+  private upsertTile(q: number, r: number, cardId: CardId | undefined, definition: number): void {
+    const existing = this.getTile(q, r);
+
+    if (existing instanceof Tile) {
+      if (cardId != null) {
+        existing.setCardId(cardId);
+      } else {
+        existing.setDefinitionId(definition);
+      }
+
+      existing.setTileCoord(q, r);
+      return;
+    }
+
+    const tile = new Tile(0, 0, 0, 0, 0, {
+      q,
+      r,
+      ...(cardId != null
+        ? { card_id: cardId }
+        : { definition_id: definition }),
+      showLabel: true,
+    });
+
+    this.addTile(tile, q, r);
   }
 
   private resizeCacheTexture(): void {

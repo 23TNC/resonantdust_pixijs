@@ -22,7 +22,7 @@ import {
   packPosition,
   packZone,
   packZoneDefinition,
-} from "./data";
+} from "./Data";
 
 function clearRecord<T>(record: Record<number, T>): void {
   for (const key in record) {
@@ -149,7 +149,13 @@ export function bootstrap(): void {
   ];
 
   const players: ServerPlayer[] = [
-    { player_id: 1, name: "player1", soul_id: 1 },
+    {
+      player_id: 1,
+      name: "player1",
+      soul_id: 1,
+      zone: world_zone,
+      position: packPosition(0, 0, WORLD, UNLINKED),
+    },
   ];
 
   const actions: ServerAction[] = [];

@@ -1,5 +1,12 @@
 import { Point, Rectangle } from "pixi.js";
 import { LayoutViewport, LayoutViewportOptions } from "@/ui/layout";
+import {
+  client_cards,
+  packZone,
+  unpackZone,
+  viewed_id,
+  type ZoneId,
+} from "@/spacetime/Data";
 import { Zone } from "./Zone";
 
 export type LayoutPadding =
@@ -24,7 +31,7 @@ export interface ZoneWorldRect {
 }
 
 export class World extends LayoutViewport {
-  private readonly zonesByKey = new Map<string, Zone>();
+  private readonly zonesById = new Map<ZoneId, Zone>();
   private hexSize: number;
   private zoneSize: number;
 
@@ -42,13 +49,12 @@ export class World extends LayoutViewport {
     this.zoneSize = Math.max(1, Math.floor(options.zoneSize ?? 8));
   }
 
-  public createZone(zoneQ: number, zoneR: number, z: number): Zone {
+  public createZone(zone_id: ZoneId): Zone {
+    const { zone_q, zone_r } = unpackZone(zone_id);
     const bounds = this.getZoneLocalBounds();
 
     return new Zone(
-      zoneQ,
-      zoneR,
-      z,
+      zone_id,
       0,
       0,
       bounds.width,
@@ -67,57 +73,84 @@ export class World extends LayoutViewport {
   }
 
   public addZone(zone: Zone): Zone {
-    const key = zone.getZoneKey();
-    const existing = this.zonesByKey.get(key);
+    const zone_id = zone.zone_id;
+    const existing = this.zonesById.get(zone_id);
 
     if (existing && existing !== zone) {
-      this.removeZone(existing.zoneQ, existing.zoneR, existing.z);
+      this.removeZone(zone_id);
     }
 
-    this.zonesByKey.set(key, zone);
+    this.zonesById.set(zone_id, zone);
 
-    const rect = this.getZoneWorldRect(zone.zoneQ, zone.zoneR);
+    const { zone_q, zone_r } = unpackZone(zone_id);
+    const rect = this.getZoneWorldRect(zone_q, zone_r);
     const added = this.addViewportChild(zone, rect.x, rect.y, rect.width, rect.height);
 
     this.invalidateLayout();
     return added;
   }
 
-  public ensureZone(zoneQ: number, zoneR: number, z: number): Zone {
-    const existing = this.getZone(zoneQ, zoneR, z);
+  public ensureZone(zone_id: ZoneId): Zone {
+    const existing = this.getZone(zone_id);
 
     if (existing) {
       return existing;
     }
 
-    return this.addZone(this.createZone(zoneQ, zoneR, z));
+    return this.addZone(this.createZone(zone_id));
   }
 
-  public removeZone(zoneQ: number, zoneR: number, z: number): Zone | null {
-    const key = Zone.zoneKey(zoneQ, zoneR, z);
-    const zone = this.zonesByKey.get(key);
+  public ensureViewportZone(): Zone | null {
+    const zone_id = this.getViewportZoneId();
+
+    if (zone_id == null) {
+      return null;
+    }
+
+    return this.ensureZone(zone_id);
+  }
+
+  public getViewportZoneId(): ZoneId | null {
+    const viewedCard = client_cards[viewed_id];
+    if (!viewedCard) {
+      return null;
+    }
+
+    const visibleRect = this.getVisibleWorldRect();
+    const centerX = visibleRect.x + visibleRect.width / 2;
+    const centerY = visibleRect.y + visibleRect.height / 2;
+    const { q: world_q, r: world_r } = this.pixelToWorldHex(centerX, centerY);
+
+    const zone_q = Math.floor(world_q / this.zoneSize);
+    const zone_r = Math.floor(world_r / this.zoneSize);
+
+    return packZone(zone_q, zone_r, viewedCard.z);
+  }
+
+  public removeZone(zone_id: ZoneId): Zone | null {
+    const zone = this.zonesById.get(zone_id);
 
     if (!zone) {
       return null;
     }
 
-    this.zonesByKey.delete(key);
+    this.zonesById.delete(zone_id);
     this.removeViewportChild(zone);
     this.invalidateLayout();
 
     return zone;
   }
 
-  public getZone(zoneQ: number, zoneR: number, z: number): Zone | null {
-    return this.zonesByKey.get(Zone.zoneKey(zoneQ, zoneR, z)) ?? null;
+  public getZone(zone_id: ZoneId): Zone | null {
+    return this.zonesById.get(zone_id) ?? null;
   }
 
-  public hasZone(zoneQ: number, zoneR: number, z: number): boolean {
-    return this.zonesByKey.has(Zone.zoneKey(zoneQ, zoneR, z));
+  public hasZone(zone_id: ZoneId): boolean {
+    return this.zonesById.has(zone_id);
   }
 
   public forEachZone(callback: (zone: Zone) => void): void {
-    for (const zone of this.zonesByKey.values()) {
+    for (const zone of this.zonesById.values()) {
       callback(zone);
     }
   }
@@ -131,7 +164,7 @@ export class World extends LayoutViewport {
 
     this.hexSize = nextHexSize;
 
-    for (const zone of this.zonesByKey.values()) {
+    for (const zone of this.zonesById.values()) {
       zone.setHexSize(this.hexSize);
       this.updateZoneWorldRect(zone);
       zone.markZoneLayoutDirty();
@@ -153,7 +186,7 @@ export class World extends LayoutViewport {
 
     this.zoneSize = nextZoneSize;
 
-    for (const zone of this.zonesByKey.values()) {
+    for (const zone of this.zonesById.values()) {
       this.updateZoneWorldRect(zone);
       zone.markZoneLayoutDirty();
     }
@@ -200,12 +233,14 @@ export class World extends LayoutViewport {
     const visibleRect = this.getVisibleWorldRect();
     const zones: Zone[] = [];
 
-    for (const zone of this.zonesByKey.values()) {
-      if (zone.z !== z) {
+    for (const zone of this.zonesById.values()) {
+      const { zone_q, zone_r, z: zone_z } = unpackZone(zone.zone_id);
+
+      if (zone_z !== z) {
         continue;
       }
 
-      const rect = this.getZoneWorldRect(zone.zoneQ, zone.zoneR);
+      const rect = this.getZoneWorldRect(zone_q, zone_r);
 
       if (this.rectsIntersect(rect, visibleRect)) {
         zones.push(zone);
@@ -216,7 +251,7 @@ export class World extends LayoutViewport {
   }
 
   public markZoneDirty(zone: Zone): void {
-    if (!this.zonesByKey.has(zone.getZoneKey())) {
+    if (!this.zonesById.has(zone.zone_id)) {
       return;
     }
 
@@ -224,7 +259,7 @@ export class World extends LayoutViewport {
   }
 
   public markZoneLayoutDirty(zone: Zone): void {
-    if (!this.zonesByKey.has(zone.getZoneKey())) {
+    if (!this.zonesById.has(zone.zone_id)) {
       return;
     }
 
@@ -238,10 +273,14 @@ export class World extends LayoutViewport {
       center.x - this.innerRect.width / 2,
       center.y - this.innerRect.height / 2,
     );
+
+    this.ensureViewportZone();
   }
 
   protected override layoutChildren(): void {
-    for (const zone of this.zonesByKey.values()) {
+    this.ensureViewportZone();
+
+    for (const zone of this.zonesById.values()) {
       this.updateZoneWorldRect(zone);
     }
 
@@ -249,7 +288,8 @@ export class World extends LayoutViewport {
   }
 
   private updateZoneWorldRect(zone: Zone): void {
-    const rect = this.getZoneWorldRect(zone.zoneQ, zone.zoneR);
+    const { zone_q, zone_r } = unpackZone(zone.zone_id);
+    const rect = this.getZoneWorldRect(zone_q, zone_r);
     this.setChildWorldRect(zone, rect.x, rect.y, rect.width, rect.height);
   }
 

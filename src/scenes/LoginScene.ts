@@ -3,7 +3,7 @@ import type { Scene } from './SceneManager';
 import type { SceneManager } from './SceneManager';
 import { GameScene } from './GameScene';
 
-import { setPlayerName, setPlayerId } from '@/spacetime/data'; // adjust path if needed
+import { setPlayerName, setPlayerId } from '@/spacetime/Data'; // adjust path if needed
 
 export class LoginScene implements Scene {
   public readonly view = new Container();
