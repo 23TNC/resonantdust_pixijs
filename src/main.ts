@@ -34,7 +34,7 @@ async function startApp(): Promise<void> {
 
   loadDebugData();
 
-  const sceneManager = new SceneManager(app.stage);
+  const sceneManager = new SceneManager();
   sceneManager.setScene(new LoginScene(sceneManager));
 
   app.ticker.add((ticker) => {

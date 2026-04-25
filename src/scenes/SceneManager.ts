@@ -1,4 +1,5 @@
-import { Container, Ticker } from 'pixi.js';
+import { Container, Ticker } from "pixi.js";
+import { getApp } from "@/app/AppContext";
 
 export interface Scene {
   readonly view: Container;
@@ -10,10 +11,11 @@ export interface Scene {
 
 export class SceneManager {
   private currentScene: Scene | null = null;
+  private readonly stage: Container;
 
-  public constructor(
-    private readonly stage: Container,
-  ) {}
+  public constructor() {
+    this.stage = getApp().stage;
+  }
 
   public setScene(scene: Scene): void {
     if (this.currentScene) {

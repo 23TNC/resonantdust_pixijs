@@ -1,6 +1,6 @@
 // pixijs/src/ui/components/Panel.ts
 import { Graphics } from "pixi.js";
-import { LayoutRect, type LayoutRectOptions } from "@/ui/layout/LayoutRect";
+import { LayoutRect, type LayoutRectOptions } from "@/ui/layout";
 
 export interface PanelOptions extends LayoutRectOptions {
   backgroundColor?: number;
@@ -21,7 +21,6 @@ export class Panel extends LayoutRect {
 
   public constructor(options: PanelOptions = {}) {
     super(options);
-
     this.backgroundColor = options.backgroundColor ?? 0x111111;
     this.borderColor = options.borderColor ?? 0x333333;
     this.borderWidth = options.borderWidth ?? 1;

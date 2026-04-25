@@ -243,17 +243,17 @@ export class LayoutGroup extends LayoutRect {
   }
 }
 
-export interface LayoutRowOptions extends Omit<LayoutGroupOptions, "direction"> {}
-export interface LayoutColumnOptions extends Omit<LayoutGroupOptions, "direction"> {}
+export interface LayoutHorizontalOptions extends Omit<LayoutGroupOptions, "direction"> {}
+export interface LayoutVerticalOptions extends Omit<LayoutGroupOptions, "direction"> {}
 
-export class LayoutRow extends LayoutGroup {
-  public constructor(options: LayoutRowOptions = {}) {
+export class LayoutHorizontal extends LayoutGroup {
+  public constructor(options: LayoutHorizontalOptions = {}) {
     super({ ...options, direction: "row" });
   }
 }
 
-export class LayoutColumn extends LayoutGroup {
-  public constructor(options: LayoutColumnOptions = {}) {
+export class LayoutVertical extends LayoutGroup {
+  public constructor(options: LayoutVerticalOptions = {}) {
     super({ ...options, direction: "column" });
   }
 }

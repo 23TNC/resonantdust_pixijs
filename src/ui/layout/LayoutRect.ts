@@ -154,7 +154,7 @@ export class LayoutRect extends Container {
     if (!this.renderDirty) {
       return;
     }
-
+    console.log("render")
     this.redraw();
     this.redrawDebug();
     this.renderDirty = false;

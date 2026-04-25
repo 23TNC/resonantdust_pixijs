@@ -125,69 +125,13 @@ export class LayoutRoot extends LayoutRect {
     return new Rectangle(0, 0, this.screenWidth, this.screenHeight);
   }
 
-  public updateLayoutTree(): void {
-    this.updateLayoutRecursive(this);
-  }
-
-  public renderLayoutTree(): void {
-    this.renderRecursive(this);
-  }
-
   public updateTree(): void {
-    this.updateLayoutTree();
-    this.renderLayoutTree();
-  }
-
-  public override hitTestLayout(x: number, y: number): LayoutRect | null {
-    return this.hitTestRecursive(this, x, y);
+    this.updateLayout();
+    this.renderLayout();
   }
 
   public override destroy(options?: Parameters<LayoutRect["destroy"]>[0]): void {
     this.unbindAppResize();
     super.destroy(options);
-  }
-
-  private updateLayoutRecursive(item: LayoutRect): void {
-    item.updateLayout?.();
-
-    const children = item.children.filter(
-      (child): child is LayoutRect => child instanceof LayoutRect,
-    );
-
-    for (const child of children) {
-      this.updateLayoutRecursive(child);
-    }
-  }
-
-  private renderRecursive(item: LayoutRect): void {
-    item.renderLayout?.();
-
-    const children = item.children.filter(
-      (child): child is LayoutRect => child instanceof LayoutRect,
-    );
-
-    for (const child of children) {
-      this.renderRecursive(child);
-    }
-  }
-
-  private hitTestRecursive(item: LayoutRect, x: number, y: number): LayoutRect | null {
-    if (!item.containsGlobalPoint?.(x, y)) {
-      return null;
-    }
-
-    const children = item.children.filter(
-      (child): child is LayoutRect => child instanceof LayoutRect,
-    );
-
-    for (let i = children.length - 1; i >= 0; i--) {
-      const hit = this.hitTestRecursive(children[i], x, y);
-
-      if (hit) {
-        return hit;
-      }
-    }
-
-    return item;
   }
 }

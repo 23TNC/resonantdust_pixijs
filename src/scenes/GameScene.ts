@@ -1,6 +1,7 @@
-import { Ticker } from 'pixi.js';
-import type { Scene } from './SceneManager';
-import { GameView } from '@/ui/components';
+import { Ticker } from "pixi.js";
+import { getApp } from "@/app/AppContext";
+import type { Scene } from "./SceneManager";
+import { GameView } from "@/ui/components";
 
 export interface GameSceneOptions {
   viewId: number;
@@ -17,6 +18,10 @@ export class GameScene implements Scene {
       width: options.width,
       height: options.height,
     });
+
+    const app = getApp();
+    app.stage.addChild(this.view);
+    app.ticker.add(this.update, this);
   }
 
   public update(_ticker: Ticker): void {
@@ -24,6 +29,14 @@ export class GameScene implements Scene {
   }
 
   public destroy(): void {
+    const app = getApp();
+
+    app.ticker.remove(this.update, this);
+
+    if (this.view.parent) {
+      this.view.parent.removeChild(this.view);
+    }
+
     this.view.destroy({ children: true });
   }
 }
