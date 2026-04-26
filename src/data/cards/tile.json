@@ -4,7 +4,7 @@
     {
       "name": "Plains",
       "style": {
-        "color": [ "#799E50", "#7fb377", "#0b160b" ]
+        "color": [ "#799E50", "#0b160b", "#0b160b" ]
       }, 
       "vars": {
         "cost": 2

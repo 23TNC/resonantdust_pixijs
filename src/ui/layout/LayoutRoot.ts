@@ -44,6 +44,8 @@ export class LayoutRoot extends LayoutRect {
       this.items.push(item);
     }
 
+    item.setParentLayout(this);
+
     if (item.parent !== this) {
       this.addChild(item);
     }
@@ -62,6 +64,7 @@ export class LayoutRoot extends LayoutRect {
     }
 
     this.items.splice(index, 1);
+    item.setParentLayout(null);
 
     if (item.parent === this) {
       this.removeChild(item);
@@ -73,10 +76,21 @@ export class LayoutRoot extends LayoutRect {
     return item;
   }
 
-  public clearLayoutItems(): void {
+  public destroyLayoutItem(item: LayoutRect): void {
+    this.removeLayoutItem(item);
+    item.destroy({ children: true });
+  }
+
+  public clearLayoutItems(options: { destroy?: boolean } = {}): void {
     for (const item of this.items) {
+      item.setParentLayout(null);
+
       if (item.parent === this) {
         this.removeChild(item);
+      }
+
+      if (options.destroy) {
+        item.destroy({ children: true });
       }
     }
 
@@ -125,9 +139,15 @@ export class LayoutRoot extends LayoutRect {
     return new Rectangle(0, 0, this.screenWidth, this.screenHeight);
   }
 
-  public updateTree(): void {
-    this.updateLayout();
-    this.renderLayout();
+  protected override layoutChildren(): void {
+    for (const item of this.items) {
+      item.setLayout(
+        this.innerRect.x,
+        this.innerRect.y,
+        this.innerRect.width,
+        this.innerRect.height,
+      );
+    }
   }
 
   public override destroy(options?: Parameters<LayoutRect["destroy"]>[0]): void {

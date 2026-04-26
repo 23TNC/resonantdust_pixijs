@@ -31,6 +31,12 @@ export class Panel extends LayoutRect {
     this.invalidateRender();
   }
 
+  protected override layoutChildren(): void {
+    for (const child of this.getLayoutChildren()) {
+      child.setLayout(this.innerRect.x, this.innerRect.y, this.innerRect.width, this.innerRect.height);
+    }
+  }
+
   public override redraw(): void {
     this.background.clear();
 

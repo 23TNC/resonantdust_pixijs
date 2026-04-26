@@ -25,7 +25,8 @@ export class GameScene implements Scene {
   }
 
   public update(_ticker: Ticker): void {
-    this.view.updateTree();
+    this.view.updateLayout();
+    this.view.renderLayout();
   }
 
   public destroy(): void {

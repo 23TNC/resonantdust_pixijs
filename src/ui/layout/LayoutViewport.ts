@@ -25,8 +25,8 @@ export class LayoutViewport extends LayoutRect {
   public constructor(options: LayoutViewportOptions = {}) {
     super(options);
 
-    this.scissorClippingEnabled = options.scissorClipping ?? true;
-    this.cullEnabled = options.cull ?? true;
+    this.scissorClippingEnabled = options.scissorClipping ?? false;
+    this.cullEnabled = options.cull ?? false;
     this.scissorClipArea = new Container();
     this.scissorClipArea.renderable = false;
     this.scissorClipMask = new ScissorMask(this.scissorClipArea);
@@ -66,6 +66,16 @@ export class LayoutViewport extends LayoutRect {
     this.childRects.delete(child);
     this.invalidateLayout();
     return this.removeLayoutChild(child);
+  }
+
+  public destroyLayoutItem(child: LayoutRect): void {
+    this.removeLayoutItem(child);
+    child.destroy({ children: true });
+  }
+
+  public destroyViewportChild(child: LayoutRect): void {
+    this.removeViewportChild(child);
+    child.destroy({ children: true });
   }
 
   public setChildWorldRect(
@@ -194,11 +204,12 @@ export class LayoutViewport extends LayoutRect {
         rect.height,
       );
     }
-
-    this.layoutDirty = false;
   }
 
   private updateScissorClipArea(): void {
+    if (!this.scissorClipArea) {
+      return;
+    }
     this.scissorClipArea.position.set(this.innerRect.x, this.innerRect.y);
     this.scissorClipArea.boundsArea = new Rectangle(
       0,

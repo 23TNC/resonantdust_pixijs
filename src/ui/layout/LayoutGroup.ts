@@ -60,6 +60,11 @@ export class LayoutGroup extends LayoutRect {
     return this.removeLayoutChild(child);
   }
 
+  public destroyLayoutItem(child: LayoutRect): void {
+    this.removeLayoutItem(child);
+    child.destroy({ children: true });
+  }
+
   public setChildLayoutOptions(
     child: LayoutRect,
     options: LayoutChildOptions,
@@ -104,7 +109,6 @@ export class LayoutGroup extends LayoutRect {
     this.childRanges = [];
 
     if (children.length === 0) {
-      this.layoutDirty = false;
       return;
     }
 
@@ -140,8 +144,6 @@ export class LayoutGroup extends LayoutRect {
 
       cursor += childMainSize + this.gap;
     }
-
-    this.layoutDirty = false;
   }
 
   private findChildAtMainAxis(main: number): LayoutRect | null {

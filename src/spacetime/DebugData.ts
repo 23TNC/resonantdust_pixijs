@@ -3,7 +3,6 @@
 import {
   type CardId,
   type PlayerId,
-  type ZoneId,
   type ServerCard,
   type ServerPlayer,
   type ServerAction,
@@ -18,6 +17,7 @@ import {
   setObserverId,
   clearSelectedState,
   upsertClientCard,
+  upsertClientZone,
   packDefinition,
   packPosition,
   packZone,
@@ -212,7 +212,7 @@ export function bootstrap(): void {
   }
 
   for (const zone of zones) {
-    server_zones[zone.zone as ZoneId] = zone;
+    upsertClientZone(zone);
   }
 
   for (const key in server_cards) {

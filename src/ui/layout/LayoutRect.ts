@@ -72,7 +72,13 @@ export class LayoutRect extends Container {
 
   public setLayout(x: number, y: number, width: number, height: number): void {
     this.position.set(x, y);
-    this.setOuterRect(0, 0, width, height);
+    this.outerRect.x = 0;
+    this.outerRect.y = 0;
+    this.outerRect.width = Math.max(0, width);
+    this.outerRect.height = Math.max(0, height);
+    this.updateRects();
+    this.layoutDirty = true;
+    this.invalidateRender();
   }
 
   public setOuterRect(x: number, y: number, width: number, height: number): void {
@@ -148,23 +154,32 @@ export class LayoutRect extends Container {
 
     this.layoutChildren();
     this.layoutDirty = false;
+
+    for (const child of this.getLayoutChildren()) {
+      child.updateLayout();
+    }
   }
 
   public renderLayout(): void {
     if (!this.renderDirty) {
       return;
     }
-    console.log("render")
+
+    for (const child of this.getLayoutChildren()) {
+      if (child.visible) {
+        child.renderLayout();
+      }
+    }
+
     this.redraw();
     this.redrawDebug();
     this.renderDirty = false;
+    
   }
 
   protected redraw(): void {}
 
-  protected layoutChildren(): void {
-    // Subclasses arrange layout children here.
-  }
+  protected layoutChildren(): void {}
 
   public addLayoutChild<T extends LayoutRect>(child: T): T {
     child.parentLayout = this;
@@ -190,8 +205,17 @@ export class LayoutRect extends Container {
     return child;
   }
 
+  public destroyLayoutChild(child: LayoutRect): void {
+    this.removeLayoutChild(child);
+    child.destroy({ children: true });
+  }
+
   public getParentLayout(): LayoutRect | null {
     return this.parentLayout;
+  }
+
+  public setParentLayout(parent: LayoutRect | null): void {
+    this.parentLayout = parent;
   }
 
   public getLayoutAncestors(): LayoutRect[] {

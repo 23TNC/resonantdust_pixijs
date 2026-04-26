@@ -1,7 +1,7 @@
-import { Ticker } from "pixi.js";
-import { LayoutRoot, type LayoutPadding, type LayoutRootOptions } from "@/ui/layout";
+import { LayoutRect, LayoutRoot, type LayoutPadding, type LayoutRootOptions } from "@/ui/layout";
 import { LayoutHorizontal, LayoutVertical } from "@/ui/layout";
 import { Panel } from "@/ui/components/Panel";
+import { World } from "@/ui/components/World";
 
 export interface GameViewOptions extends LayoutRootOptions {
   viewId: number;
@@ -49,6 +49,7 @@ export class GameView extends LayoutRoot {
   public readonly leftBottomPanel: Panel;
 
   public readonly centerTopPanel: Panel;
+  public readonly world: World;
   public readonly centerBottomPanel: Panel;
 
   public readonly rightTopPanel: Panel;
@@ -57,7 +58,7 @@ export class GameView extends LayoutRoot {
   private readonly titleBarSize: number;
 
   public constructor(options: GameViewOptions) {
-    super(options);
+    super({ padding: 8, ...options });
 
     this.viewId = options.viewId;
 
@@ -91,6 +92,7 @@ export class GameView extends LayoutRoot {
     this.leftBottomPanel = this.leftColumn.addLayoutItem(new Panel(), { weight: 1 });
     
     this.centerTopPanel = this.centerColumn.addLayoutItem(new Panel(), { weight: 1 });
+    this.world = this.centerTopPanel.addLayoutChild(new World());
     this.centerBottomPanel = this.centerColumn.addLayoutItem(new Panel(), { weight: 1 });
 
     this.rightTopPanel = this.rightColumn.addLayoutItem(new Panel(), { weight: 1 });
@@ -177,13 +179,9 @@ export class GameView extends LayoutRoot {
     });
   }
 
-  public update(_ticker: Ticker): void {
-    this.updateTree();
-  }
-
   private setWeight(
     parent: LayoutHorizontal | LayoutVertical,
-    child: LayoutHorizontal | LayoutVertical | Panel,
+    child: LayoutRect,
     weight: number | undefined,
   ): void {
     if (weight === undefined) {

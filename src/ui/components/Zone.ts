@@ -1,5 +1,4 @@
-import { Rectangle, RenderTexture, Sprite } from "pixi.js";
-import { getApp } from "@/app";
+import { Rectangle } from "pixi.js";
 import { HexCoord, LayoutHex, LayoutHexOptions } from "@/ui/layout";
 import { LayoutRect } from "@/ui/layout";
 import { Tile } from "@/ui/components/Tile";
@@ -36,9 +35,6 @@ export class Zone extends LayoutHex {
   private readonly tilesByLocalHex = new Map<string, LayoutRect>();
   private readonly localHexByTile = new WeakMap<LayoutRect, string>();
 
-  private cacheTexture: RenderTexture | null = null;
-  private readonly cacheSprite = new Sprite();
-
   public constructor(zone_id: ZoneId, options: ZoneOptions = {}) {
     super(options);
 
@@ -49,9 +45,6 @@ export class Zone extends LayoutHex {
     this.zoneR = zone?.zone_r ?? 0;
     this.z = zone?.z ?? 0;
     this.zoneSize = Math.max(1, Math.floor(options.zoneSize ?? 8));
-
-    this.cacheSprite.eventMode = "none";
-    this.addChild(this.cacheSprite);
 
     if (options.autoBuildTiles ?? true) {
       this.syncTilesFromClientZone();
@@ -84,7 +77,6 @@ export class Zone extends LayoutHex {
     }
 
     this.invalidateLayout();
-    this.invalidateRender();
   }
 
   public addTile<T extends LayoutRect>(tile: T, q: number, r: number): T {
@@ -156,7 +148,6 @@ export class Zone extends LayoutHex {
     if (!this.localHexByTile.has(tile)) {
       return;
     }
-
     this.invalidateRender();
   }
 
@@ -164,7 +155,6 @@ export class Zone extends LayoutHex {
     if (!this.localHexByTile.has(tile)) {
       return;
     }
-
     this.invalidateLayout();
   }
 
@@ -174,18 +164,6 @@ export class Zone extends LayoutHex {
 
   public markZoneLayoutDirty(): void {
     this.invalidateLayout();
-  }
-
-  public override updateRects(): void {
-    super.updateRects();
-    this.resizeCacheTexture();
-    this.invalidateRender();
-  }
-
-  public override destroy(options?: Parameters<LayoutHex["destroy"]>[0]): void {
-    this.cacheTexture?.destroy(true);
-    this.cacheTexture = null;
-    super.destroy(options);
   }
 
   public localToWorldHex(q: number, r: number): HexCoord {
@@ -242,30 +220,6 @@ export class Zone extends LayoutHex {
 
   public static zoneKey(zone_id: ZoneId): string {
     return String(zone_id);
-  }
-
-  protected override redraw(): void {
-    this.resizeCacheTexture();
-
-    if (!this.cacheTexture) {
-      return;
-    }
-
-    const app = getApp();
-    const previousVisible = this.cacheSprite.visible;
-
-    this.cacheSprite.visible = false;
-
-    app.renderer.render({
-      container: this,
-      target: this.cacheTexture,
-      clear: true,
-    });
-
-    this.cacheSprite.visible = previousVisible;
-    this.cacheSprite.texture = this.cacheTexture;
-    this.cacheSprite.x = 0;
-    this.cacheSprite.y = 0;
   }
 
   private collectDynamicTileCards(cardType: number): Map<PackedPosition, CardId> {
@@ -361,23 +315,6 @@ export class Zone extends LayoutHex {
     });
 
     this.addTile(tile, q, r);
-  }
-
-  private resizeCacheTexture(): void {
-    const width = Math.max(1, Math.ceil(this.outerRect.width));
-    const height = Math.max(1, Math.ceil(this.outerRect.height));
-
-    if (
-      this.cacheTexture &&
-      this.cacheTexture.width === width &&
-      this.cacheTexture.height === height
-    ) {
-      return;
-    }
-
-    this.cacheTexture?.destroy(true);
-    this.cacheTexture = RenderTexture.create({ width, height });
-    this.cacheSprite.texture = this.cacheTexture;
   }
 
   private assertLocalHex(q: number, r: number): void {

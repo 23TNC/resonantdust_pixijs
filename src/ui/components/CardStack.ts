@@ -1,5 +1,5 @@
 import { Card } from "./Card"
-import { LayoutRect } from "@/ui/layout/LayoutRect";
+import { LayoutRect } from "@/ui/layout";
 
 export class CardStack extends LayoutRect {
   private cards: Card[] = [];
@@ -30,7 +30,5 @@ export class CardStack extends LayoutRect {
         height
       );
     }
-
-    this.layoutDirty = false;
   }
 }

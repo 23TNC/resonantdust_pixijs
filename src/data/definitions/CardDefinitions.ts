@@ -39,7 +39,7 @@ export function getDefinition(card_type: number, definition_id: number): CardDef
 
 export function getDefinitionByPacked(definition: number): CardDefinitionEntry | undefined {
   const { card_type, definition_id } = unpackDefinition(definition);
-  return getDefinition(card_type, definition_id);
+  return getDefinition(card_type, definition_id-1);
 }
 
 export function getCardDefinitions(): ReadonlyMap<number, ReadonlyMap<number, CardDefinitionEntry>> {
@@ -47,16 +47,20 @@ export function getCardDefinitions(): ReadonlyMap<number, ReadonlyMap<number, Ca
 }
 
 export async function bootstrapCardDefinitions(): Promise<void> {
+  
   if (initialized) {
     return;
   }
-
+  
   const modules = import.meta.glob<CardDefinitionFile>("../cards/*.json", {
     eager: true,
     import: "default",
   });
 
   for (const fileData of Object.values(modules)) {
+    if (!fileData.cards) {
+      continue;
+    }
     let typeMap = cardDefinitions.get(fileData.card_type);
 
     if (!typeMap) {

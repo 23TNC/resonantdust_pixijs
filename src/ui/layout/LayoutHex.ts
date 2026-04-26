@@ -42,6 +42,16 @@ export class LayoutHex extends LayoutRect {
     return this.removeLayoutChild(child);
   }
 
+  public destroyLayoutItem(child: LayoutRect): void {
+    this.removeLayoutItem(child);
+    child.destroy({ children: true });
+  }
+
+  public destroyHexChild(child: LayoutRect): void {
+    this.removeHexChild(child);
+    child.destroy({ children: true });
+  }
+
   public setChildHex(child: LayoutRect, q: number, r: number): void {
     if (!this.childHexes.has(child)) {
       return;
@@ -139,8 +149,6 @@ export class LayoutHex extends LayoutRect {
       child.setLayout(bounds.x, bounds.y, bounds.width, bounds.height);
       this.cacheChildByHex(child, hex.q, hex.r);
     }
-
-    this.layoutDirty = false;
   }
 
   protected roundHex(q: number, r: number): HexCoord {

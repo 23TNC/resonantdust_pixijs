@@ -27,7 +27,7 @@ export class World extends LayoutViewport {
   private zoneSize: number;
 
   public constructor(options: WorldOptions = {}) {
-    super(options);
+    super({ scissorClipping: true, ...options });
 
     this.hexSize = Math.max(1, options.hexSize ?? 32);
     this.zoneSize = Math.max(1, Math.floor(options.zoneSize ?? 8));

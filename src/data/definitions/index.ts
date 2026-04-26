@@ -4,7 +4,7 @@ export {
   getDefinition,
   getDefinitionByPacked,
   unpackDefinition,
-} from "./card_definitions";
+} from "./CardDefinitions";
 
 export type {
   CardDefinitionEntry,
@@ -15,4 +15,4 @@ export type {
   CardDefinitionTypeMap,
   CardDefinitionVarValue,
   CardDefinitionVars,
-} from "./card_definitions";
+} from "./CardDefinitions";
