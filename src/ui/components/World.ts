@@ -202,7 +202,9 @@ export class World extends LayoutViewport {
    *   3. Walk overlay candidates registered at that hex.
    *   4. Fall through to the Zone at that hex → Tile → this.
    */
-  override hitTestLayout(globalX: number, globalY: number): LayoutObject | null {
+  override hitTestLayout(globalX: number, globalY: number, ignore?: ReadonlySet<LayoutObject>): LayoutObject | null {
+    if (ignore?.has(this)) return null;
+
     const local = this.toLocal(new Point(globalX, globalY));
     if (!this.innerRect.contains(local.x, local.y)) return null;
 
@@ -223,7 +225,7 @@ export class World extends LayoutViewport {
     if (candidates?.size) {
       for (const overlay of candidates) {
         if (!overlay.visible) continue;
-        const hit = overlay.hitTestLayout(globalX, globalY);
+        const hit = overlay.hitTestLayout(globalX, globalY, ignore);
         if (hit) return hit;
       }
     }
@@ -234,7 +236,7 @@ export class World extends LayoutViewport {
     const zone_id = packZone(zone_q, zone_r, this._z);
     const zone    = this._zones.get(zone_id);
     if (zone?.visible) {
-      return zone.hitTestLayout(globalX, globalY) ?? this;
+      return zone.hitTestLayout(globalX, globalY, ignore) ?? this;
     }
 
     return this;

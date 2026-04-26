@@ -181,8 +181,12 @@ export class LayoutHex extends LayoutObject {
    * O(1) hit test: convert the cursor to hex coords, then look up the
    * registered child.  Subclasses may override to check additional layers
    * (e.g. overlay children) before falling through to the tile.
+   *
+   * Nodes in `ignore` are skipped (see LayoutObject.hitTestLayout).
    */
-  override hitTestLayout(globalX: number, globalY: number): LayoutObject | null {
+  override hitTestLayout(globalX: number, globalY: number, ignore?: ReadonlySet<LayoutObject>): LayoutObject | null {
+    if (ignore?.has(this)) return null;
+
     const local = this.toLocal(new Point(globalX, globalY));
     if (!this.innerRect.contains(local.x, local.y)) return null;
 
@@ -193,7 +197,7 @@ export class LayoutHex extends LayoutObject {
 
     const child = this._positionLookup.get(posKey(hex.q, hex.r));
     if (child?.visible) {
-      return child.hitTestLayout(globalX, globalY) ?? this;
+      return child.hitTestLayout(globalX, globalY, ignore) ?? this;
     }
 
     return this;

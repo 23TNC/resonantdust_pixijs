@@ -144,15 +144,21 @@ export class LayoutObject extends Container {
   /**
    * Returns the deepest visible layout node whose innerRect contains the point,
    * checking children from highest depth to lowest before falling back to self.
+   *
+   * Nodes present in `ignore` are skipped entirely — the node and its whole
+   * subtree are treated as if they do not exist.  Pass undefined (the default)
+   * to perform a normal unrestricted hit test.
    */
-  hitTestLayout(globalX: number, globalY: number): LayoutObject | null {
+  hitTestLayout(globalX: number, globalY: number, ignore?: ReadonlySet<LayoutObject>): LayoutObject | null {
+    if (ignore?.has(this)) return null;
+
     const local = this.toLocal(new Point(globalX, globalY));
     if (!this.innerRect.contains(local.x, local.y)) return null;
 
     for (let i = this._layoutChildren.length - 1; i >= 0; i--) {
       const { object } = this._layoutChildren[i];
       if (!object.visible) continue;
-      const hit = object.hitTestLayout(globalX, globalY);
+      const hit = object.hitTestLayout(globalX, globalY, ignore);
       if (hit) return hit;
     }
 

@@ -3,8 +3,10 @@ import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject
 import { Card } from "./Card";
 
 export interface CardStackOptions extends LayoutObjectOptions {
-  card_id?:     CardId;
-  titleHeight?: number;
+  card_id?:          CardId;
+  titleHeight?:      number;
+  /** When true, dragging/returning cards are included in the chain. Default: false. */
+  ignoreDragState?:  boolean;
 }
 
 // Prevents an infinite loop if the server ever sends a malformed link cycle.
@@ -38,8 +40,9 @@ const MAX_STACK_DEPTH = 64;
  * Call invalidateLayout() after any data change that could alter the chain.
  */
 export class CardStack extends LayoutObject {
-  private _rootCardId:         CardId;
-  private readonly _titleHeight: number;
+  private _rootCardId:              CardId;
+  private readonly _titleHeight:    number;
+  private readonly _ignoreDragState: boolean;
 
   // Resolved chain and parallel Card array — kept in sync by _syncCards().
   private _chain: CardId[] = [];
@@ -47,8 +50,9 @@ export class CardStack extends LayoutObject {
 
   constructor(options: CardStackOptions = {}) {
     super(options);
-    this._rootCardId  = options.card_id     ?? 0;
-    this._titleHeight = options.titleHeight ?? 24;
+    this._rootCardId       = options.card_id          ?? 0;
+    this._titleHeight      = options.titleHeight      ?? 24;
+    this._ignoreDragState  = options.ignoreDragState  ?? false;
     this.invalidateLayout();
   }
 
@@ -99,10 +103,11 @@ export class CardStack extends LayoutObject {
 
     while (current !== 0 && chain.length < MAX_STACK_DEPTH) {
       if (seen.has(current)) break; // cycle detected
+      const card = client_cards[current];
+      if (!this._ignoreDragState && (card?.dragging || card?.returning)) break;
       seen.add(current);
       chain.push(current);
 
-      const card = client_cards[current];
       if (!card || !card.linked_flag || card.link_id === 0) break;
       current = card.link_id;
     }

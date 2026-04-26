@@ -194,6 +194,7 @@ export class Inventory extends LayoutObject {
       if (card.soul_id !== this._viewedId)    continue;
       if (card.z       !== this._z)            continue;
       if (card.dragging)                       continue;
+      if (card.returning)                      continue;
       if (card.world_flag)                     continue;
       if (card.zone_q === -1 && card.zone_r === -1
           && card.local_q === 0 && card.local_r === 0) continue;

@@ -1,12 +1,15 @@
 import { client_cards, observer_id, viewed_id } from "@/spacetime/Data";
 import { LayoutRoot } from "@/ui/layout/LayoutRoot";
+import { LayoutLayers } from "@/ui/layout/LayoutLayers";
 import { LayoutObject } from "@/ui/layout/LayoutObject";
 import { LayoutHorizontal, LayoutVertical } from "@/ui/layout/LayoutLinear";
+import { InputManager } from "@/ui/input/InputManager";
 import { Panel } from "./Panel";
 import { World } from "./World";
 import { ViewTitle } from "./ViewTitle";
 import { FrameRate } from "./FrameRate";
 import { Inventory } from "./Inventory";
+import { DragManager } from "./DragManager";
 
 /**
  * Top-level game view for a single soul card.
@@ -35,14 +38,20 @@ import { Inventory } from "./Inventory";
  * valid and centerOnHex produces a correctly centred camera.
  */
 export class GameView extends LayoutRoot {
-  private readonly _world:     World;
-  private readonly _viewTitle: ViewTitle;
-  private readonly _inventory: Inventory;
+  private readonly _layers:      LayoutLayers;
+  private readonly _input:       InputManager;
+  private readonly _dragManager: DragManager;
+  private readonly _world:       World;
+  private readonly _viewTitle:   ViewTitle;
+  private readonly _inventory:   Inventory;
 
   constructor() {
     super();
 
-    this._world = new World({ tileRadius: 128 });
+    this._layers = new LayoutLayers({ layers: ["game", "overlay"] });
+    this.addLayoutChild(this._layers);
+
+    this._world = new World({ tileRadius: 96 });
 
     const PAD = 4;
 
@@ -88,7 +97,21 @@ export class GameView extends LayoutRoot {
     outerCol.addItem(topPanel, { weight: 1 });
     outerCol.addItem(mainRow,  { weight: 19 });
 
-    this.addLayoutChild(outerCol);
+    this._layers.add(outerCol, "game");
+
+    // ── Input & drag overlay ──────────────────────────────────────────────
+    this._input = new InputManager(this);
+
+    this._dragManager = new DragManager({
+      input:  this._input,
+      onSync: () => this._inventory.sync(),
+    });
+    this._layers.add(this._dragManager, "overlay");
+  }
+
+  override destroy(options?: Parameters<LayoutRoot["destroy"]>[0]): void {
+    this._input.destroy();
+    super.destroy(options);
   }
 
   // ─── Sync ────────────────────────────────────────────────────────────────

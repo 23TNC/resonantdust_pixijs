@@ -16,6 +16,26 @@ export const ZONE_SIZE = 8;
 export const ACTION_FLAG_STARTED   = 1 << 0;
 export const ACTION_FLAG_COMPLETED = 1 << 1;
 
+// ─── Card flags ───────────────────────────────────────────────────────────────
+// Bits within ServerCard.flags that control card behaviour.
+
+/** Card cannot be moved by the player. */
+export const CARD_FLAG_POSITION_LOCKED = 1 << 0;
+/** Card position is temporarily held (e.g. mid-server-action). */
+export const CARD_FLAG_POSITION_HOLD   = 1 << 1;
+
+export interface ParsedCardFlags {
+  position_locked: boolean;
+  position_hold:   boolean;
+}
+
+export function parseCardFlags(flags: number): ParsedCardFlags {
+  return {
+    position_locked: (flags & CARD_FLAG_POSITION_LOCKED) !== 0,
+    position_hold:   (flags & CARD_FLAG_POSITION_HOLD)   !== 0,
+  };
+}
+
 // ─── Server row types ─────────────────────────────────────────────────────────
 // Mirror of SpacetimeDB table schemas. No derived fields.
 
@@ -78,7 +98,8 @@ export interface ClientCard extends ServerCard {
   definition_id: number;
   // Local UI state — not server-authoritative
   selected: boolean;
-  dragging: boolean;
+  dragging:  boolean;
+  returning: boolean;
   hidden: boolean;
   /**
    * stale: set before a re-sync pass; entries still stale after the pass were
@@ -276,9 +297,10 @@ export function buildClientCard(server: ServerCard, previous?: ClientCard): Clie
     local_q, local_r, world_flag, linked_flag,
     world_q: zone_q * ZONE_SIZE + local_q,
     world_r: zone_r * ZONE_SIZE + local_r,
-    selected: previous?.selected ?? false,
-    dragging: previous?.dragging ?? false,
-    hidden:   previous?.hidden   ?? false,
+    selected:  previous?.selected  ?? false,
+    dragging:  previous?.dragging  ?? false,
+    returning: previous?.returning ?? false,
+    hidden:    previous?.hidden    ?? false,
     stale: false,
     dirty: true,
   };
