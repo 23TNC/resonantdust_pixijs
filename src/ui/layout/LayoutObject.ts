@@ -12,6 +12,13 @@ export interface LayoutObjectOptions {
   padding?: LayoutPadding;
   /** Whether hitTestLayout returns this node when no child claims the hit. Default: true. */
   hitSelf?: boolean;
+  /**
+   * Offset of outerRect/innerRect relative to this object's position point.
+   * Default (0, 0) puts the top-left at the position point (standard behaviour).
+   * Set to e.g. (0, -height) to anchor the bottom-left at the position point.
+   */
+  originX?: number;
+  originY?: number;
 }
 
 interface LayoutEntry {
@@ -34,6 +41,8 @@ export class LayoutObject extends Container {
   readonly innerRect = new Rectangle();
 
   private _padding = { top: 0, right: 0, bottom: 0, left: 0 };
+  private _originX = 0;
+  private _originY = 0;
   private _layoutDirty = true;
   private _renderDirty = true;
   private _parentLayout: LayoutObject | null = null;
@@ -44,15 +53,25 @@ export class LayoutObject extends Container {
   constructor(options: LayoutObjectOptions = {}) {
     super();
     this.position.set(options.x ?? 0, options.y ?? 0);
-    this.outerRect.width = Math.max(0, options.width ?? 0);
+    this.outerRect.width  = Math.max(0, options.width  ?? 0);
     this.outerRect.height = Math.max(0, options.height ?? 0);
+    this._originX = options.originX ?? 0;
+    this._originY = options.originY ?? 0;
     this._applyPadding(options.padding ?? 0);
     this._syncInnerRect();
-    this.hitArea = this.innerRect;
+    this.hitArea  = this.innerRect;
     this._hitSelf = options.hitSelf ?? false;
   }
 
   setHitSelf(value: boolean): void { this._hitSelf = value; }
+
+  setOrigin(x: number, y: number): void {
+    if (this._originX === x && this._originY === y) return;
+    this._originX = x;
+    this._originY = y;
+    this._syncInnerRect();
+    this.invalidateLayout();
+  }
 
   // ─── Dimensions ──────────────────────────────────────────────────────────
 
@@ -267,10 +286,12 @@ export class LayoutObject extends Container {
 
   private _syncInnerRect(): void {
     const { top, right, bottom, left } = this._padding;
-    this.innerRect.x = left;
-    this.innerRect.y = top;
-    this.innerRect.width = Math.max(0, this.outerRect.width - left - right);
-    this.innerRect.height = Math.max(0, this.outerRect.height - top - bottom);
+    this.outerRect.x      = this._originX;
+    this.outerRect.y      = this._originY;
+    this.innerRect.x      = this._originX + left;
+    this.innerRect.y      = this._originY + top;
+    this.innerRect.width  = Math.max(0, this.outerRect.width  - left - right);
+    this.innerRect.height = Math.max(0, this.outerRect.height - top  - bottom);
   }
 
   private _applyPadding(padding: LayoutPadding): void {

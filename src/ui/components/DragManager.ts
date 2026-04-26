@@ -352,24 +352,42 @@ export class DragManager extends LayoutObject {
         );
         card.dragging = false;
       } else if (dropCard) {
-        const destId = dropCard.getCardId();
-        if (card.stacked) {
-          for (const key in client_cards) {
-            const parent = client_cards[Number(key) as CardId];
-            if (!parent || parent.link_id !== rootId) continue;
-            updateClientCardLinkId(parent.card_id, 0);
-            break;
+        let destId = dropCard.getCardId();
+        let alreadyLinked = false;
+        {
+          const seen = new Set<CardId>();
+          let depth = 0;
+          while (depth < MAX_CHAIN_DEPTH) {
+            const destCard = client_cards[destId];
+            if (!destCard || destCard.link_id === 0) break;
+            if (destCard.link_id === rootId) { alreadyLinked = true; break; }
+            if (seen.has(destCard.link_id)) break;
+            seen.add(destId);
+            destId = destCard.link_id;
+            depth++;
           }
-          card.flags  &= ~CARD_FLAG_STACKED;
-          card.stacked = false;
-          card.dirty   = true;
         }
-        updateClientCardLinkId(destId, rootId);
-        card.flags   |= CARD_FLAG_STACKED;
-        card.stacked  = true;
-        card.dirty    = true;
-        updateClientCardLocation(rootId, packZone(0, 0, card.z), packPosition(0, 0, false, false));
-        card.dragging = false;
+        if (alreadyLinked) {
+          card.dragging = false;
+        } else {
+          if (card.stacked) {
+            for (const key in client_cards) {
+              const parent = client_cards[Number(key) as CardId];
+              if (!parent || parent.link_id !== rootId) continue;
+              updateClientCardLinkId(parent.card_id, 0);
+              break;
+            }
+            card.flags  &= ~CARD_FLAG_STACKED;
+            card.stacked = false;
+            card.dirty   = true;
+          }
+          updateClientCardLinkId(destId, rootId);
+          card.flags   |= CARD_FLAG_STACKED;
+          card.stacked  = true;
+          card.dirty    = true;
+          updateClientCardLocation(rootId, packZone(0, 0, card.z), packPosition(0, 0, false, false));
+          card.dragging = false;
+        }
       } else {
         card.dragging      = false;
         card.returning     = true;

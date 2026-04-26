@@ -23,16 +23,18 @@ const MAX_STACK_DEPTH = 64;
  *
  * Visual (3 cards, arrows show link direction):
  *
- *   ┌────────────┐  ← root (depth 0, y = 0)
+ *   ┌────────────┐  ← linked card 2 (depth 0, y = 0)           — behind
  *   │ title      │
  *   ├────────────┤  ← linked card 1 (depth 1, y = titleHeight)
  *   │ title      │
- *   ├────────────┤  ← linked card 2 (depth 2, y = 2·titleHeight)
+ *   ├────────────┤  ← root (depth 2, y = 2·titleHeight)         — on top
  *   │ title      │
  *   │            │
  *   │   body     │
  *   └────────────┘
  *
+ * Cards stack upward: the root sits at the bottom of the rect and renders on
+ * top; each linked card peeks above it, drawn behind the card below it.
  * All cards share the same width and height; the height is computed so the
  * entire stack fits within innerRect:
  *   cardHeight = innerRect.height − (n − 1) · titleHeight
@@ -77,14 +79,17 @@ export class CardStack extends LayoutObject {
       this._syncCards();
     }
 
-    const { x, y, width, height } = this.innerRect;
-    const n    = this._cards.length;
+    const n = this._cards.length;
+    this.setOrigin(0, n > 0 ? -(n - 1) * this._titleHeight : 0);
+
+    const { x, width, height } = this.innerRect;
     const cardH = n > 0 ? Math.max(0, height - (n - 1) * this._titleHeight) : 0;
 
     for (let i = 0; i < n; i++) {
       this._cards[i].setCardId(this._chain[i]);
-      this._cards[i].setLayout(x, y + i * this._titleHeight, width, cardH);
+      this._cards[i].setLayout(x, -i * this._titleHeight, width, cardH);
     }
+
   }
 
   // ─── Private ─────────────────────────────────────────────────────────────
@@ -130,16 +135,23 @@ export class CardStack extends LayoutObject {
    * Cards are assigned increasing depths so later cards render on top.
    */
   private _syncCards(): void {
-    while (this._cards.length < this._chain.length) {
+    const n = this._chain.length;
+
+    while (this._cards.length < n) {
       const card = new Card({ titleHeight: this._titleHeight });
       this._cards.push(card);
-      this.addLayoutChild(card, this._cards.length - 1);
+      this.addLayoutChild(card, 0);
     }
 
-    while (this._cards.length > this._chain.length) {
+    while (this._cards.length > n) {
       const card = this._cards.pop()!;
       this.removeLayoutChild(card);
       card.destroy({ children: true });
+    }
+
+    // Root (index 0) on top; deepest child (index n-1) behind.
+    for (let i = 0; i < n; i++) {
+      this.setChildDepth(this._cards[i], n - 1 - i);
     }
   }
 }

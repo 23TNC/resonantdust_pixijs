@@ -458,8 +458,8 @@ export class World extends LayoutViewport {
     this._overlayDirty = false;
 
     for (const child of this._overlayChildren) {
-      const lx = child.position.x;
-      const ly = child.position.y;
+      const lx = child.position.x + child.outerRect.x;
+      const ly = child.position.y + child.outerRect.y;
       const rw = child.outerRect.width;
       const rh = child.outerRect.height;
 
