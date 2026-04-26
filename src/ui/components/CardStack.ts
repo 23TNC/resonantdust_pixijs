@@ -108,7 +108,9 @@ export class CardStack extends LayoutObject {
       seen.add(current);
       chain.push(current);
 
-      if (!card || !card.linked_flag || card.link_id === 0) break;
+      if (!card || !card.stackable || card.link_id === 0) break;
+      const next = client_cards[card.link_id];
+      if (!next?.stacked) break;
       current = card.link_id;
     }
 

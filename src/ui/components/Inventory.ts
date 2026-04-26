@@ -23,7 +23,7 @@ const MAX_CHAIN_DEPTH   = 64;
 const DEFAULT_TITLE_H   = 24;
 const DEFAULT_CARD_H    = 120;
 const DEFAULT_STACK_W   = 80;
-const DEFAULT_PUSH_RATE = 1.0;
+const DEFAULT_PUSH_RATE = 0.25;
 const DEFAULT_Z         = 1; // inventory surface
 
 /**
@@ -100,7 +100,6 @@ export class Inventory extends LayoutObject {
     }
 
     // Add stacks for newly qualifying roots.
-    let anyAdded = false;
     for (const rootId of roots) {
       if (!this._stacks.has(rootId)) {
         const card  = client_cards[rootId];
@@ -112,11 +111,9 @@ export class Inventory extends LayoutObject {
           y: card?.zone_r ?? 0,
         });
         this.addLayoutChild(stack);
-        anyAdded = true;
       }
     }
 
-    if (anyAdded) this._settle();
 
     if (this.innerRect.width > 0 && this.innerRect.height > 0) {
       this._clamp();
@@ -132,7 +129,7 @@ export class Inventory extends LayoutObject {
       const sh = this._cardHeight + (n - 1) * this._titleHeight;
       stack.setLayout(
         cx + pos.x - this._stackWidth / 2,
-        cy + pos.y - sh / 2,
+        cy + pos.y - this._cardHeight / 2,
         this._stackWidth,
         sh,
       );
@@ -162,15 +159,6 @@ export class Inventory extends LayoutObject {
    * iteration cap is reached, then clamp and write back.  Used to settle
    * initial positions before the first render pass.
    */
-  private _settle(): void {
-    const MAX_ITERATIONS = 200;
-    for (let i = 0; i < MAX_ITERATIONS; i++) {
-      if (!this._push()) break;
-      this._clamp();
-    }
-    this._writeBack();
-  }
-
   private _findRoots(): Set<CardId> {
     const candidates = new Set<CardId>();
 
@@ -187,18 +175,7 @@ export class Inventory extends LayoutObject {
       candidates.add(card.card_id);
     }
 
-    // Collect link targets so chains appear only once (rooted at chain head).
-    const linkTargets = new Set<CardId>();
-    for (const id of candidates) {
-      const card = client_cards[id];
-      if (card?.linked_flag && card.link_id !== 0) linkTargets.add(card.link_id);
-    }
-
-    const roots = new Set<CardId>();
-    for (const id of candidates) {
-      if (!linkTargets.has(id)) roots.add(id);
-    }
-    return roots;
+    return candidates;
   }
 
   private _chainLength(rootId: CardId): number {
@@ -207,10 +184,13 @@ export class Inventory extends LayoutObject {
     let current = rootId;
     while (current !== 0 && n < MAX_CHAIN_DEPTH) {
       if (seen.has(current)) break;
+      const card = client_cards[current];
+      if (card?.dragging || card?.returning) break;
       seen.add(current);
       n++;
-      const card = client_cards[current];
-      if (!card || !card.linked_flag || card.link_id === 0) break;
+      if (!card || !card.stackable || card.link_id === 0) break;
+      const next = client_cards[card.link_id];
+      if (!next?.stacked) break;
       current = card.link_id;
     }
     return n;
@@ -269,9 +249,9 @@ export class Inventory extends LayoutObject {
     for (const [id, pos] of this._floatPos) {
       const sHW = this._stackWidth / 2;
       const len = this._chainLength(id);
-      const sHH = (this._cardHeight + (len - 1) * this._titleHeight) / 2;
+      const sh  = this._cardHeight + (len - 1) * this._titleHeight;
       pos.x = Math.max(-hw + sHW, Math.min(hw - sHW, pos.x));
-      pos.y = Math.max(-hh + sHH, Math.min(hh - sHH, pos.y));
+      pos.y = Math.max(-hh + this._cardHeight / 2, Math.min(hh + this._cardHeight / 2 - sh, pos.y));
     }
   }
 

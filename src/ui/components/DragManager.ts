@@ -2,6 +2,10 @@ import { Point } from "pixi.js";
 import {
   client_cards,
   parseCardFlags,
+  packZone,
+  updateClientCardLocation,
+  updateClientCardLinkId,
+  CARD_FLAG_STACKED,
   type CardId,
 } from "@/spacetime/Data";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
@@ -13,6 +17,7 @@ import {
 } from "@/ui/input/InputManager";
 import { Card } from "./Card";
 import { CardStack } from "./CardStack";
+import { Inventory } from "./Inventory";
 
 const MAX_CHAIN_DEPTH = 64;
 const DEFAULT_TITLE_H = 24;
@@ -177,7 +182,7 @@ export class DragManager extends LayoutObject {
       const sh = this._cardHeight + (n - 1) * this._titleHeight;
       entry.stack.setLayout(
         entry.x - this._stackWidth / 2,
-        entry.y - sh / 2,
+        entry.y - this._cardHeight / 2,
         this._stackWidth,
         sh,
       );
@@ -255,15 +260,10 @@ export class DragManager extends LayoutObject {
 
     clientCard.dragging = true;
 
-    // entry.y is the stack center, but origin.y is the grabbed card's center.
-    // Card 0 sits at stackTop + cardHeight/2 = stackCenter - (n-1)*titleHeight/2,
-    // so we shift the stack center up by that amount to align card 0 with origin.
-    const n          = this._chainLength(dragId);
-    const stackCY    = origin.y + (n - 1) * this._titleHeight / 2;
-
-    // Grab offset keeps the exact grab point pinned under the cursor.
+    // entry.y is the center of card 0 (the grabbed card) — the stack grows
+    // downward from there so card 0 never shifts when the chain length changes.
     const grabOffsetX = data.x - origin.x;
-    const grabOffsetY = data.y - stackCY;
+    const grabOffsetY = data.y - origin.y;
 
     // Seed the throttled target at the current cursor so the card doesn't
     // jump on the first redraw before a drag_move sample is recorded.
@@ -271,7 +271,7 @@ export class DragManager extends LayoutObject {
     this._targetY    = data.y;
     this._lastSample = Date.now();
 
-    this._addEntry(dragId, origin.x, stackCY, origin.x, stackCY, grabOffsetX, grabOffsetY);
+    this._addEntry(dragId, origin.x, origin.y, origin.x, origin.y, grabOffsetX, grabOffsetY);
     this.invalidateLayout();
   }
 
@@ -294,21 +294,44 @@ export class DragManager extends LayoutObject {
     this._targetX = data.up.x;
     this._targetY = data.up.y;
 
-    // TODO: check data.up.target for valid drop targets.
-    // All drops are invalid for now — return every dragging stack to its origin.
+    const inventory = data.up.target instanceof Inventory ? data.up.target : null;
     let any = false;
+
     for (const [rootId, entry] of this._entries) {
       if (entry.returnTarget !== null) continue;
       const card = client_cards[rootId];
       if (!card) continue;
-      card.dragging  = false;
-      card.returning = true;
-      entry.returnTarget = { x: entry.returnOrigin.x, y: entry.returnOrigin.y };
+
+      if (inventory) {
+        if (card.stacked) {
+          for (const key in client_cards) {
+            const parent = client_cards[Number(key) as CardId];
+            if (!parent || parent.link_id !== rootId) continue;
+            updateClientCardLinkId(parent.card_id, 0);
+            break;
+          }
+          card.flags  &= ~CARD_FLAG_STACKED;
+          card.stacked = false;
+          card.dirty   = true;
+        }
+        const entryLocal = inventory.toLocal(new Point(entry.x, entry.y));
+        const cx = inventory.innerRect.x + inventory.innerRect.width  / 2;
+        const cy = inventory.innerRect.y + inventory.innerRect.height / 2;
+        updateClientCardLocation(
+          rootId,
+          packZone(Math.round(entryLocal.x - cx), Math.round(entryLocal.y - cy), card.z),
+          card.position,
+        );
+        card.dragging = false;
+      } else {
+        card.dragging      = false;
+        card.returning     = true;
+        entry.returnTarget = { x: entry.returnOrigin.x, y: entry.returnOrigin.y };
+      }
       any = true;
     }
-    if (any) {
-      this.invalidateLayout();
-    }
+
+    if (any) this.invalidateLayout();
   }
 
   // ─── Private — helpers ────────────────────────────────────────────────────
@@ -357,7 +380,9 @@ export class DragManager extends LayoutObject {
       seen.add(current);
       n++;
       const card = client_cards[current];
-      if (!card || !card.linked_flag || card.link_id === 0) break;
+      if (!card || !card.stackable || card.link_id === 0) break;
+      const next = client_cards[card.link_id];
+      if (!next?.stacked) break;
       current = card.link_id;
     }
     return n;
