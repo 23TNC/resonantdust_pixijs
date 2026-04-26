@@ -190,16 +190,16 @@ export class LayoutHex extends LayoutObject {
     const local = this.toLocal(new Point(globalX, globalY));
     if (!this.innerRect.contains(local.x, local.y)) return null;
 
-    if (this._positionLookup.size === 0) return this;
+    if (this._positionLookup.size === 0) return this._hitSelf ? this : null;
 
     const hex = this.localToHex(local.x, local.y);
-    if (!hex) return this;
+    if (!hex) return this._hitSelf ? this : null;
 
     const child = this._positionLookup.get(posKey(hex.q, hex.r));
     if (child?.visible) {
-      return child.hitTestLayout(globalX, globalY, ignore) ?? this;
+      return child.hitTestLayout(globalX, globalY, ignore) ?? (this._hitSelf ? this : null);
     }
 
-    return this;
+    return this._hitSelf ? this : null;
   }
 }

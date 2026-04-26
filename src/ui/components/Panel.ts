@@ -23,13 +23,13 @@ export class Panel extends LayoutObject {
   private _alpha: number;
 
   constructor(options: PanelOptions = {}) {
-    super(options);
+    super({ hitSelf: true, ...options });
 
-    this._fill        = options.fill        ?? 0x111111;
-    this._stroke      = options.stroke      ?? 0x333333;
+    this._fill        = options.fill        ?? 0x0d1b4b;
+    this._stroke      = options.stroke      ?? 0x1e3a6e;
     this._strokeWidth = options.strokeWidth ?? 1;
     this._radius      = options.radius      ?? 12;
-    this._alpha       = options.alpha       ?? 1;
+    this._alpha       = options.alpha       ?? 0.82;
 
     this.addDisplay(this._bg);
     this.invalidateRender();
@@ -47,10 +47,11 @@ export class Panel extends LayoutObject {
   protected override redraw(): void {
     const { x, y, width, height } = this.innerRect;
 
+    this._bg.alpha = this._alpha;
     this._bg.clear();
     this._bg
       .roundRect(x, y, width, height, this._radius)
-      .fill({ color: this._fill, alpha: this._alpha });
+      .fill(this._fill);
 
     if (this._strokeWidth > 0) {
       this._bg.stroke({ color: this._stroke, width: this._strokeWidth });

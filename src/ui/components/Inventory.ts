@@ -57,7 +57,7 @@ export class Inventory extends LayoutObject {
   private readonly _floatPos: Map<CardId, { x: number; y: number }> = new Map();
 
   constructor(options: InventoryOptions) {
-    super(options);
+    super({ hitSelf: true, ...options });
     this._observerId  = options.observer_id;
     this._viewedId    = options.viewed_id;
     this._cardTypeSet = new Set(options.card_types);

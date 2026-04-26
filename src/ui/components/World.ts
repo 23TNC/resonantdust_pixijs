@@ -1,10 +1,25 @@
 import { Point } from "pixi.js";
-import { client_zones, packZone, unpackZone, ZONE_SIZE, type ZoneId } from "@/spacetime/Data";
+import {
+  client_cards,
+  client_cards_by_zone,
+  client_zones,
+  packZone,
+  unpackZone,
+  ZONE_SIZE,
+  type CardId,
+  type ZoneId,
+} from "@/spacetime/Data";
 import { LayoutObject } from "@/ui/layout/LayoutObject";
 import { LayoutViewport, type LayoutViewportOptions } from "@/ui/layout/LayoutViewport";
 import { Zone } from "./Zone";
+import { CardStack } from "./CardStack";
 
 const SQRT3 = Math.sqrt(3);
+
+const DEFAULT_TITLE_H = 24;
+const DEFAULT_CARD_H  = 120;
+const DEFAULT_STACK_W = 80;
+const MAX_CHAIN_DEPTH = 64;
 
 // Pack two 16-bit signed integers into a 32-bit key for Map lookup.
 // Valid for world_q/world_r in [-32768, 32767].
@@ -13,8 +28,11 @@ function posKey(q: number, r: number): number {
 }
 
 export interface WorldOptions extends LayoutViewportOptions {
-  z?: number;
-  tileRadius?: number;
+  z?:           number;
+  tileRadius?:  number;
+  titleHeight?: number;
+  cardHeight?:  number;
+  stackWidth?:  number;
 }
 
 /**
@@ -26,6 +44,14 @@ export interface WorldOptions extends LayoutViewportOptions {
  *   child per entry in client_zones whose z matches _z. Each Zone is placed at
  *   its world-space pixel rect; the camera transform in LayoutViewport maps
  *   world pixels to screen pixels.
+ *
+ * Card overlay:
+ *   World maintains one CardStack child per qualifying client_card. A card
+ *   qualifies when its zone is one of the managed zones, world_flag is true,
+ *   and it is not dragging, returning, hidden, or stacked. The stack is
+ *   centered on world hex (world_q, world_r) = (zone_q*8 + local_q, zone_r*8 + local_r).
+ *   Reconciliation runs in updateLayoutChildren so any invalidateLayout() keeps
+ *   the displayed set consistent.
  *
  * Overlay children (players, animating cards):
  *   Register via addOverlay(). Unlike tile children, overlays may span zone
@@ -49,9 +75,14 @@ export interface WorldOptions extends LayoutViewportOptions {
  *     cy = world_r · √3·R  +  (odd(world_q) ? √3/2·R : 0)
  */
 export class World extends LayoutViewport {
-  private _z: number;
-  private _tileRadius: number;
-  private readonly _zones = new Map<ZoneId, Zone>();
+  private _z:           number;
+  private _tileRadius:  number;
+  private readonly _titleHeight: number;
+  private readonly _cardHeight:  number;
+  private readonly _stackWidth:  number;
+
+  private readonly _zones  = new Map<ZoneId, Zone>();
+  private readonly _stacks = new Map<CardId, CardStack>();
 
   // ─── Overlay index ───────────────────────────────────────────────────────
   // Non-zone layout children (players, moving cards …) registered by the world
@@ -64,8 +95,11 @@ export class World extends LayoutViewport {
 
   constructor(options: WorldOptions = {}) {
     super(options);
-    this._z          = options.z          ?? 1;
-    this._tileRadius = options.tileRadius ?? 16;
+    this._z           = options.z           ?? 1;
+    this._tileRadius  = options.tileRadius  ?? 16;
+    this._titleHeight = options.titleHeight ?? DEFAULT_TITLE_H;
+    this._cardHeight  = options.cardHeight  ?? DEFAULT_CARD_H;
+    this._stackWidth  = options.stackWidth  ?? DEFAULT_STACK_W;
   }
 
   // ─── Configuration ───────────────────────────────────────────────────────
@@ -180,6 +214,7 @@ export class World extends LayoutViewport {
     const R    = this._tileRadius;
     const hexH = SQRT3 * R;
 
+    // ── Zones ────────────────────────────────────────────────────────────
     for (const [zone_id, zone] of this._zones) {
       const { zone_q, zone_r } = unpackZone(zone_id);
       const px = (zone_q * ZONE_SIZE * 1.5 - 1) * R;
@@ -187,7 +222,40 @@ export class World extends LayoutViewport {
       zone.setLayout(px, py, 12.5 * R, 8.5 * hexH);
     }
 
-    // Zone pixel positions changed; the overlay hex-coverage index is stale.
+    // ── Card stacks ──────────────────────────────────────────────────────
+    const roots = this._findRoots();
+
+    for (const [rootId, stack] of this._stacks) {
+      if (!roots.has(rootId)) {
+        this._stacks.delete(rootId);
+        this.removeLayoutChild(stack);
+        stack.destroy({ children: true });
+      }
+    }
+
+    for (const rootId of roots) {
+      if (!this._stacks.has(rootId)) {
+        const stack = new CardStack({ titleHeight: this._titleHeight });
+        stack.setCardId(rootId);
+        this._stacks.set(rootId, stack);
+        this.addOverlay(stack);
+      }
+    }
+
+    for (const [rootId, stack] of this._stacks) {
+      const card = client_cards[rootId];
+      if (!card) continue;
+      const cx = card.world_q * 1.5 * R;
+      const cy = card.world_r * hexH + ((card.world_q & 1) !== 0 ? hexH / 2 : 0);
+      const n  = this._chainLength(rootId);
+      const sh = this._cardHeight + (n - 1) * this._titleHeight;
+      // Stacks further south (larger world_r) render in front of northern ones.
+      // 0x10000 base keeps all stacks above zones (depth 0).
+      this.setChildDepth(stack, 0x10000 + card.world_r);
+      stack.setLayout(cx - this._stackWidth / 2, cy - this._cardHeight / 2, this._stackWidth, sh);
+    }
+
+    // Zone and stack positions changed; coverage index is stale.
     this._overlayDirty = true;
   }
 
@@ -216,7 +284,7 @@ export class World extends LayoutViewport {
     const wy  = local.y - this.innerRect.y + cam.y;
 
     const hex = this._worldPixelToHex(wx, wy);
-    if (!hex) return this;
+    if (!hex) return this._hitSelf ? this : null;
 
     const { q: world_q, r: world_r } = hex;
 
@@ -236,13 +304,51 @@ export class World extends LayoutViewport {
     const zone_id = packZone(zone_q, zone_r, this._z);
     const zone    = this._zones.get(zone_id);
     if (zone?.visible) {
-      return zone.hitTestLayout(globalX, globalY, ignore) ?? this;
+      return zone.hitTestLayout(globalX, globalY, ignore) ?? (this._hitSelf ? this : null);
     }
 
-    return this;
+    return this._hitSelf ? this : null;
   }
 
   // ─── Private ─────────────────────────────────────────────────────────────
+
+  private _findRoots(): Set<CardId> {
+    const roots = new Set<CardId>();
+    for (const zone_id of this._zones.keys()) {
+      const set = client_cards_by_zone[zone_id];
+      if (!set) continue;
+      for (const card_id of set) {
+        const card = client_cards[card_id];
+        if (!card)             continue;
+        if (!card.world_flag)  continue;
+        if (card.dragging)     continue;
+        if (card.returning)    continue;
+        if (card.hidden)          continue;
+        if (card.stacked)         continue;
+        if (card.card_type === 6) continue;
+        roots.add(card_id);
+      }
+    }
+    return roots;
+  }
+
+  private _chainLength(rootId: CardId): number {
+    let n = 0;
+    const seen = new Set<CardId>();
+    let current = rootId;
+    while (current !== 0 && n < MAX_CHAIN_DEPTH) {
+      if (seen.has(current)) break;
+      const card = client_cards[current];
+      if (card?.dragging || card?.returning) break;
+      seen.add(current);
+      n++;
+      if (!card || !card.stackable || card.link_id === 0) break;
+      const next = client_cards[card.link_id];
+      if (!next?.stacked) break;
+      current = card.link_id;
+    }
+    return n;
+  }
 
   /**
    * Convert world pixel coordinates to the nearest world hex cell (q, r).

@@ -48,7 +48,7 @@ export class GameView extends LayoutRoot {
   constructor() {
     super();
 
-    this._layers = new LayoutLayers({ layers: ["game", "overlay"] });
+    this._layers = new LayoutLayers({ layers: ["world", "game", "overlay"] });
     this.addLayoutChild(this._layers);
 
     this._world = new World({ tileRadius: 96 });
@@ -65,11 +65,8 @@ export class GameView extends LayoutRoot {
     leftCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
 
     // ── Center column ─────────────────────────────────────────────────────
-    const worldPanel = new Panel({ padding: PAD, radius: 0 });
-    worldPanel.addLayoutChild(this._world);
-
     const centerCol = new LayoutVertical();
-    centerCol.addItem(worldPanel,                  { weight: 4 });
+    centerCol.addItem(new LayoutObject(),          { weight: 4 });
     centerCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
 
     // ── Right column ──────────────────────────────────────────────────────
@@ -79,9 +76,9 @@ export class GameView extends LayoutRoot {
 
     // ── Main row ──────────────────────────────────────────────────────────
     const mainRow = new LayoutHorizontal();
-    mainRow.addItem(leftCol,   { weight: 2 });
-    mainRow.addItem(centerCol, { weight: 5 });
     mainRow.addItem(rightCol,  { weight: 2 });
+    mainRow.addItem(centerCol, { weight: 5 });
+    mainRow.addItem(leftCol,   { weight: 2 });
 
     // ── Top bar ───────────────────────────────────────────────────────────
     this._viewTitle = new ViewTitle();
@@ -97,6 +94,7 @@ export class GameView extends LayoutRoot {
     outerCol.addItem(topPanel, { weight: 1 });
     outerCol.addItem(mainRow,  { weight: 19 });
 
+    this._layers.add(this._world, "world");
     this._layers.add(outerCol, "game");
 
     // ── Input & drag overlay ──────────────────────────────────────────────

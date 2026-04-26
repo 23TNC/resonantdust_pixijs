@@ -56,7 +56,7 @@ export class Tile extends LayoutObject {
   private readonly _coords = new Text({ text: "", style: new TextStyle() });
 
   constructor(options: TileOptions = {}) {
-    super(options);
+    super({ hitSelf: true, ...options });
 
     this._card_id    = options.card_id    ?? 0;
     this._definition = options.definition ?? 0;
@@ -96,6 +96,10 @@ export class Tile extends LayoutObject {
     this._worldQ = worldQ;
     this._worldR = worldR;
     this.invalidateRender();
+  }
+
+  getCoords(): { worldQ: number; worldR: number } {
+    return { worldQ: this._worldQ, worldR: this._worldR };
   }
 
   // ─── Render ──────────────────────────────────────────────────────────────

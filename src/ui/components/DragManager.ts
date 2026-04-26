@@ -7,6 +7,7 @@ import {
   updateClientCardLocation,
   updateClientCardLinkId,
   CARD_FLAG_STACKED,
+  ZONE_SIZE,
   type CardId,
 } from "@/spacetime/Data";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
@@ -19,6 +20,7 @@ import {
 import { Card } from "./Card";
 import { CardStack } from "./CardStack";
 import { Inventory } from "./Inventory";
+import { Tile } from "./Tile";
 
 const MAX_CHAIN_DEPTH = 64;
 const DEFAULT_TITLE_H = 24;
@@ -297,6 +299,7 @@ export class DragManager extends LayoutObject {
 
     const inventory = data.up.target instanceof Inventory ? data.up.target : null;
     const dropCard  = data.up.target instanceof Card       ? data.up.target : null;
+    const dropTile  = data.up.target instanceof Tile       ? data.up.target : null;
     let any = false;
 
     for (const [rootId, entry] of this._entries) {
@@ -322,7 +325,30 @@ export class DragManager extends LayoutObject {
         updateClientCardLocation(
           rootId,
           packZone(Math.round(entryLocal.x - cx), Math.round(entryLocal.y - cy), card.z),
-          card.position,
+          packPosition(0, 0, false, false),
+        );
+        card.dragging = false;
+      } else if (dropTile) {
+        if (card.stacked) {
+          for (const key in client_cards) {
+            const parent = client_cards[Number(key) as CardId];
+            if (!parent || parent.link_id !== rootId) continue;
+            updateClientCardLinkId(parent.card_id, 0);
+            break;
+          }
+          card.flags  &= ~CARD_FLAG_STACKED;
+          card.stacked = false;
+          card.dirty   = true;
+        }
+        const { worldQ, worldR } = dropTile.getCoords();
+        const zone_q  = Math.floor(worldQ / ZONE_SIZE);
+        const zone_r  = Math.floor(worldR / ZONE_SIZE);
+        const local_q = worldQ - zone_q * ZONE_SIZE;
+        const local_r = worldR - zone_r * ZONE_SIZE;
+        updateClientCardLocation(
+          rootId,
+          packZone(zone_q, zone_r, card.z),
+          packPosition(local_q, local_r, true, false),
         );
         card.dragging = false;
       } else if (dropCard) {

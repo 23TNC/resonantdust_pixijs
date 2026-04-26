@@ -43,7 +43,7 @@ export class Card extends LayoutObject {
   private readonly _label  = new Text({ text: "" });
 
   constructor(options: CardOptions = {}) {
-    super(options);
+    super({ hitSelf: true, ...options });
 
     this._card_id     = options.card_id     ?? 0;
     this._titleHeight = options.titleHeight ?? 24;

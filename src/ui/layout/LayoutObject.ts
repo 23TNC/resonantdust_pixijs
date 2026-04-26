@@ -10,6 +10,8 @@ export interface LayoutObjectOptions {
   width?: number;
   height?: number;
   padding?: LayoutPadding;
+  /** Whether hitTestLayout returns this node when no child claims the hit. Default: true. */
+  hitSelf?: boolean;
 }
 
 interface LayoutEntry {
@@ -37,6 +39,7 @@ export class LayoutObject extends Container {
   private _parentLayout: LayoutObject | null = null;
   private _layoutChildren: LayoutEntry[] = [];
   private _displayCount = 0;
+  protected _hitSelf: boolean;
 
   constructor(options: LayoutObjectOptions = {}) {
     super();
@@ -46,7 +49,10 @@ export class LayoutObject extends Container {
     this._applyPadding(options.padding ?? 0);
     this._syncInnerRect();
     this.hitArea = this.innerRect;
+    this._hitSelf = options.hitSelf ?? false;
   }
+
+  setHitSelf(value: boolean): void { this._hitSelf = value; }
 
   // ─── Dimensions ──────────────────────────────────────────────────────────
 
@@ -162,7 +168,7 @@ export class LayoutObject extends Container {
       if (hit) return hit;
     }
 
-    return this;
+    return this._hitSelf ? this : null;
   }
 
   // ─── Layout children ─────────────────────────────────────────────────────

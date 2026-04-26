@@ -155,7 +155,7 @@ export abstract class LayoutLinear extends LayoutObject {
       if (hit) return hit;
     }
 
-    return this;
+    return this._hitSelf ? this : null;
   }
 
   // Binary search: find the child whose [start, end) range contains value.
