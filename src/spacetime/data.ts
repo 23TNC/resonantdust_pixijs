@@ -23,16 +23,20 @@ export const ACTION_FLAG_COMPLETED = 1 << 1;
 export const CARD_FLAG_POSITION_LOCKED = 1 << 0;
 /** Card position is temporarily held (e.g. mid-server-action). */
 export const CARD_FLAG_POSITION_HOLD   = 1 << 1;
+/** Card is a stack child — never root-drawn by Inventory or World panels. */
+export const CARD_FLAG_STACKED         = 1 << 2;
 
 export interface ParsedCardFlags {
   position_locked: boolean;
   position_hold:   boolean;
+  stacked:         boolean;
 }
 
 export function parseCardFlags(flags: number): ParsedCardFlags {
   return {
     position_locked: (flags & CARD_FLAG_POSITION_LOCKED) !== 0,
     position_hold:   (flags & CARD_FLAG_POSITION_HOLD)   !== 0,
+    stacked:         (flags & CARD_FLAG_STACKED)         !== 0,
   };
 }
 
@@ -96,6 +100,8 @@ export interface ClientCard extends ServerCard {
   // Unpacked from definition
   card_type: number;
   definition_id: number;
+  // Derived from flags
+  stacked: boolean;
   // Local UI state — not server-authoritative
   selected: boolean;
   dragging:  boolean;
@@ -293,6 +299,7 @@ export function buildClientCard(server: ServerCard, previous?: ClientCard): Clie
     ...server,
     card_type:    decodeCardType(server.definition),
     definition_id: decodeDefinitionId(server.definition),
+    stacked:      (server.flags & CARD_FLAG_STACKED) !== 0,
     zone_q, zone_r, z,
     local_q, local_r, world_flag, linked_flag,
     world_q: zone_q * ZONE_SIZE + local_q,

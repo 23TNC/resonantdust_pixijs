@@ -33,16 +33,15 @@ const DEFAULT_Z         = 1; // inventory surface
  *   • soul_id === viewed_id
  *   • z === the configured z layer (1 = inventory surface, default)
  *   • dragging === false
+ *   • returning === false
  *   • world_flag === false
  *   • not the sentinel position (zone_q === -1 && zone_r === -1 && local_q === 0 && local_r === 0)
  *   • card_type is in the provided card_types set
  *   • not a link target of another qualifying card (so each chain shows once)
  *
- * Each root card gets its own CardStack.  Float positions (center-origin within
- * innerRect) are initialized from zone_q / zone_r and written back after each
- * push step.  Positions are clamped inside updateLayoutChildren() — which always
- * runs with a valid innerRect — so stacks are never placed out of bounds by
- * construction, without needing a clip mask.
+ * Reconciliation (add/remove stacks) happens in updateLayoutChildren so that
+ * any invalidateLayout() — including those triggered by flag mutations like
+ * dragging/returning — automatically keeps the displayed set consistent.
  */
 export class Inventory extends LayoutObject {
   private readonly _observerId:  CardId;
@@ -74,26 +73,23 @@ export class Inventory extends LayoutObject {
   setViewedId(viewedId: CardId): void {
     if (this._viewedId === viewedId) return;
     this._viewedId = viewedId;
-    this.sync();
+    this.invalidateLayout();
   }
 
   getViewedId(): CardId { return this._viewedId; }
   getObserverId(): CardId { return this._observerId; }
 
+  // ─── Layout ──────────────────────────────────────────────────────────────
+
   /**
-   * Reconcile the displayed CardStacks with current client_cards state.
-   * Existing stacks whose root card no longer qualifies are removed; new
-   * qualifying roots get a fresh CardStack whose float position is seeded
-   * from the card's zone_q / zone_r.  If any new stacks were added, the push
-   * simulation is run to convergence synchronously so stacks arrive already
-   * separated rather than visibly sliding apart on the first frame.
-   *
-   * Call whenever a subscription update may have added, removed, or changed
-   * cards that this inventory displays.
+   * Reconcile stacks with current client_cards state, then clamp and place.
+   * Runs on every layout pass so flag mutations (dragging, returning) are
+   * picked up automatically without external sync calls.
    */
-  sync(): void {
+  protected override updateLayoutChildren(): void {
     const roots = this._findRoots();
 
+    // Remove stacks that no longer qualify.
     for (const [rootId, stack] of this._stacks) {
       if (!roots.has(rootId)) {
         this._stacks.delete(rootId);
@@ -103,6 +99,7 @@ export class Inventory extends LayoutObject {
       }
     }
 
+    // Add stacks for newly qualifying roots.
     let anyAdded = false;
     for (const rootId of roots) {
       if (!this._stacks.has(rootId)) {
@@ -120,18 +117,7 @@ export class Inventory extends LayoutObject {
     }
 
     if (anyAdded) this._settle();
-    this.invalidateLayout();
-  }
 
-  // ─── Layout ──────────────────────────────────────────────────────────────
-
-  /**
-   * Clamp all float positions to innerRect bounds before placing stacks.
-   * Because updateLayoutChildren() is only called after setLayout() has given
-   * this object valid dimensions, the clamp always operates on a real rect —
-   * making out-of-bounds placement structurally impossible.
-   */
-  protected override updateLayoutChildren(): void {
     if (this.innerRect.width > 0 && this.innerRect.height > 0) {
       this._clamp();
     }
@@ -196,8 +182,7 @@ export class Inventory extends LayoutObject {
       if (card.dragging)                       continue;
       if (card.returning)                      continue;
       if (card.world_flag)                     continue;
-      if (card.zone_q === -1 && card.zone_r === -1
-          && card.local_q === 0 && card.local_r === 0) continue;
+      if (card.stacked) continue;
       if (!this._cardTypeSet.has(card.card_type)) continue;
       candidates.add(card.card_id);
     }

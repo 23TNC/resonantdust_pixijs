@@ -19,6 +19,7 @@ import {
   packPosition,
   packZone,
   packZoneDefinition,
+  CARD_FLAG_STACKED,
   setObserverId,
   setViewedId,
   clearSelectedState,
@@ -53,18 +54,13 @@ export function bootstrap(): void {
   setObserverId(1);
 
   // ─── Zone IDs ──────────────────────────────────────────────────────────────
-  const world_zone   = packZone(0, 0, 1);
-  // Sentinel zone for cards that are stacked under another card.  The
-  // Inventory filter excludes zone_q === -1 && zone_r === -1 && local = 0,0
-  // so these cards never appear as independent stacks.
-  const stacked_zone = packZone(-1, -1, 1);
-  const stacked_pos  = packPosition(0, 0, LOCAL, UNLINKED);
+  const world_zone = packZone(0, 0, 1);
 
   // ─── Cards ─────────────────────────────────────────────────────────────────
   //
   // Stack convention:
   //   Root card    — linked_flag = LINKED,   link_id = next card_id, zone/pos = real position
-  //   Stacked card — linked_flag = UNLINKED, link_id = 0,            zone/pos = sentinel (-1,-1,0,0)
+  //   Stacked card — flags = CARD_FLAG_STACKED, link_id = 0
   //
   // Exception — card_type 6 (world tile):
   //   link_id may point to another world tile (e.g. dungeon entrance/exit pair)
@@ -81,16 +77,16 @@ export function bootstrap(): void {
   //    x=-180  x=-90   x=0    x=90  │  x=180│
   //                            card 6┘  card10┘
   const cards: ServerCard[] = [
-    { card_id: 1,  definition: packDefinition(5, 1), soul_id: 0, link_id: 0,  flags: 0, zone: world_zone,           position: packPosition(0, 0, WORLD, UNLINKED) },
-    { card_id: 2,  definition: packDefinition(1, 1), soul_id: 1, link_id: 0,  flags: 0, zone: packZone(-180, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
-    { card_id: 3,  definition: packDefinition(1, 2), soul_id: 1, link_id: 0,  flags: 0, zone: packZone( -90, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
-    { card_id: 4,  definition: packDefinition(1, 3), soul_id: 1, link_id: 0,  flags: 0, zone: packZone(   0, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
-    { card_id: 5,  definition: packDefinition(2, 1), soul_id: 1, link_id: 6,  flags: 0, zone: packZone(  90, 0, 1), position: packPosition(0, 0, LOCAL, LINKED)   },
-    { card_id: 6,  definition: packDefinition(2, 1), soul_id: 1, link_id: 0,  flags: 0, zone: stacked_zone,         position: stacked_pos                        },
-    { card_id: 7,  definition: packDefinition(1, 1), soul_id: 1, link_id: 0,  flags: 0, zone: world_zone,           position: packPosition(1, 0, WORLD, UNLINKED) },
-    { card_id: 8,  definition: packDefinition(6, 2), soul_id: 1, link_id: 0,  flags: 0, zone: world_zone,           position: packPosition(2, 1, WORLD, UNLINKED) },
-    { card_id: 9,  definition: packDefinition(2, 2), soul_id: 1, link_id: 10, flags: 0, zone: packZone( 180, 0, 1), position: packPosition(0, 0, LOCAL, LINKED)   },
-    { card_id: 10, definition: packDefinition(2, 3), soul_id: 1, link_id: 0,  flags: 0, zone: stacked_zone,         position: stacked_pos                        },
+    { card_id: 1,  definition: packDefinition(5, 1), soul_id: 0, link_id: 0,  flags: 0,                 zone: world_zone,           position: packPosition(0, 0, WORLD, UNLINKED) },
+    { card_id: 2,  definition: packDefinition(1, 1), soul_id: 1, link_id: 0,  flags: 0,                 zone: packZone(-180, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
+    { card_id: 3,  definition: packDefinition(1, 2), soul_id: 1, link_id: 0,  flags: 0,                 zone: packZone( -90, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
+    { card_id: 4,  definition: packDefinition(1, 3), soul_id: 1, link_id: 0,  flags: 0,                 zone: packZone(   0, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
+    { card_id: 5,  definition: packDefinition(2, 1), soul_id: 1, link_id: 6,  flags: 0,                 zone: packZone(  90, 0, 1), position: packPosition(0, 0, LOCAL, LINKED)   },
+    { card_id: 6,  definition: packDefinition(2, 1), soul_id: 1, link_id: 0,  flags: CARD_FLAG_STACKED, zone: packZone(  90, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
+    { card_id: 7,  definition: packDefinition(1, 1), soul_id: 1, link_id: 0,  flags: 0,                 zone: world_zone,           position: packPosition(1, 0, WORLD, UNLINKED) },
+    { card_id: 8,  definition: packDefinition(6, 2), soul_id: 1, link_id: 0,  flags: 0,                 zone: world_zone,           position: packPosition(2, 1, WORLD, UNLINKED) },
+    { card_id: 9,  definition: packDefinition(2, 2), soul_id: 1, link_id: 10, flags: 0,                 zone: packZone( 180, 0, 1), position: packPosition(0, 0, LOCAL, LINKED)   },
+    { card_id: 10, definition: packDefinition(2, 3), soul_id: 1, link_id: 0,  flags: CARD_FLAG_STACKED, zone: packZone( 180, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
   ];
 
   // ─── Players ───────────────────────────────────────────────────────────────

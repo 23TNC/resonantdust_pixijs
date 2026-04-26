@@ -131,7 +131,7 @@ export class GameView extends LayoutRoot {
       this._world.syncZones();
     }
     this._viewTitle.sync();
-    this._inventory.sync();
+    this._inventory.invalidateLayout();
   }
 
   getWorld(): World { return this._world; }
