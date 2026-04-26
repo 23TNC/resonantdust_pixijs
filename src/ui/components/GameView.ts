@@ -1,8 +1,12 @@
-import { client_cards, viewed_id } from "@/spacetime/Data";
+import { client_cards, observer_id, viewed_id } from "@/spacetime/Data";
 import { LayoutRoot } from "@/ui/layout/LayoutRoot";
+import { LayoutObject } from "@/ui/layout/LayoutObject";
 import { LayoutHorizontal, LayoutVertical } from "@/ui/layout/LayoutLinear";
 import { Panel } from "./Panel";
 import { World } from "./World";
+import { ViewTitle } from "./ViewTitle";
+import { FrameRate } from "./FrameRate";
+import { Inventory } from "./Inventory";
 
 /**
  * Top-level game view for a single soul card.
@@ -30,12 +34,14 @@ import { World } from "./World";
  * valid and centerOnHex produces a correctly centred camera.
  */
 export class GameView extends LayoutRoot {
-  private readonly _world: World;
+  private readonly _world:     World;
+  private readonly _viewTitle: ViewTitle;
+  private readonly _inventory: Inventory;
 
   constructor() {
     super();
 
-    this._world = new World({ tileRadius: 24 });
+    this._world = new World({ tileRadius: 48 });
 
     const PAD = 4;
 
@@ -48,9 +54,14 @@ export class GameView extends LayoutRoot {
     // ── Center column ─────────────────────────────────────────────────────
     const worldPanel = new Panel({ padding: PAD, radius: 0 });
     worldPanel.addLayoutChild(this._world);
+
+    this._inventory = new Inventory({ observer_id, viewed_id, card_types: [1, 2, 3, 4] });
+    const inventoryPanel = new Panel({ padding: PAD });
+    inventoryPanel.addLayoutChild(this._inventory);
+
     const centerCol = new LayoutVertical();
-    centerCol.addItem(worldPanel,              { weight: 4 });
-    centerCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
+    centerCol.addItem(worldPanel,     { weight: 4 });
+    centerCol.addItem(inventoryPanel, { weight: 1 });
 
     // ── Right column ──────────────────────────────────────────────────────
     const rightCol = new LayoutVertical();
@@ -63,10 +74,19 @@ export class GameView extends LayoutRoot {
     mainRow.addItem(centerCol, { weight: 5 });
     mainRow.addItem(rightCol,  { weight: 2 });
 
+    // ── Top bar ───────────────────────────────────────────────────────────
+    this._viewTitle = new ViewTitle();
+    const topBar = new LayoutHorizontal();
+    topBar.addItem(this._viewTitle, { weight: 1 });
+    topBar.addItem(new LayoutObject(), { weight: 1 });
+    topBar.addItem(new FrameRate(),   { weight: 1 });
+    const topPanel = new Panel({ padding: PAD });
+    topPanel.addLayoutChild(topBar);
+
     // ── Outer column ──────────────────────────────────────────────────────
     const outerCol = new LayoutVertical();
-    outerCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
-    outerCol.addItem(mainRow,                     { weight: 9 });
+    outerCol.addItem(topPanel, { weight: 1 });
+    outerCol.addItem(mainRow,  { weight: 9 });
 
     this.addLayoutChild(outerCol);
   }
@@ -88,6 +108,8 @@ export class GameView extends LayoutRoot {
     } else {
       this._world.syncZones();
     }
+    this._viewTitle.sync();
+    this._inventory.sync();
   }
 
   getWorld(): World { return this._world; }

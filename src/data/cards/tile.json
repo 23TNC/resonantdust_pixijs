@@ -4,7 +4,7 @@
     {
       "name": "Plains",
       "style": {
-        "color": [ "#799E50", "#0b160b", "#0b160b" ]
+        "color": [ "#799E50", "#0b1426", "#0b1426" ]
       }, 
       "vars": {
         "cost": 2
@@ -16,7 +16,7 @@
     {
       "name": "Forest",
       "style": {
-        "color": [ "#395C39", "#7fb377", "#0b160b" ]
+        "color": [ "#395C39", "#7fb377", "#0b1426" ]
       }, 
       "vars": {
         "cost": 3,

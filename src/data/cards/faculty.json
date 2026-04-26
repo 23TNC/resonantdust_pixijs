@@ -4,7 +4,7 @@
     {
       "name": "Corpus",
       "style": {
-        "color": [ "#E67E7E", "#ecd6aa" ]
+        "color": [ "#E67E7E", "#ecd6aa", "#0b1426" ]
       },
       "flags": [
         [ "woodcutter", false, true, false ],
@@ -14,7 +14,7 @@
     {
       "name": "Anima",
       "style": {
-        "color": [ "#7D96E3", "#ecd6aa" ]
+        "color": [ "#7D96E3", "#ecd6aa", "#0b1426" ]
       },
       "flags": [
       ]
@@ -22,7 +22,7 @@
     {
       "name": "Soller",
       "style": {
-        "color": [ "#97e3a7", "#ecd6aa" ]
+        "color": [ "#97e3a7", "#ecd6aa", "#0b1426" ]
       },
       "flags": [
       ]
