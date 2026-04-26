@@ -3,6 +3,7 @@ import {
   client_cards,
   parseCardFlags,
   packZone,
+  packPosition,
   updateClientCardLocation,
   updateClientCardLinkId,
   CARD_FLAG_STACKED,
@@ -295,6 +296,7 @@ export class DragManager extends LayoutObject {
     this._targetY = data.up.y;
 
     const inventory = data.up.target instanceof Inventory ? data.up.target : null;
+    const dropCard  = data.up.target instanceof Card       ? data.up.target : null;
     let any = false;
 
     for (const [rootId, entry] of this._entries) {
@@ -322,6 +324,25 @@ export class DragManager extends LayoutObject {
           packZone(Math.round(entryLocal.x - cx), Math.round(entryLocal.y - cy), card.z),
           card.position,
         );
+        card.dragging = false;
+      } else if (dropCard) {
+        const destId = dropCard.getCardId();
+        if (card.stacked) {
+          for (const key in client_cards) {
+            const parent = client_cards[Number(key) as CardId];
+            if (!parent || parent.link_id !== rootId) continue;
+            updateClientCardLinkId(parent.card_id, 0);
+            break;
+          }
+          card.flags  &= ~CARD_FLAG_STACKED;
+          card.stacked = false;
+          card.dirty   = true;
+        }
+        updateClientCardLinkId(destId, rootId);
+        card.flags   |= CARD_FLAG_STACKED;
+        card.stacked  = true;
+        card.dirty    = true;
+        updateClientCardLocation(rootId, packZone(0, 0, card.z), packPosition(0, 0, false, false));
         card.dragging = false;
       } else {
         card.dragging      = false;
