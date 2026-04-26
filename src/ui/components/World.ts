@@ -11,8 +11,15 @@ import {
 } from "@/spacetime/Data";
 import { LayoutObject } from "@/ui/layout/LayoutObject";
 import { LayoutViewport, type LayoutViewportOptions } from "@/ui/layout/LayoutViewport";
+import {
+  type InputManager,
+  type InputPointerData,
+  type InputDragMoveData,
+  type InputActionData,
+} from "@/ui/input/InputManager";
 import { Zone } from "./Zone";
 import { CardStack } from "./CardStack";
+import { Tile } from "./Tile";
 
 const SQRT3 = Math.sqrt(3);
 
@@ -33,6 +40,7 @@ export interface WorldOptions extends LayoutViewportOptions {
   titleHeight?: number;
   cardHeight?:  number;
   stackWidth?:  number;
+  input?:       InputManager;
 }
 
 /**
@@ -91,6 +99,18 @@ export class World extends LayoutViewport {
   private readonly _overlayAtHex   = new Map<number, Set<LayoutObject>>();
   private          _overlayDirty   = false;
 
+  // ─── Pan state ───────────────────────────────────────────────────────────
+  private          _input:       InputManager | null;
+  private          _panning    = false;
+  private          _panPrevX   = 0;
+  private          _panPrevY   = 0;
+  private          _downTarget: LayoutObject | null = null;
+
+  private readonly _boundPanDown:  (data: InputPointerData)  => void;
+  private readonly _boundPanStart: (data: InputPointerData)  => void;
+  private readonly _boundPanMove:  (data: InputDragMoveData) => void;
+  private readonly _boundPanEnd:   (data: InputActionData)   => void;
+
   // ─────────────────────────────────────────────────────────────────────────
 
   constructor(options: WorldOptions = {}) {
@@ -100,9 +120,48 @@ export class World extends LayoutViewport {
     this._titleHeight = options.titleHeight ?? DEFAULT_TITLE_H;
     this._cardHeight  = options.cardHeight  ?? DEFAULT_CARD_H;
     this._stackWidth  = options.stackWidth  ?? DEFAULT_STACK_W;
+
+    this._boundPanDown  = this._onPanDown.bind(this);
+    this._boundPanStart = this._onPanStart.bind(this);
+    this._boundPanMove  = this._onPanMove.bind(this);
+    this._boundPanEnd   = this._onPanEnd.bind(this);
+
+    this._input = options.input ?? null;
+    if (this._input) {
+      this._input.on("left_down",       this._boundPanDown);
+      this._input.on("left_drag_start", this._boundPanStart);
+      this._input.on("left_drag_move",  this._boundPanMove);
+      this._input.on("left_drag_end",   this._boundPanEnd);
+    }
+  }
+
+  override destroy(options?: Parameters<LayoutObject["destroy"]>[0]): void {
+    if (this._input) {
+      this._input.off("left_down",       this._boundPanDown);
+      this._input.off("left_drag_start", this._boundPanStart);
+      this._input.off("left_drag_move",  this._boundPanMove);
+      this._input.off("left_drag_end",   this._boundPanEnd);
+    }
+    super.destroy(options);
   }
 
   // ─── Configuration ───────────────────────────────────────────────────────
+
+  setInput(input: InputManager | null): void {
+    if (this._input) {
+      this._input.off("left_down",       this._boundPanDown);
+      this._input.off("left_drag_start", this._boundPanStart);
+      this._input.off("left_drag_move",  this._boundPanMove);
+      this._input.off("left_drag_end",   this._boundPanEnd);
+    }
+    this._input = input;
+    if (input) {
+      input.on("left_down",       this._boundPanDown);
+      input.on("left_drag_start", this._boundPanStart);
+      input.on("left_drag_move",  this._boundPanMove);
+      input.on("left_drag_end",   this._boundPanEnd);
+    }
+  }
 
   setZ(z: number): void {
     if (this._z === z) return;
@@ -427,5 +486,29 @@ export class World extends LayoutViewport {
         set.add(child);
       }
     }
+  }
+
+  // ─── Pan handlers ────────────────────────────────────────────────────────
+
+  private _onPanDown(data: InputPointerData): void {
+    this._downTarget = data.target;
+  }
+
+  private _onPanStart(data: InputPointerData): void {
+    if (this._downTarget !== null && !(this._downTarget instanceof Tile)) return;
+    this._panning  = true;
+    this._panPrevX = data.x;
+    this._panPrevY = data.y;
+  }
+
+  private _onPanMove(data: InputDragMoveData): void {
+    if (!this._panning) return;
+    this.panBy(-(data.x - this._panPrevX), -(data.y - this._panPrevY));
+    this._panPrevX = data.x;
+    this._panPrevY = data.y;
+  }
+
+  private _onPanEnd(_data: InputActionData): void {
+    this._panning = false;
   }
 }

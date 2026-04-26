@@ -51,7 +51,7 @@ export class GameView extends LayoutRoot {
     this._layers = new LayoutLayers({ layers: ["world", "game", "overlay"] });
     this.addLayoutChild(this._layers);
 
-    this._world = new World({ tileRadius: 96 });
+    this._world = new World({ tileRadius: 70 });
 
     const PAD = 4;
 
@@ -99,6 +99,8 @@ export class GameView extends LayoutRoot {
 
     // ── Input & drag overlay ──────────────────────────────────────────────
     this._input = new InputManager(this);
+
+    this._world.setInput(this._input);
 
     this._dragManager = new DragManager({
       input:  this._input,
