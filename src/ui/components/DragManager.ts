@@ -52,11 +52,6 @@ export interface DragManagerOptions extends LayoutObjectOptions {
   lerpFactor?:       number;
   /** Milliseconds between cursor samples that update the tween target. Default: 100. */
   sampleIntervalMs?: number;
-  /**
-   * Called whenever card.dragging or card.returning flags change so that
-   * other systems (Inventory, etc.) can re-sync.
-   */
-  onSync?:           () => void;
 }
 
 // ─── DragManager ─────────────────────────────────────────────────────────────
@@ -83,7 +78,6 @@ export class DragManager extends LayoutObject {
   private readonly _stackWidth:     number;
   private readonly _lerpFactor:     number;
   private readonly _sampleInterval: number;
-  private readonly _onSync:         (() => void) | undefined;
 
   private readonly _entries = new Map<CardId, StackEntry>();
 
@@ -111,7 +105,6 @@ export class DragManager extends LayoutObject {
     this._stackWidth     = options.stackWidth     ?? DEFAULT_STACK_W;
     this._lerpFactor     = options.lerpFactor     ?? 0.18;
     this._sampleInterval = options.sampleIntervalMs ?? 50;
-    this._onSync         = options.onSync;
 
     this._boundDown      = this._onDown.bind(this);
     this._boundDragStart = this._onDragStart.bind(this);
@@ -172,7 +165,14 @@ export class DragManager extends LayoutObject {
   // ─── Layout ──────────────────────────────────────────────────────────────
 
   protected override updateLayoutChildren(): void {
+    const dead: CardId[] = [];
+
     for (const [rootId, entry] of this._entries) {
+      const card = client_cards[rootId];
+      if (!card?.dragging && !card?.returning) {
+        dead.push(rootId);
+        continue;
+      }
       const n  = this._chainLength(rootId);
       const sh = this._cardHeight + (n - 1) * this._titleHeight;
       entry.stack.setLayout(
@@ -181,6 +181,10 @@ export class DragManager extends LayoutObject {
         this._stackWidth,
         sh,
       );
+    }
+
+    for (const rootId of dead) {
+      this._removeEntry(rootId, this._entries.get(rootId)!);
     }
   }
 
@@ -269,7 +273,6 @@ export class DragManager extends LayoutObject {
 
     this._addEntry(dragId, origin.x, stackCY, origin.x, stackCY, grabOffsetX, grabOffsetY);
     this.invalidateLayout();
-    this._onSync?.();
   }
 
   private _onDragMove(data: InputDragMoveData): void {
@@ -305,7 +308,6 @@ export class DragManager extends LayoutObject {
     }
     if (any) {
       this.invalidateLayout();
-      this._onSync?.();
     }
   }
 
@@ -341,12 +343,9 @@ export class DragManager extends LayoutObject {
   }
 
   private _finishReturn(rootId: CardId): void {
-    const entry = this._entries.get(rootId);
-    if (!entry) return;
-    this._removeEntry(rootId, entry);
     const card = client_cards[rootId];
     if (card) card.returning = false;
-    this._onSync?.();
+    this.invalidateLayout();
   }
 
   private _chainLength(rootId: CardId): number {

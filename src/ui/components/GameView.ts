@@ -104,7 +104,6 @@ export class GameView extends LayoutRoot {
 
     this._dragManager = new DragManager({
       input:  this._input,
-      onSync: () => this._inventory.sync(),
     });
     this._layers.add(this._dragManager, "overlay");
   }
