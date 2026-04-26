@@ -20,10 +20,11 @@ import { Inventory } from "./Inventory";
  *   ┌─────────────────────────────────────────────┐  weight 1  (top bar)
  *   ├───────────┬─────────────────────┬───────────┤
  *   │           │                     │           │
- *   │           │       World         │           │  weight 4
+ *   │ Inventory │       World         │           │  weight 4
  *   │  weight 2 │                     │  weight 2 │
  *   │           ├─────────────────────┤           │
- *   │           │                     │           │  weight 1
+ *   ├───────────┤                     │           │  weight 1
+ *   │  weight 1 │                     │           │
  *   └───────────┴─────────────────────┴───────────┘
  *     weight 2        weight 5          weight 2
  *                   (center column)
@@ -41,27 +42,26 @@ export class GameView extends LayoutRoot {
   constructor() {
     super();
 
-    this._world = new World({ tileRadius: 48 });
+    this._world = new World({ tileRadius: 128 });
 
     const PAD = 4;
 
     // ── Left column ───────────────────────────────────────────────────────
+    this._inventory = new Inventory({ observer_id, viewed_id, card_types: [1, 2, 3, 4] });
+    const inventoryPanel = new Panel({ padding: PAD });
+    inventoryPanel.addLayoutChild(this._inventory);
+
     const leftCol = new LayoutVertical();
-    leftCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
-    leftCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
+    leftCol.addItem(inventoryPanel,            { weight: 2 });
     leftCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
 
     // ── Center column ─────────────────────────────────────────────────────
     const worldPanel = new Panel({ padding: PAD, radius: 0 });
     worldPanel.addLayoutChild(this._world);
 
-    this._inventory = new Inventory({ observer_id, viewed_id, card_types: [1, 2, 3, 4] });
-    const inventoryPanel = new Panel({ padding: PAD });
-    inventoryPanel.addLayoutChild(this._inventory);
-
     const centerCol = new LayoutVertical();
-    centerCol.addItem(worldPanel,     { weight: 4 });
-    centerCol.addItem(inventoryPanel, { weight: 1 });
+    centerCol.addItem(worldPanel,                  { weight: 4 });
+    centerCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
 
     // ── Right column ──────────────────────────────────────────────────────
     const rightCol = new LayoutVertical();
@@ -86,7 +86,7 @@ export class GameView extends LayoutRoot {
     // ── Outer column ──────────────────────────────────────────────────────
     const outerCol = new LayoutVertical();
     outerCol.addItem(topPanel, { weight: 1 });
-    outerCol.addItem(mainRow,  { weight: 9 });
+    outerCol.addItem(mainRow,  { weight: 19 });
 
     this.addLayoutChild(outerCol);
   }

@@ -40,9 +40,9 @@ const DEFAULT_Z         = 1; // inventory surface
  *
  * Each root card gets its own CardStack.  Float positions (center-origin within
  * innerRect) are initialized from zone_q / zone_r and written back after each
- * push step.  Every redraw() runs one push iteration; as long as stacks overlap
- * the dirty chain keeps the loop alive, and it terminates naturally once no
- * overlaps remain.
+ * push step.  Positions are clamped inside updateLayoutChildren() — which always
+ * runs with a valid innerRect — so stacks are never placed out of bounds by
+ * construction, without needing a clip mask.
  */
 export class Inventory extends LayoutObject {
   private readonly _observerId:  CardId;
@@ -125,7 +125,17 @@ export class Inventory extends LayoutObject {
 
   // ─── Layout ──────────────────────────────────────────────────────────────
 
+  /**
+   * Clamp all float positions to innerRect bounds before placing stacks.
+   * Because updateLayoutChildren() is only called after setLayout() has given
+   * this object valid dimensions, the clamp always operates on a real rect —
+   * making out-of-bounds placement structurally impossible.
+   */
   protected override updateLayoutChildren(): void {
+    if (this.innerRect.width > 0 && this.innerRect.height > 0) {
+      this._clamp();
+    }
+
     const cx = this.innerRect.x + this.innerRect.width  / 2;
     const cy = this.innerRect.y + this.innerRect.height / 2;
 
@@ -146,9 +156,8 @@ export class Inventory extends LayoutObject {
   // ─── Render ──────────────────────────────────────────────────────────────
 
   /**
-   * Run one push-separation step.  If any stack moved, clamp all positions
-   * within innerRect, write integer zone_q/zone_r back to client_cards, and
-   * invalidate layout so next frame runs another pass.  The loop terminates
+   * Run one push-separation step.  If any stack moved, clamp, write back, and
+   * invalidate layout so the next frame runs another pass.  The loop terminates
    * naturally once no pair overlaps.
    */
   protected override redraw(): void {
