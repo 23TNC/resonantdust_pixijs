@@ -22,17 +22,17 @@ function parseColor(value: string | undefined): number | null {
   return /^[0-9a-fA-F]{6}$/.test(hex) ? parseInt(hex, 16) : null;
 }
 
-function flatTopHexPoints(cx: number, cy: number, radius: number): number[] {
+function pointyTopHexPoints(cx: number, cy: number, radius: number): number[] {
   const pts: number[] = [];
   for (let i = 0; i < 6; i++) {
-    const a = (Math.PI / 3) * i;
+    const a = (Math.PI / 3) * i + Math.PI / 6;
     pts.push(cx + radius * Math.cos(a), cy + radius * Math.sin(a));
   }
   return pts;
 }
 
 /**
- * Displays a flat-top hexagon sized to its layout bounds.
+ * Displays a pointy-top hexagon sized to its layout bounds.
  *
  * Provide card_id for tiles backed by live card data, or definition (packed)
  * for purely static tiles. card_id takes priority when both are set.
@@ -115,12 +115,12 @@ export class Tile extends LayoutObject {
     const { x, y, width, height } = this.innerRect;
     const cx     = x + width  / 2;
     const cy     = y + height / 2;
-    const radius = Math.min(width / 2, height / Math.sqrt(3));
+    const radius = Math.min(width / Math.sqrt(3), height / 2);
 
     // ── Hex background ────────────────────────────────────────────────────
     this._body.clear();
     this._body
-      .poly(flatTopHexPoints(cx, cy, radius))
+      .poly(pointyTopHexPoints(cx, cy, radius))
       .fill({ color: hexColor })
       .stroke({ color: STROKE_COLOR, width: STROKE_WIDTH });
 

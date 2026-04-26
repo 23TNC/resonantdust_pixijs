@@ -15,7 +15,7 @@ export interface ZoneOptions extends LayoutObjectOptions {
 }
 
 /**
- * Renders an 8×8 flat-top hex grid driven by a ClientZone.
+ * Renders an 8×8 pointy-top hex grid driven by a ClientZone.
  *
  * For each tile at grid position (q, r):
  *   - Hidden                     when tile_definition_ids[r][q] === 0 (empty cell)

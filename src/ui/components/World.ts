@@ -68,19 +68,19 @@ export interface WorldOptions extends LayoutViewportOptions {
  *   Call invalidateOverlays() whenever an overlay's position changes outside of
  *   a layout pass so the hex-coverage index stays accurate.
  *
- * Geometry (flat-top hex, circumradius R, odd-q offset convention):
+ * Geometry (pointy-top hex, circumradius R, odd-r offset convention):
  *   Zone (zone_q, zone_r) covers world hexes
  *     q ∈ [zone_q·8, zone_q·8+7],  r ∈ [zone_r·8, zone_r·8+7].
  *
  *   Pixel rect of the zone in world space:
- *     left   = (zone_q·12 − 1) · R
- *     top    = (zone_r·8  − ½) · √3·R
- *     width  = 12.5 · R
- *     height = 8.5  · √3·R
+ *     left   = (zone_q·8  − ½) · √3·R
+ *     top    = (zone_r·12 − 1) · R
+ *     width  = 8.5  · √3·R
+ *     height = 12.5 · R
  *
  *   Pixel centre of world hex (world_q, world_r):
- *     cx = world_q · 1.5 · R
- *     cy = world_r · √3·R  +  (odd(world_q) ? √3/2·R : 0)
+ *     cx = world_q · √3·R  +  (odd(world_r) ? √3/2·R : 0)
+ *     cy = world_r · 1.5 · R
  */
 export class World extends LayoutViewport {
   private _z:           number;
@@ -262,8 +262,8 @@ export class World extends LayoutViewport {
    */
   centerOnHex(world_q: number, world_r: number): void {
     const R  = this._tileRadius;
-    const cx = world_q * 1.5 * R;
-    const cy = world_r * SQRT3 * R + ((world_q & 1) !== 0 ? SQRT3 / 2 * R : 0);
+    const cx = world_q * SQRT3 * R + ((world_r & 1) !== 0 ? SQRT3 / 2 * R : 0);
+    const cy = world_r * 1.5 * R;
     this.centerOn(cx, cy);
   }
 
@@ -271,14 +271,14 @@ export class World extends LayoutViewport {
 
   protected override updateLayoutChildren(): void {
     const R    = this._tileRadius;
-    const hexH = SQRT3 * R;
+    const hexW = SQRT3 * R;
 
     // ── Zones ────────────────────────────────────────────────────────────
     for (const [zone_id, zone] of this._zones) {
       const { zone_q, zone_r } = unpackZone(zone_id);
-      const px = (zone_q * ZONE_SIZE * 1.5 - 1) * R;
-      const py = (zone_r * ZONE_SIZE - 0.5)      * hexH;
-      zone.setLayout(px, py, 12.5 * R, 8.5 * hexH);
+      const px = (zone_q * ZONE_SIZE - 0.5)       * hexW;
+      const py = (zone_r * ZONE_SIZE * 1.5 - 1)   * R;
+      zone.setLayout(px, py, 8.5 * hexW, 12.5 * R);
     }
 
     // ── Card stacks ──────────────────────────────────────────────────────
@@ -304,8 +304,8 @@ export class World extends LayoutViewport {
     for (const [rootId, stack] of this._stacks) {
       const card = client_cards[rootId];
       if (!card) continue;
-      const cx = card.world_q * 1.5 * R;
-      const cy = card.world_r * hexH + ((card.world_q & 1) !== 0 ? hexH / 2 : 0);
+      const cx = card.world_q * hexW + ((card.world_r & 1) !== 0 ? hexW / 2 : 0);
+      const cy = card.world_r * 1.5 * R;
       const n  = this._chainLength(rootId);
       const sh = this._cardHeight + (n - 1) * this._titleHeight;
       // Stacks further south (larger world_r) render in front of northern ones.
@@ -424,8 +424,8 @@ export class World extends LayoutViewport {
     const nx = wx / R;
     const ny = wy / R;
 
-    const qf = nx * (2 / 3);
-    const rf = nx * (-1 / 3) + ny / SQRT3;
+    const qf = nx / SQRT3 - ny / 3;
+    const rf = ny * (2 / 3);
     const sf = -qf - rf;
 
     let q = Math.round(qf);
@@ -442,8 +442,8 @@ export class World extends LayoutViewport {
       r = -q - s;
     }
 
-    // axial → odd-q offset:  offset_r = axial_r + floor(axial_q / 2)
-    return { q, r: r + (q >> 1) };
+    // axial → odd-r offset:  offset_q = axial_q + floor(axial_r / 2)
+    return { q: q + (r >> 1), r };
   }
 
   /**

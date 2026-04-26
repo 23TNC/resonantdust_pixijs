@@ -10,15 +10,15 @@ function posKey(q: number, r: number): number {
 }
 
 /**
- * Positions layout children at explicit flat-top hex grid coordinates (q, r).
+ * Positions layout children at explicit pointy-top hex grid coordinates (q, r).
  *
- * Odd-q offset convention: odd columns shift down by half a hex height.
+ * Odd-r offset convention: odd rows shift right by half a hex width.
  *
  * R (circumradius) is computed each layout pass to fit all children within the
  * inner rect. The computed R is available via getTileRadius() after a layout pass.
  *
- * Each child receives a rect of size (2R × √3R) centered on its hex center,
- * which is exactly the bounding box of the flat-top hexagon drawn by Tile.
+ * Each child receives a rect of size (√3R × 2R) centered on its hex center,
+ * which is exactly the bounding box of the pointy-top hexagon drawn by Tile.
  *
  * Hit testing uses cube-coordinate math to resolve the hex in O(1) rather than
  * iterating all children.
@@ -82,9 +82,9 @@ export class LayoutHex extends LayoutObject {
     }
 
     // Normalized (R=1) positions:
-    //   center_x = q * 1.5
-    //   center_y = r * √3 + (odd(q) ? √3/2 : 0)
-    // Hex rect spans ±1 in x and ±√3/2 in y around the center.
+    //   center_x = q * √3 + (odd(r) ? √3/2 : 0)
+    //   center_y = r * 1.5
+    // Hex rect spans ±√3/2 in x and ±1 in y around the center.
     let nMinX = Infinity,  nMaxX = -Infinity;
     let nMinY = Infinity,  nMaxY = -Infinity;
 
@@ -92,12 +92,12 @@ export class LayoutHex extends LayoutObject {
       const pos = this._childPositions.get(child);
       if (!pos) continue;
       const { q, r } = pos;
-      const cx = q * 1.5;
-      const cy = r * SQRT3 + ((q & 1) !== 0 ? SQRT3 / 2 : 0);
-      nMinX = Math.min(nMinX, cx - 1);
-      nMaxX = Math.max(nMaxX, cx + 1);
-      nMinY = Math.min(nMinY, cy - SQRT3 / 2);
-      nMaxY = Math.max(nMaxY, cy + SQRT3 / 2);
+      const cx = q * SQRT3 + ((r & 1) !== 0 ? SQRT3 / 2 : 0);
+      const cy = r * 1.5;
+      nMinX = Math.min(nMinX, cx - SQRT3 / 2);
+      nMaxX = Math.max(nMaxX, cx + SQRT3 / 2);
+      nMinY = Math.min(nMinY, cy - 1);
+      nMaxY = Math.max(nMaxY, cy + 1);
     }
 
     const { x, y, width, height } = this.innerRect;
@@ -111,7 +111,7 @@ export class LayoutHex extends LayoutObject {
     this._nMinX     = nMinX;
     this._nMinY     = nMinY;
 
-    const hexH = SQRT3 * R;
+    const hexW = SQRT3 * R;
 
     for (const child of children) {
       const pos = this._childPositions.get(child);
@@ -120,13 +120,13 @@ export class LayoutHex extends LayoutObject {
         continue;
       }
       const { q, r } = pos;
-      const cx = q * 1.5;
-      const cy = r * SQRT3 + ((q & 1) !== 0 ? SQRT3 / 2 : 0);
+      const cx = q * SQRT3 + ((r & 1) !== 0 ? SQRT3 / 2 : 0);
+      const cy = r * 1.5;
       child.setLayout(
-        x + (cx - 1        - nMinX) * R,
-        y + (cy - SQRT3 / 2 - nMinY) * R,
+        x + (cx - SQRT3 / 2 - nMinX) * R,
+        y + (cy - 1         - nMinY) * R,
+        hexW,
         2 * R,
-        hexH,
       );
     }
   }
@@ -139,9 +139,9 @@ export class LayoutHex extends LayoutObject {
    *
    * Math:
    *   1. De-scale by R and shift by _nMinX/_nMinY to reach normalized space.
-   *   2. Apply the flat-top pixel→axial formula.
+   *   2. Apply the pointy-top pixel→axial formula.
    *   3. Round via cube-coordinate rounding (fixes the axis with most error).
-   *   4. Convert axial (q, r) → odd-q offset (q, r).
+   *   4. Convert axial (q, r) → odd-r offset (q, r).
    */
   protected localToHex(lx: number, ly: number): { q: number; r: number } | null {
     const R = this._tileRadius;
@@ -150,8 +150,8 @@ export class LayoutHex extends LayoutObject {
     const nx = (lx - this.innerRect.x) / R + this._nMinX;
     const ny = (ly - this.innerRect.y) / R + this._nMinY;
 
-    const qf = nx * (2 / 3);
-    const rf = nx * (-1 / 3) + ny / SQRT3;
+    const qf = nx / SQRT3 - ny / 3;
+    const rf = ny * (2 / 3);
     const sf = -qf - rf;
 
     let q = Math.round(qf);
@@ -168,8 +168,8 @@ export class LayoutHex extends LayoutObject {
       r = -q - s;
     }
 
-    // axial → odd-q offset:  offset_r = axial_r + floor(axial_q / 2)
-    return { q, r: r + (q >> 1) };
+    // axial → odd-r offset:  offset_q = axial_q + floor(axial_r / 2)
+    return { q: q + (r >> 1), r };
   }
 
   /** Direct lookup of the child registered at grid position (q, r). */
