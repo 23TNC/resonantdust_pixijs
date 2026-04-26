@@ -12,7 +12,6 @@ import { Tile } from "./Tile";
 
 export interface ZoneOptions extends LayoutObjectOptions {
   zone_id?: ZoneId;
-  showLabels?: boolean;
 }
 
 /**
@@ -38,13 +37,12 @@ export class Zone extends LayoutHex {
   constructor(options: ZoneOptions = {}) {
     super(options);
     this._zone_id = options.zone_id ?? 0;
-    const showLabel = options.showLabels ?? false;
 
     this._tiles = [];
     for (let r = 0; r < ZONE_SIZE; r++) {
       const row: Tile[] = [];
       for (let q = 0; q < ZONE_SIZE; q++) {
-        const tile = this.addItem(new Tile({ showLabel }), q, r);
+        const tile = this.addItem(new Tile(), q, r);
         tile.visible = false;
         row.push(tile);
       }
@@ -95,6 +93,10 @@ export class Zone extends LayoutHex {
         }
 
         tile.visible = true;
+        tile.setCoords(
+          zone!.zone_q * ZONE_SIZE + q,
+          zone!.zone_r * ZONE_SIZE + r,
+        );
 
         const card_id = cardAtPos.get(q * ZONE_SIZE + r);
         if (card_id !== undefined) {

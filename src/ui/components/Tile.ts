@@ -1,20 +1,20 @@
-import { Graphics, Text } from "pixi.js";
+import { Graphics, Text, TextStyle } from "pixi.js";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { client_cards, type CardId } from "@/spacetime/Data";
 import { getDefinitionByPacked } from "@/data/definitions/CardDefinitions";
 
 export interface TileOptions extends LayoutObjectOptions {
   /** Dynamic tile — definition is read from client_cards[card_id] each redraw. */
-  card_id?: CardId;
+  card_id?:    CardId;
   /** Static tile — packed definition used directly when no card_id is set. */
   definition?: number;
-  showLabel?: boolean;
 }
 
 const DEFAULT_HEX_COLOR  = 0x395c39;
 const DEFAULT_TEXT_COLOR = 0xf4f8ff;
 const STROKE_COLOR       = 0x0b160b;
 const STROKE_WIDTH       = 1;
+const LINE_GAP           = 2;
 
 function parseColor(value: string | undefined): number | null {
   if (!value) return null;
@@ -37,29 +37,36 @@ function flatTopHexPoints(cx: number, cy: number, radius: number): number[] {
  * Provide card_id for tiles backed by live card data, or definition (packed)
  * for purely static tiles. card_id takes priority when both are set.
  *
+ * Always renders two lines of text centred on the hex:
+ *   Line 1 — card name (bold)
+ *   Line 2 — world_q, world_r (normal weight)
+ *
  * Color mapping (from CardDefinition.style.color):
  *   [0] → hex fill
- *   [1] → label text
+ *   [1] → text color
  */
 export class Tile extends LayoutObject {
   private _card_id:    CardId;
   private _definition: number;
-  private _showLabel:  boolean;
+  private _worldQ      = 0;
+  private _worldR      = 0;
 
-  private readonly _body  = new Graphics();
-  private readonly _label = new Text({ text: "" });
+  private readonly _body   = new Graphics();
+  private readonly _label  = new Text({ text: "", style: new TextStyle() });
+  private readonly _coords = new Text({ text: "", style: new TextStyle() });
 
   constructor(options: TileOptions = {}) {
     super(options);
 
     this._card_id    = options.card_id    ?? 0;
     this._definition = options.definition ?? 0;
-    this._showLabel  = options.showLabel  ?? true;
 
     this._label.anchor.set(0.5);
+    this._coords.anchor.set(0.5);
 
     this.addDisplay(this._body);
     this.addDisplay(this._label);
+    this.addDisplay(this._coords);
 
     this.invalidateRender();
   }
@@ -73,9 +80,7 @@ export class Tile extends LayoutObject {
     this.invalidateRender();
   }
 
-  getCardId(): CardId {
-    return this._card_id;
-  }
+  getCardId(): CardId { return this._card_id; }
 
   setDefinition(definition: number): void {
     if (this._card_id === 0 && this._definition === definition) return;
@@ -84,13 +89,12 @@ export class Tile extends LayoutObject {
     this.invalidateRender();
   }
 
-  getDefinition(): number {
-    return this._resolvePackedDefinition();
-  }
+  getDefinition(): number { return this._resolvePackedDefinition(); }
 
-  setShowLabel(show: boolean): void {
-    if (this._showLabel === show) return;
-    this._showLabel = show;
+  setCoords(worldQ: number, worldR: number): void {
+    if (this._worldQ === worldQ && this._worldR === worldR) return;
+    this._worldQ = worldQ;
+    this._worldR = worldR;
     this.invalidateRender();
   }
 
@@ -105,30 +109,47 @@ export class Tile extends LayoutObject {
     const textColor = parseColor(colors[1]) ?? DEFAULT_TEXT_COLOR;
 
     const { x, y, width, height } = this.innerRect;
-    const cx     = x + width / 2;
+    const cx     = x + width  / 2;
     const cy     = y + height / 2;
     const radius = Math.min(width / 2, height / Math.sqrt(3));
 
+    // ── Hex background ────────────────────────────────────────────────────
     this._body.clear();
     this._body
       .poly(flatTopHexPoints(cx, cy, radius))
       .fill({ color: hexColor })
       .stroke({ color: STROKE_COLOR, width: STROKE_WIDTH });
 
-    const name = definition?.name ?? "";
+    // ── Two-line text block centred on the hex ────────────────────────────
+    const nameSize  = Math.max(6,  Math.floor(radius / 3));
+    const coordSize = Math.max(5,  Math.floor(radius / 4));
+    // Treat the two lines as a block; offset so the block is vertically centred.
+    const blockH    = nameSize + LINE_GAP + coordSize;
+    const blockTop  = cy - blockH / 2;
 
-    this._label.visible = this._showLabel && name.length > 0;
+    const name = definition?.name ?? "";
+    this._label.visible = name.length > 0;
     this._label.text    = name;
     this._label.x       = cx;
-    this._label.y       = cy;
-    this._label.style   = {
+    this._label.y       = blockTop + nameSize / 2;
+    this._label.style   = new TextStyle({
       fill:       textColor,
-      fontFamily: "Segoe UI",
-      fontSize:   Math.max(6, Math.floor(radius / 3)),
+      fontFamily: "sans-serif",
+      fontSize:   nameSize,
       fontWeight: "700",
       align:      "center",
-      wordWrap:   false,
-    };
+    });
+
+    this._coords.text = `${this._worldQ}, ${this._worldR}`;
+    this._coords.x    = cx;
+    this._coords.y    = blockTop + nameSize + LINE_GAP + coordSize / 2;
+    this._coords.style = new TextStyle({
+      fill:       textColor,
+      fontFamily: "sans-serif",
+      fontSize:   coordSize,
+      fontWeight: "400",
+      align:      "center",
+    });
   }
 
   // ─── Private ─────────────────────────────────────────────────────────────
