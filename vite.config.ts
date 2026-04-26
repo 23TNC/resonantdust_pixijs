@@ -1,13 +1,17 @@
-// vite.config.ts
 import { defineConfig } from "vite";
 
 export default defineConfig({
-    server: {
+  server: {
     port: 5173,
   },
   resolve: {
     alias: {
       "@": "/src",
+    },
+  },
+  optimizeDeps: {
+    esbuildOptions: {
+      sourcemap: false,
     },
   },
 });

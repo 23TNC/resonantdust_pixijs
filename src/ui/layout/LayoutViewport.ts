@@ -46,6 +46,29 @@ export class LayoutViewport extends LayoutObject {
     this.invalidateRender();
   }
 
+  // ─── Layout ──────────────────────────────────────────────────────────────
+
+  /**
+   * Adjust the camera on resize so that the world point currently at the
+   * centre of the viewport stays centred after the new dimensions are applied.
+   *
+   * centre_world = camX + innerRect.width  / 2  (before)
+   *              = camX + innerRect.width  / 2  (after, solved for new camX)
+   * → newCamX = camX + (oldW − newW) / 2
+   *
+   * Skipped on the initial sizing (oldW / oldH === 0) so the first centerOn()
+   * call is not overridden by a meaningless delta.
+   */
+  override setLayout(x: number, y: number, width: number, height: number): void {
+    const prevW = this.innerRect.width;
+    const prevH = this.innerRect.height;
+    super.setLayout(x, y, width, height);
+    if (prevW > 0 && prevH > 0) {
+      this._camX += (prevW - this.innerRect.width)  / 2;
+      this._camY += (prevH - this.innerRect.height) / 2;
+    }
+  }
+
   // ─── Camera ──────────────────────────────────────────────────────────────
 
   setCamera(x: number, y: number): void {

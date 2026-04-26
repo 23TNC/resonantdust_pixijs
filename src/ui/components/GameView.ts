@@ -37,23 +37,25 @@ export class GameView extends LayoutRoot {
 
     this._world = new World({ tileRadius: 24 });
 
+    const PAD = 4;
+
     // ── Left column ───────────────────────────────────────────────────────
     const leftCol = new LayoutVertical();
-    leftCol.addItem(new Panel(), { weight: 1 });
-    leftCol.addItem(new Panel(), { weight: 1 });
-    leftCol.addItem(new Panel(), { weight: 1 });
+    leftCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
+    leftCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
+    leftCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
 
     // ── Center column ─────────────────────────────────────────────────────
-    const worldPanel = new Panel({ radius: 0 });
+    const worldPanel = new Panel({ padding: PAD, radius: 0 });
     worldPanel.addLayoutChild(this._world);
     const centerCol = new LayoutVertical();
-    centerCol.addItem(worldPanel, { weight: 4 });
-    centerCol.addItem(new Panel(), { weight: 1 });
+    centerCol.addItem(worldPanel,              { weight: 4 });
+    centerCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
 
     // ── Right column ──────────────────────────────────────────────────────
     const rightCol = new LayoutVertical();
-    rightCol.addItem(new Panel(), { weight: 1 });
-    rightCol.addItem(new Panel(), { weight: 1 });
+    rightCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
+    rightCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
 
     // ── Main row ──────────────────────────────────────────────────────────
     const mainRow = new LayoutHorizontal();
@@ -63,8 +65,8 @@ export class GameView extends LayoutRoot {
 
     // ── Outer column ──────────────────────────────────────────────────────
     const outerCol = new LayoutVertical();
-    outerCol.addItem(new Panel(), { weight: 1 });
-    outerCol.addItem(mainRow,     { weight: 9 });
+    outerCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
+    outerCol.addItem(mainRow,                     { weight: 9 });
 
     this.addLayoutChild(outerCol);
   }
