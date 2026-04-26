@@ -51,12 +51,16 @@ export class GameView extends LayoutRoot {
     this._layers = new LayoutLayers({ layers: ["world", "game", "overlay"] });
     this.addLayoutChild(this._layers);
 
-    this._world = new World({ tileRadius: 70 });
+    const TILE_R  = 70;
+    const CARD_W  = TILE_R;
+    const CARD_H  = Math.round(TILE_R * 4 / 3);
+
+    this._world = new World({ tileRadius: TILE_R, stackWidth: CARD_W, cardHeight: CARD_H });
 
     const PAD = 4;
 
     // ── Left column ───────────────────────────────────────────────────────
-    this._inventory = new Inventory({ observer_id, viewed_id, card_types: [1, 2, 3, 4] });
+    this._inventory = new Inventory({ observer_id, viewed_id, card_types: [1, 2, 3, 4], stackWidth: CARD_W, cardHeight: CARD_H });
     const inventoryPanel = new Panel({ padding: PAD });
     inventoryPanel.addLayoutChild(this._inventory);
 
@@ -103,7 +107,9 @@ export class GameView extends LayoutRoot {
     this._world.setInput(this._input);
 
     this._dragManager = new DragManager({
-      input:  this._input,
+      input:      this._input,
+      stackWidth: CARD_W,
+      cardHeight: CARD_H,
     });
     this._layers.add(this._dragManager, "overlay");
   }
