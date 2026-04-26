@@ -1,331 +1,323 @@
-import { Point, Rectangle } from "pixi.js";
-import { LayoutViewport, type LayoutViewportOptions } from "@/ui/layout";
-import {
-  client_cards,
-  packZone,
-  unpackZone,
-  viewed_id,
-  type ZoneId,
-} from "@/spacetime/Data";
+import { Point } from "pixi.js";
+import { client_zones, packZone, unpackZone, ZONE_SIZE, type ZoneId } from "@/spacetime/Data";
+import { LayoutObject } from "@/ui/layout/LayoutObject";
+import { LayoutViewport, type LayoutViewportOptions } from "@/ui/layout/LayoutViewport";
 import { Zone } from "./Zone";
 
+const SQRT3 = Math.sqrt(3);
+
+// Pack two 16-bit signed integers into a 32-bit key for Map lookup.
+// Valid for world_q/world_r in [-32768, 32767].
+function posKey(q: number, r: number): number {
+  return ((q & 0xffff) << 16) | (r & 0xffff);
+}
+
 export interface WorldOptions extends LayoutViewportOptions {
-  hexSize?: number;
-  zoneSize?: number;
+  z?: number;
+  tileRadius?: number;
 }
 
-export interface ZoneWorldRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
+/**
+ * Main game board. Extends LayoutViewport so the hex world can be panned and
+ * clipped to the screen rect.
+ *
+ * Zone management:
+ *   Call syncZones() whenever client_zones changes. World maintains one Zone
+ *   child per entry in client_zones whose z matches _z. Each Zone is placed at
+ *   its world-space pixel rect; the camera transform in LayoutViewport maps
+ *   world pixels to screen pixels.
+ *
+ * Overlay children (players, animating cards):
+ *   Register via addOverlay(). Unlike tile children, overlays may span zone
+ *   boundaries, so they are tracked here rather than in Zone. Hit testing checks
+ *   the World overlay index before falling through to Zone → Tile.
+ *   Call invalidateOverlays() whenever an overlay's position changes outside of
+ *   a layout pass so the hex-coverage index stays accurate.
+ *
+ * Geometry (flat-top hex, circumradius R, odd-q offset convention):
+ *   Zone (zone_q, zone_r) covers world hexes
+ *     q ∈ [zone_q·8, zone_q·8+7],  r ∈ [zone_r·8, zone_r·8+7].
+ *
+ *   Pixel rect of the zone in world space:
+ *     left   = (zone_q·12 − 1) · R
+ *     top    = (zone_r·8  − ½) · √3·R
+ *     width  = 12.5 · R
+ *     height = 8.5  · √3·R
+ *
+ *   Pixel centre of world hex (world_q, world_r):
+ *     cx = world_q · 1.5 · R
+ *     cy = world_r · √3·R  +  (odd(world_q) ? √3/2·R : 0)
+ */
 export class World extends LayoutViewport {
-  private readonly zonesById = new Map<ZoneId, Zone>();
-  private hexSize: number;
-  private zoneSize: number;
+  private _z: number;
+  private _tileRadius: number;
+  private readonly _zones = new Map<ZoneId, Zone>();
 
-  public constructor(options: WorldOptions = {}) {
-    super({ scissorClipping: true, ...options });
+  // ─── Overlay index ───────────────────────────────────────────────────────
+  // Non-zone layout children (players, moving cards …) registered by the world
+  // hex cells they visually cover.  The key is posKey(world_q, world_r).
+  private readonly _overlayChildren = new Set<LayoutObject>();
+  private readonly _overlayAtHex   = new Map<number, Set<LayoutObject>>();
+  private          _overlayDirty   = false;
 
-    this.hexSize = Math.max(1, options.hexSize ?? 32);
-    this.zoneSize = Math.max(1, Math.floor(options.zoneSize ?? 8));
+  // ─────────────────────────────────────────────────────────────────────────
+
+  constructor(options: WorldOptions = {}) {
+    super(options);
+    this._z          = options.z          ?? 1;
+    this._tileRadius = options.tileRadius ?? 16;
   }
 
-  public createZone(zone_id: ZoneId): Zone {
-    const bounds = this.getZoneLocalBounds();
+  // ─── Configuration ───────────────────────────────────────────────────────
 
-    return new Zone(zone_id, {
-      width: bounds.width,
-      height: bounds.height,
-      padding: {
-        top: -bounds.y,
-        left: -bounds.x,
-        right: 0,
-        bottom: 0,
-      },
-      hexSize: this.hexSize,
-      zoneSize: this.zoneSize,
-    });
+  setZ(z: number): void {
+    if (this._z === z) return;
+    this._z = z;
+    this.syncZones();
   }
 
-  public addZone(zone: Zone): Zone {
-    const zone_id = zone.zone_id;
-    const existing = this.zonesById.get(zone_id);
+  getZ(): number { return this._z; }
 
-    if (existing && existing !== zone) {
-      this.removeZone(zone_id);
-    }
-
-    this.zonesById.set(zone_id, zone);
-
-    const { zone_q, zone_r } = unpackZone(zone_id);
-    const rect = this.getZoneWorldRect(zone_q, zone_r);
-    const added = this.addViewportChild(zone, rect.x, rect.y, rect.width, rect.height);
-
-    this.invalidateLayout();
-    return added;
-  }
-
-  public ensureZone(zone_id: ZoneId): Zone {
-    const existing = this.getZone(zone_id);
-
-    if (existing) {
-      return existing;
-    }
-
-    return this.addZone(this.createZone(zone_id));
-  }
-
-  public ensureViewportZone(): Zone | null {
-    const zone_id = this.getViewportZoneId();
-
-    if (zone_id == null) {
-      return null;
-    }
-
-    return this.ensureZone(zone_id);
-  }
-
-  public getViewportZoneId(): ZoneId | null {
-    const viewedCard = client_cards[viewed_id];
-    if (!viewedCard) {
-      return null;
-    }
-
-    const visibleRect = this.getVisibleWorldRect();
-    const centerX = visibleRect.x + visibleRect.width / 2;
-    const centerY = visibleRect.y + visibleRect.height / 2;
-    const { q: world_q, r: world_r } = this.pixelToWorldHex(centerX, centerY);
-
-    const zone_q = Math.floor(world_q / this.zoneSize);
-    const zone_r = Math.floor(world_r / this.zoneSize);
-
-    return packZone(zone_q, zone_r, viewedCard.z);
-  }
-
-  public removeZone(zone_id: ZoneId): Zone | null {
-    const zone = this.zonesById.get(zone_id);
-
-    if (!zone) {
-      return null;
-    }
-
-    this.zonesById.delete(zone_id);
-    this.removeViewportChild(zone);
-    this.invalidateLayout();
-
-    return zone;
-  }
-
-  public getZone(zone_id: ZoneId): Zone | null {
-    return this.zonesById.get(zone_id) ?? null;
-  }
-
-  public hasZone(zone_id: ZoneId): boolean {
-    return this.zonesById.has(zone_id);
-  }
-
-  public forEachZone(callback: (zone: Zone) => void): void {
-    for (const zone of this.zonesById.values()) {
-      callback(zone);
-    }
-  }
-
-  public setHexSize(hexSize: number): void {
-    const nextHexSize = Math.max(1, hexSize);
-
-    if (this.hexSize === nextHexSize) {
-      return;
-    }
-
-    this.hexSize = nextHexSize;
-
-    for (const zone of this.zonesById.values()) {
-      zone.setHexSize(this.hexSize);
-      this.updateZoneWorldRect(zone);
-      zone.markZoneLayoutDirty();
-    }
-
+  setTileRadius(R: number): void {
+    if (this._tileRadius === R) return;
+    this._tileRadius = R;
     this.invalidateLayout();
   }
 
-  public getHexSize(): number {
-    return this.hexSize;
-  }
+  getTileRadius(): number { return this._tileRadius; }
 
-  public setZoneSize(zoneSize: number): void {
-    const nextZoneSize = Math.max(1, Math.floor(zoneSize));
+  // ─── Zone management ─────────────────────────────────────────────────────
 
-    if (this.zoneSize === nextZoneSize) {
-      return;
-    }
+  /**
+   * Synchronise Zone children with client_zones for the current z layer.
+   * Call after any zone is added, removed, or if the z layer changes.
+   */
+  syncZones(): void {
+    const active = new Set<ZoneId>();
 
-    this.zoneSize = nextZoneSize;
+    for (const key of Object.keys(client_zones)) {
+      const zone_id = Number(key) as ZoneId;
+      const data    = client_zones[zone_id];
+      if (!data || data.z !== this._z) continue;
 
-    for (const zone of this.zonesById.values()) {
-      this.updateZoneWorldRect(zone);
-      zone.markZoneLayoutDirty();
-    }
+      active.add(zone_id);
 
-    this.invalidateLayout();
-  }
-
-  public getZoneSize(): number {
-    return this.zoneSize;
-  }
-
-  public worldHexToPixel(q: number, r: number): Point {
-    return new Point(
-      this.hexSize * (3 / 2) * q,
-      this.hexSize * Math.sqrt(3) * (r + q / 2),
-    );
-  }
-
-  public pixelToWorldHex(x: number, y: number): { q: number; r: number } {
-    const q = ((2 / 3) * x) / this.hexSize;
-    const r = ((-1 / 3) * x + (Math.sqrt(3) / 3) * y) / this.hexSize;
-
-    return this.roundHex(q, r);
-  }
-
-  public viewportToWorldHex(x: number, y: number): { q: number; r: number } {
-    const world = this.viewportToWorld(x, y);
-    return this.pixelToWorldHex(world.x, world.y);
-  }
-
-  public getZoneWorldRect(zoneQ: number, zoneR: number): ZoneWorldRect {
-    const base = this.worldHexToPixel(zoneQ * this.zoneSize, zoneR * this.zoneSize);
-    const bounds = this.getZoneLocalBounds();
-
-    return {
-      x: base.x + bounds.x,
-      y: base.y + bounds.y,
-      width: bounds.width,
-      height: bounds.height,
-    };
-  }
-
-  public getVisibleZones(z: number): Zone[] {
-    const visibleRect = this.getVisibleWorldRect();
-    const zones: Zone[] = [];
-
-    for (const zone of this.zonesById.values()) {
-      const { zone_q, zone_r, z: zone_z } = unpackZone(zone.zone_id);
-
-      if (zone_z !== z) {
-        continue;
-      }
-
-      const rect = this.getZoneWorldRect(zone_q, zone_r);
-
-      if (this.rectsIntersect(rect, visibleRect)) {
-        zones.push(zone);
+      if (!this._zones.has(zone_id)) {
+        const zone = new Zone({ zone_id });
+        this._zones.set(zone_id, zone);
+        this.addLayoutChild(zone);
       }
     }
 
-    return zones;
-  }
-
-  public markZoneDirty(zone: Zone): void {
-    if (!this.zonesById.has(zone.zone_id)) {
-      return;
-    }
-
-    this.invalidateRender();
-  }
-
-  public markZoneLayoutDirty(zone: Zone): void {
-    if (!this.zonesById.has(zone.zone_id)) {
-      return;
+    // Remove zones absent from client_zones or on a different z layer.
+    for (const [zone_id, zone] of this._zones) {
+      if (!active.has(zone_id)) {
+        this.removeLayoutChild(zone);
+        this._zones.delete(zone_id);
+      }
     }
 
     this.invalidateLayout();
   }
 
-  public centerOnWorldHex(q: number, r: number): void {
-    const center = this.worldHexToPixel(q, r);
-
-    this.setViewOffset(
-      center.x - this.innerRect.width / 2,
-      center.y - this.innerRect.height / 2,
-    );
-
-    this.ensureViewportZone();
+  /** Return the Zone for a given zone_id, or undefined if not loaded. */
+  getZone(zone_id: ZoneId): Zone | undefined {
+    return this._zones.get(zone_id);
   }
 
-  protected override layoutChildren(): void {
-    this.ensureViewportZone();
+  // ─── Overlay children ────────────────────────────────────────────────────
 
-    for (const zone of this.zonesById.values()) {
-      this.updateZoneWorldRect(zone);
+  /**
+   * Add a non-tile child (player, moving card, etc.) to the world.
+   * Its setLayout() calls should use world pixel coordinates.
+   * Call invalidateOverlays() whenever the child is repositioned outside of a
+   * layout pass so the hex-coverage index stays accurate.
+   */
+  addOverlay<T extends LayoutObject>(child: T, depth = 1): T {
+    this._overlayChildren.add(child);
+    this._overlayDirty = true;
+    this.addLayoutChild(child, depth);
+    return child;
+  }
+
+  /**
+   * Notify World that one or more overlay children have moved since the last
+   * layout pass. The coverage index will be rebuilt before the next hit test.
+   */
+  invalidateOverlays(): void {
+    this._overlayDirty = true;
+  }
+
+  override removeLayoutChild<T extends LayoutObject>(child: T): T | null {
+    if (this._overlayChildren.has(child)) {
+      this._overlayChildren.delete(child);
+      // Evict from all hex-coverage sets immediately so same-frame hit tests
+      // do not return a stale reference.
+      for (const set of this._overlayAtHex.values()) set.delete(child);
+      for (const [key, set] of this._overlayAtHex) {
+        if (set.size === 0) this._overlayAtHex.delete(key);
+      }
+    }
+    return super.removeLayoutChild(child);
+  }
+
+  // ─── Camera helpers ──────────────────────────────────────────────────────
+
+  /**
+   * Pan so that world hex (world_q, world_r) is centred in the viewport.
+   * Requires a valid innerRect (call after layout has run).
+   */
+  centerOnHex(world_q: number, world_r: number): void {
+    const R  = this._tileRadius;
+    const cx = world_q * 1.5 * R;
+    const cy = world_r * SQRT3 * R + ((world_q & 1) !== 0 ? SQRT3 / 2 * R : 0);
+    this.centerOn(cx, cy);
+  }
+
+  // ─── Layout ──────────────────────────────────────────────────────────────
+
+  protected override updateLayoutChildren(): void {
+    const R    = this._tileRadius;
+    const hexH = SQRT3 * R;
+
+    for (const [zone_id, zone] of this._zones) {
+      const { zone_q, zone_r } = unpackZone(zone_id);
+      const px = (zone_q * ZONE_SIZE * 1.5 - 1) * R;
+      const py = (zone_r * ZONE_SIZE - 0.5)      * hexH;
+      zone.setLayout(px, py, 12.5 * R, 8.5 * hexH);
     }
 
-    super.layoutChildren();
+    // Zone pixel positions changed; the overlay hex-coverage index is stale.
+    this._overlayDirty = true;
   }
 
-  private updateZoneWorldRect(zone: Zone): void {
-    const { zone_q, zone_r } = unpackZone(zone.zone_id);
-    const rect = this.getZoneWorldRect(zone_q, zone_r);
-    this.setChildWorldRect(zone, rect.x, rect.y, rect.width, rect.height);
-  }
+  // ─── Hit test ────────────────────────────────────────────────────────────
 
-  private getZoneLocalBounds(): Rectangle {
-    const hexWidth = this.hexSize * 2;
-    const hexHeight = Math.sqrt(3) * this.hexSize;
+  /**
+   * Hit test that checks overlay children before tiles.
+   *
+   * Algorithm:
+   *   1. Convert cursor to world pixel space (undo camera offset).
+   *   2. Convert world pixel → world hex via cube-coordinate math.
+   *   3. Walk overlay candidates registered at that hex.
+   *   4. Fall through to the Zone at that hex → Tile → this.
+   */
+  override hitTestLayout(globalX: number, globalY: number): LayoutObject | null {
+    const local = this.toLocal(new Point(globalX, globalY));
+    if (!this.innerRect.contains(local.x, local.y)) return null;
 
-    let minX = Number.POSITIVE_INFINITY;
-    let minY = Number.POSITIVE_INFINITY;
-    let maxX = Number.NEGATIVE_INFINITY;
-    let maxY = Number.NEGATIVE_INFINITY;
+    if (this._overlayDirty) this._rebuildOverlayIndex();
 
-    for (let q = 0; q < this.zoneSize; q++) {
-      for (let r = 0; r < this.zoneSize; r++) {
-        const center = this.worldHexToPixel(q, r);
-        minX = Math.min(minX, center.x - hexWidth / 2);
-        minY = Math.min(minY, center.y - hexHeight / 2);
-        maxX = Math.max(maxX, center.x + hexWidth / 2);
-        maxY = Math.max(maxY, center.y + hexHeight / 2);
+    // Undo the camera transform to reach world pixel coordinates.
+    const cam = this.getCamera();
+    const wx  = local.x - this.innerRect.x + cam.x;
+    const wy  = local.y - this.innerRect.y + cam.y;
+
+    const hex = this._worldPixelToHex(wx, wy);
+    if (!hex) return this;
+
+    const { q: world_q, r: world_r } = hex;
+
+    // ── Overlays (above tiles) ───────────────────────────────────────────
+    const candidates = this._overlayAtHex.get(posKey(world_q, world_r));
+    if (candidates?.size) {
+      for (const overlay of candidates) {
+        if (!overlay.visible) continue;
+        const hit = overlay.hitTestLayout(globalX, globalY);
+        if (hit) return hit;
       }
     }
 
-    return new Rectangle(minX, minY, maxX - minX, maxY - minY);
-  }
-
-  private roundHex(q: number, r: number): { q: number; r: number } {
-    const x = q;
-    const z = r;
-    const y = -x - z;
-
-    let rx = Math.round(x);
-    let ry = Math.round(y);
-    let rz = Math.round(z);
-
-    const xDiff = Math.abs(rx - x);
-    const yDiff = Math.abs(ry - y);
-    const zDiff = Math.abs(rz - z);
-
-    if (xDiff > yDiff && xDiff > zDiff) {
-      rx = -ry - rz;
-    } else if (yDiff > zDiff) {
-      ry = -rx - rz;
-    } else {
-      rz = -rx - ry;
+    // ── Zone → Tile ──────────────────────────────────────────────────────
+    const zone_q  = Math.floor(world_q / ZONE_SIZE);
+    const zone_r  = Math.floor(world_r / ZONE_SIZE);
+    const zone_id = packZone(zone_q, zone_r, this._z);
+    const zone    = this._zones.get(zone_id);
+    if (zone?.visible) {
+      return zone.hitTestLayout(globalX, globalY) ?? this;
     }
 
-    return { q: rx, r: rz };
+    return this;
   }
 
-  private rectsIntersect(
-    a: { x: number; y: number; width: number; height: number },
-    b: { x: number; y: number; width: number; height: number },
-  ): boolean {
-    return (
-      a.x < b.x + b.width &&
-      a.x + a.width > b.x &&
-      a.y < b.y + b.height &&
-      a.y + a.height > b.y
-    );
+  // ─── Private ─────────────────────────────────────────────────────────────
+
+  /**
+   * Convert world pixel coordinates to the nearest world hex cell (q, r).
+   *
+   * World pixel space: center of hex (q, r) sits at
+   *   (q·1.5·R,  r·√3·R + odd(q)·√3/2·R)
+   * Inverted via the flat-top pixel→axial formula, cube-coordinate rounding,
+   * then axial→odd-q offset conversion.
+   */
+  private _worldPixelToHex(wx: number, wy: number): { q: number; r: number } | null {
+    const R = this._tileRadius;
+    if (R <= 0) return null;
+
+    const nx = wx / R;
+    const ny = wy / R;
+
+    const qf = nx * (2 / 3);
+    const rf = nx * (-1 / 3) + ny / SQRT3;
+    const sf = -qf - rf;
+
+    let q = Math.round(qf);
+    let r = Math.round(rf);
+    const s = Math.round(sf);
+
+    const dq = Math.abs(q - qf);
+    const dr = Math.abs(r - rf);
+    const ds = Math.abs(s - sf);
+
+    if (dq > dr && dq > ds) {
+      q = -r - s;
+    } else if (dr > ds) {
+      r = -q - s;
+    }
+
+    // axial → odd-q offset:  offset_r = axial_r + floor(axial_q / 2)
+    return { q, r: r + (q >> 1) };
+  }
+
+  /**
+   * Rebuild the hex-coverage index for all overlay children.
+   *
+   * Five points are sampled in world pixel space (four corners + centre).
+   * Each maps to a world hex cell; the child is registered under every distinct
+   * cell found, so overlays spanning hex boundaries are reachable from either side.
+   */
+  private _rebuildOverlayIndex(): void {
+    this._overlayAtHex.clear();
+    this._overlayDirty = false;
+
+    for (const child of this._overlayChildren) {
+      const lx = child.position.x;
+      const ly = child.position.y;
+      const rw = child.outerRect.width;
+      const rh = child.outerRect.height;
+
+      const points: [number, number][] = [
+        [lx,          ly         ],  // top-left
+        [lx + rw,     ly         ],  // top-right
+        [lx,          ly + rh    ],  // bottom-left
+        [lx + rw,     ly + rh    ],  // bottom-right
+        [lx + rw / 2, ly + rh / 2], // centre
+      ];
+
+      const seen = new Set<number>();
+
+      for (const [px, py] of points) {
+        const hex = this._worldPixelToHex(px, py);
+        if (!hex) continue;
+
+        const key = posKey(hex.q, hex.r);
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        let set = this._overlayAtHex.get(key);
+        if (!set) { set = new Set(); this._overlayAtHex.set(key, set); }
+        set.add(child);
+      }
+    }
   }
 }

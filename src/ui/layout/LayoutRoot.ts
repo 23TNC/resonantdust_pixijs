@@ -1,147 +1,30 @@
-import { Rectangle } from "pixi.js";
-import { getApp } from "../../app/AppContext";
-import { LayoutRect, type LayoutRectOptions } from "./LayoutRect";
+import { getApp } from "@/app";
+import { LayoutObject, type LayoutObjectOptions } from "./LayoutObject";
 
-export interface LayoutRootOptions extends LayoutRectOptions {}
+/**
+ * Top-level layout node that sizes itself to the PixiJS renderer screen and
+ * re-layout whenever the window resizes. Each layout child is sized to fill
+ * the full inner rect, making this the entry point for full-screen views.
+ */
+export class LayoutRoot extends LayoutObject {
+  private readonly _onResize: () => void;
 
-type AppResizeSource = {
-  on(event: "resize", callback: () => void): void;
-  off(event: "resize", callback: () => void): void;
-  screen: Rectangle;
-};
+  constructor(options: LayoutObjectOptions = {}) {
+    super(options);
 
-export class LayoutRoot extends LayoutRect {
-  private readonly items: LayoutRect[] = [];
-  private appResizeSource: AppResizeSource | null = null;
-  private screenWidth: number;
-  private screenHeight: number;
-
-  private readonly handleAppResize = (): void => {
-    const app = getApp();
-    const { width, height } = app.renderer.screen;
-
-    this.resize(width, height);
-  };
-
-  public constructor(options: LayoutRootOptions = {}) {
-    super({
-      ...options,
-      x: options.x ?? 0,
-      y: options.y ?? 0,
-      width: options.width ?? 0,
-      height: options.height ?? 0,
-      padding: options.padding ?? 0,
-    });
-
-    this.screenWidth = Math.max(0, options.width ?? 0);
-    this.screenHeight = Math.max(0, options.height ?? 0);
-
-    this.bindAppResize();
+    this._onResize = () => this._syncToScreen();
+    getApp().renderer.on("resize", this._onResize);
+    this._syncToScreen();
   }
 
-  public addLayoutItem<T extends LayoutRect>(item: T): T {
-    if (!this.items.includes(item)) {
-      this.items.push(item);
-    }
-
-    item.setParentLayout(this);
-
-    if (item.parent !== this) {
-      this.addChild(item);
-    }
-
-    this.invalidateLayout();
-    this.invalidateRender();
-
-    return item;
+  override destroy(options?: Parameters<LayoutObject["destroy"]>[0]): void {
+    getApp().renderer.off("resize", this._onResize);
+    super.destroy(options);
   }
 
-  public removeLayoutItem<T extends LayoutRect>(item: T): T | null {
-    const index = this.items.indexOf(item);
-
-    if (index < 0) {
-      return null;
-    }
-
-    this.items.splice(index, 1);
-    item.setParentLayout(null);
-
-    if (item.parent === this) {
-      this.removeChild(item);
-    }
-
-    this.invalidateLayout();
-    this.invalidateRender();
-
-    return item;
-  }
-
-  public destroyLayoutItem(item: LayoutRect): void {
-    this.removeLayoutItem(item);
-    item.destroy({ children: true });
-  }
-
-  public clearLayoutItems(options: { destroy?: boolean } = {}): void {
-    for (const item of this.items) {
-      item.setParentLayout(null);
-
-      if (item.parent === this) {
-        this.removeChild(item);
-      }
-
-      if (options.destroy) {
-        item.destroy({ children: true });
-      }
-    }
-
-    this.items.length = 0;
-    this.invalidateLayout();
-    this.invalidateRender();
-  }
-
-  public getLayoutItems(): readonly LayoutRect[] {
-    return this.items;
-  }
-
-  public bindAppResize(): void {
-    if (this.appResizeSource) {
-      return;
-    }
-
-    const app = getApp();
-    const renderer = app.renderer as unknown as AppResizeSource;
-
-    this.appResizeSource = renderer;
-    renderer.on("resize", this.handleAppResize);
-
-    this.resize(renderer.screen.width, renderer.screen.height);
-  }
-
-  public unbindAppResize(): void {
-    if (!this.appResizeSource) {
-      return;
-    }
-
-    this.appResizeSource.off("resize", this.handleAppResize);
-    this.appResizeSource = null;
-  }
-
-  public resize(width: number, height: number): void {
-    this.screenWidth = Math.max(0, width);
-    this.screenHeight = Math.max(0, height);
-
-    this.setLayout(0, 0, this.screenWidth, this.screenHeight);
-    this.invalidateLayout();
-    this.invalidateRender();
-  }
-
-  public getScreenRect(): Rectangle {
-    return new Rectangle(0, 0, this.screenWidth, this.screenHeight);
-  }
-
-  protected override layoutChildren(): void {
-    for (const item of this.items) {
-      item.setLayout(
+  protected override updateLayoutChildren(): void {
+    for (const child of this.getLayoutChildren()) {
+      child.setLayout(
         this.innerRect.x,
         this.innerRect.y,
         this.innerRect.width,
@@ -150,8 +33,13 @@ export class LayoutRoot extends LayoutRect {
     }
   }
 
-  public override destroy(options?: Parameters<LayoutRect["destroy"]>[0]): void {
-    this.unbindAppResize();
-    super.destroy(options);
+  tick(): void {
+    this.updateLayout();
+    this.renderLayout();
+  }
+
+  private _syncToScreen(): void {
+    const { width, height } = getApp().renderer.screen;
+    this.setLayout(0, 0, width, height);
   }
 }

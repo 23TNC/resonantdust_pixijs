@@ -1,6 +1,5 @@
 import { Application } from "pixi.js";
-import { setApp } from "./app";
-import { bootstrap as loadDebugData } from "./spacetime/DebugData";
+import { initApp } from "./app";
 import { LoginScene, SceneManager } from "./scenes";
 import { bootstrapCardDefinitions } from "@/data/definitions";
 
@@ -28,21 +27,14 @@ async function startApp(): Promise<void> {
     resizeTo: root,
   });
 
-  setApp(app);
-
+  initApp(app);
   root.appendChild(app.canvas);
   app.canvas.style.display = "block";
+
   bootstrapCardDefinitions();
-  loadDebugData();
 
   const sceneManager = new SceneManager();
   sceneManager.setScene(new LoginScene(sceneManager));
-
-  app.ticker.add((ticker) => {
-    sceneManager.update(ticker);
-  });
-
-  console.log("[respoiler] debug data loaded, entering login scene");
 }
 
 void startApp();

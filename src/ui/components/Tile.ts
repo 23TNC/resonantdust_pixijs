@@ -1,212 +1,142 @@
 import { Graphics, Text } from "pixi.js";
-import { LayoutRect, type LayoutRectOptions } from "@/ui/layout";
+import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { client_cards, type CardId } from "@/spacetime/Data";
 import { getDefinitionByPacked } from "@/data/definitions/CardDefinitions";
 
-export interface TileStyle {
-  fill?: number | string;
-  stroke?: number | string;
-  strokeWidth?: number;
-  alpha?: number;
-  labelFill?: number | string;
-}
-
-export interface TileOptions extends LayoutRectOptions {
-  q?: number;
-  r?: number;
+export interface TileOptions extends LayoutObjectOptions {
+  /** Dynamic tile — definition is read from client_cards[card_id] each redraw. */
   card_id?: CardId;
-  definition_id?: number;
-  definitionId?: number;
-  name?: string;
-  style?: TileStyle;
+  /** Static tile — packed definition used directly when no card_id is set. */
+  definition?: number;
   showLabel?: boolean;
-  originX?: number;
-  originY?: number;
 }
 
-export class Tile extends LayoutRect {
-  public q: number;
-  public r: number;
-  public card_id: CardId;
-  public definition_id: number;
+const DEFAULT_HEX_COLOR  = 0x395c39;
+const DEFAULT_TEXT_COLOR = 0xf4f8ff;
+const STROKE_COLOR       = 0x0b160b;
+const STROKE_WIDTH       = 1;
 
-  private tileName: string;
-  private showLabel: boolean;
-  private readonly body = new Graphics();
-  private readonly labelTile = new Text({ text: "" });
-  private style: Required<TileStyle>;
+function parseColor(value: string | undefined): number | null {
+  if (!value) return null;
+  const hex = value.trim().replace(/^#/, "");
+  return /^[0-9a-fA-F]{6}$/.test(hex) ? parseInt(hex, 16) : null;
+}
 
-  public constructor(options: TileOptions = {}) {
+function flatTopHexPoints(cx: number, cy: number, radius: number): number[] {
+  const pts: number[] = [];
+  for (let i = 0; i < 6; i++) {
+    const a = (Math.PI / 3) * i;
+    pts.push(cx + radius * Math.cos(a), cy + radius * Math.sin(a));
+  }
+  return pts;
+}
+
+/**
+ * Displays a flat-top hexagon sized to its layout bounds.
+ *
+ * Provide card_id for tiles backed by live card data, or definition (packed)
+ * for purely static tiles. card_id takes priority when both are set.
+ *
+ * Color mapping (from CardDefinition.style.color):
+ *   [0] → hex fill
+ *   [1] → label text
+ */
+export class Tile extends LayoutObject {
+  private _card_id:    CardId;
+  private _definition: number;
+  private _showLabel:  boolean;
+
+  private readonly _body  = new Graphics();
+  private readonly _label = new Text({ text: "" });
+
+  constructor(options: TileOptions = {}) {
     super(options);
 
-    this.q = options.q ?? 0;
-    this.r = options.r ?? 0;
-    this.card_id = options.card_id ?? 0;
-    this.definition_id = options.definition_id ?? options.definitionId ?? 0;
-    this.tileName = options.name ?? "";
-    this.showLabel = options.showLabel ?? false;
-    this.style = this.normalizeStyle(options.style);
+    this._card_id    = options.card_id    ?? 0;
+    this._definition = options.definition ?? 0;
+    this._showLabel  = options.showLabel  ?? true;
 
-    this.addChild(this.body);
-    this.addChild(this.labelTile);
-    this.configureLabel();
-    this.refreshDefinition();
+    this._label.anchor.set(0.5);
+
+    this.addDisplay(this._body);
+    this.addDisplay(this._label);
+
     this.invalidateRender();
   }
 
-  public setTileCoord(q: number, r: number): void {
-    if (this.q === q && this.r === r) {
-      return;
-    }
+  // ─── Public API ──────────────────────────────────────────────────────────
 
-    this.q = q;
-    this.r = r;
+  setCardId(card_id: CardId): void {
+    if (this._card_id === card_id) return;
+    this._card_id    = card_id;
+    this._definition = 0;
     this.invalidateRender();
   }
 
-  public setCardId(card_id: CardId): void {
-    if (this.card_id === card_id) {
-      return;
-    }
+  getCardId(): CardId {
+    return this._card_id;
+  }
 
-    this.card_id = card_id;
-    this.refreshDefinition();
+  setDefinition(definition: number): void {
+    if (this._card_id === 0 && this._definition === definition) return;
+    this._card_id    = 0;
+    this._definition = definition;
     this.invalidateRender();
   }
 
-  public setDefinitionId(definition_id: number): void {
-    if (this.definition_id === definition_id) {
-      return;
-    }
+  getDefinition(): number {
+    return this._resolvePackedDefinition();
+  }
 
-    this.card_id = 0;
-    this.definition_id = definition_id;
-    this.refreshDefinition();
+  setShowLabel(show: boolean): void {
+    if (this._showLabel === show) return;
+    this._showLabel = show;
     this.invalidateRender();
   }
 
-  public setDefinition(definition_id: number): void {
-    this.setDefinitionId(definition_id);
-  }
-
-  public refreshDefinition(): void {
-    const packedDefinition = this.getPackedDefinition();
-    const definition = getDefinitionByPacked(packedDefinition);
-
-    this.tileName = definition?.name ?? this.tileName ?? `Tile ${packedDefinition}`;
-
-    const colors = definition?.style?.color;
-    this.style = this.normalizeStyle({
-      ...this.style,
-      fill: colors?.[0] ?? this.style.fill,
-      labelFill: colors?.[1] ?? this.style.labelFill,
-    });
-
-    this.configureLabel();
-    this.labelTile.text = this.tileName;
-  }
-
-  public setTileStyle(style: TileStyle): void {
-    this.style = this.normalizeStyle(style);
-    this.configureLabel();
-    this.invalidateRender();
-  }
-
-  public setShowLabel(showLabel: boolean): void {
-    if (this.showLabel === showLabel) {
-      return;
-    }
-
-    this.showLabel = showLabel;
-    this.labelTile.visible = showLabel;
-    this.invalidateRender();
-  }
-
-  public override updateRects(): void {
-    super.updateRects();
-    this.invalidateRender();
-  }
+  // ─── Render ──────────────────────────────────────────────────────────────
 
   protected override redraw(): void {
-    this.refreshDefinition();
+    const packed     = this._resolvePackedDefinition();
+    const definition = packed !== 0 ? getDefinitionByPacked(packed) : undefined;
+    const colors     = definition?.style?.color ?? [];
 
-    const w = this.innerRect.width;
-    const h = this.innerRect.height;
-    const cx = this.innerRect.x + w / 2;
-    const cy = this.innerRect.y + h / 2;
-    const radius = Math.max(0, Math.min(w / 2, h / Math.sqrt(3)));
-    const points = this.getFlatTopHexPoints(cx, cy, radius);
+    const hexColor  = parseColor(colors[0]) ?? DEFAULT_HEX_COLOR;
+    const textColor = parseColor(colors[1]) ?? DEFAULT_TEXT_COLOR;
 
-    this.body.clear();
-    this.body.poly(points).fill({ color: this.style.fill, alpha: this.style.alpha });
+    const { x, y, width, height } = this.innerRect;
+    const cx     = x + width / 2;
+    const cy     = y + height / 2;
+    const radius = Math.min(width / 2, height / Math.sqrt(3));
 
-    if (this.style.strokeWidth > 0) {
-      this.body.stroke({ color: this.style.stroke, width: this.style.strokeWidth });
-    }
+    this._body.clear();
+    this._body
+      .poly(flatTopHexPoints(cx, cy, radius))
+      .fill({ color: hexColor })
+      .stroke({ color: STROKE_COLOR, width: STROKE_WIDTH });
 
-    this.labelTile.text = this.tileName;
-    this.labelTile.visible = this.showLabel;
-    this.labelTile.anchor.set(0.5);
-    this.labelTile.x = cx;
-    this.labelTile.y = cy;
-    this.labelTile.style.fontSize = Math.max(8, Math.round(radius / 3));
-  }
+    const name = definition?.name ?? "";
 
-  private getPackedDefinition(): number {
-    if (this.card_id !== 0) {
-      return client_cards[this.card_id]?.definition ?? 0;
-    }
-
-    return this.definition_id;
-  }
-
-  private getFlatTopHexPoints(cx: number, cy: number, radius: number): number[] {
-    const points: number[] = [];
-
-    for (let i = 0; i < 6; i++) {
-      const angle = (Math.PI / 180) * (60 * i);
-      points.push(cx + radius * Math.cos(angle));
-      points.push(cy + radius * Math.sin(angle));
-    }
-
-    return points;
-  }
-
-  private configureLabel(): void {
-    this.labelTile.style = {
-      fill: this.style.labelFill,
+    this._label.visible = this._showLabel && name.length > 0;
+    this._label.text    = name;
+    this._label.x       = cx;
+    this._label.y       = cy;
+    this._label.style   = {
+      fill:       textColor,
       fontFamily: "Segoe UI",
-      fontSize: 12,
+      fontSize:   Math.max(6, Math.floor(radius / 3)),
       fontWeight: "700",
-      align: "center",
-    };
-    this.labelTile.visible = this.showLabel;
-  }
-
-  private normalizeStyle(style: TileStyle = {}): Required<TileStyle> {
-    return {
-      fill: this.parseColor(style.fill) ?? 0x395c39,
-      stroke: this.parseColor(style.stroke) ?? 0x0b160b,
-      strokeWidth: style.strokeWidth ?? 1,
-      alpha: style.alpha ?? 1,
-      labelFill: this.parseColor(style.labelFill) ?? 0xf4f8ff,
+      align:      "center",
+      wordWrap:   false,
     };
   }
 
-  private parseColor(color: number | string | undefined): number | undefined {
-    if (typeof color === "number") {
-      return color;
-    }
+  // ─── Private ─────────────────────────────────────────────────────────────
 
-    if (!color) {
-      return undefined;
+  private _resolvePackedDefinition(): number {
+    if (this._card_id !== 0) {
+      return client_cards[this._card_id]?.definition ?? 0;
     }
-
-    const normalizedHex = color.trim().replace(/^#/, "");
-    if (!/^[0-9a-fA-F]{6}$/.test(normalizedHex)) {
-      return undefined;
-    }
-
-    return Number.parseInt(normalizedHex, 16);
+    return this._definition;
   }
 }

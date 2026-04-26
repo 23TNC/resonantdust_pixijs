@@ -1,264 +1,144 @@
-import { Container, Graphics, Sprite, Text, Texture } from "pixi.js";
-import { LayoutRect, type LayoutRectOptions } from "@/ui/layout/LayoutRect";
-import { getDefinitionByPacked } from "@/data/definitions/CardDefinitions";
+import { Graphics, Sprite, Text, Texture } from "pixi.js";
+import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { client_cards, type CardId } from "@/spacetime/Data";
+import { getDefinitionByPacked } from "@/data/definitions/CardDefinitions";
 
-export interface CardOptions extends LayoutRectOptions {
-  card_id: CardId;
-  texture?: Texture;
-  titleHeightRatio?: number;
-  cornerRadius?: number;
+export interface CardOptions extends LayoutObjectOptions {
+  card_id?: CardId;
+  titleHeight?: number;
+  radius?: number;
 }
 
-export class Card extends LayoutRect {
-  public readonly card_id: CardId;
-  public name: string;
-  public titleBackgroundColor: number;
-  public titleTextColor: number;
-  public bodyBackgroundColor: number;
+const DEFAULT_BODY_COLOR  = 0x1a2a1a;
+const DEFAULT_TITLE_COLOR = 0x111a11;
+const DEFAULT_TEXT_COLOR  = 0xf4f8ff;
 
-  private titleHeightRatio: number;
-  private cornerRadius: number;
+function parseColor(value: string | undefined): number | null {
+  if (!value) return null;
+  const hex = value.trim().replace(/^#/, "");
+  return /^[0-9a-fA-F]{6}$/.test(hex) ? parseInt(hex, 16) : null;
+}
 
-  private titleGraphics = new Graphics();
-  private bodyGraphics = new Graphics();
-  private titleText: Text;
-  private spriteContainer = new Container();
-  private sprite: Sprite | null = null;
+/**
+ * A card-shaped LayoutObject driven by a card_id.
+ *
+ * Layout (top → bottom):
+ *   ┌──────────────┐
+ *   │  Title bar   │  titleHeight px, colored with style.color[1]
+ *   ├──────────────┤
+ *   │              │  body, colored with style.color[0]
+ *   │   [sprite]   │  sprite centered + scaled to fit (optional)
+ *   │              │
+ *   └──────────────┘
+ *
+ * Text uses style.color[2]. All colors fall back to defaults when absent.
+ */
+export class Card extends LayoutObject {
+  private _card_id: CardId;
+  private _titleHeight: number;
+  private _radius: number;
 
-  public constructor(options: CardOptions) {
+  private readonly _bg     = new Graphics();
+  private readonly _sprite = new Sprite({ texture: Texture.EMPTY });
+  private readonly _label  = new Text({ text: "" });
+
+  constructor(options: CardOptions = {}) {
     super(options);
 
-    this.card_id = options.card_id;
+    this._card_id     = options.card_id     ?? 0;
+    this._titleHeight = options.titleHeight ?? 24;
+    this._radius      = options.radius      ?? 8;
 
-    const definition = this.getDefinition();
-    const colors = normalizeCardColors(definition?.style?.color);
+    this._sprite.anchor.set(0.5);
+    this._sprite.visible = false;
+    this._label.anchor.set(0.5);
 
-    this.name = definition?.name ?? `Card ${this.card_id}`;
-    this.bodyBackgroundColor = colors[0] ?? 0x1f2937;
-    this.titleBackgroundColor = colors[1] ?? 0x111827;
-    this.titleTextColor = colors[2] ?? 0xf9fafb;
-    this.titleHeightRatio = options.titleHeightRatio ?? 0.22;
-    this.cornerRadius = options.cornerRadius ?? 8;
+    // z-order: background → sprite → label
+    this.addDisplay(this._bg);
+    this.addDisplay(this._sprite);
+    this.addDisplay(this._label);
 
-    this.titleText = new Text({
-      text: this.name,
-      style: {
-        fill: this.titleTextColor,
-        fontFamily: "Segoe UI",
-        fontSize: 14,
-        fontWeight: "700",
-        align: "center",
-      },
-    });
-
-    this.addChild(this.bodyGraphics);
-    this.addChild(this.titleGraphics);
-    this.addChild(this.spriteContainer);
-    this.addChild(this.titleText);
-
-    if (options.texture) {
-      this.setTexture(options.texture);
-    }
-
-    this.redrawCard();
+    this.invalidateRender();
   }
 
-  public override updateRects(): void {
-    super.updateRects();
-    this.redrawCard();
+  setCardId(card_id: CardId): void {
+    if (this._card_id === card_id) return;
+    this._card_id = card_id;
+    this.invalidateRender();
   }
 
-  public refreshFromClientCard(): void {
-    const definition = this.getDefinition();
-    if (!definition) {
-      return;
-    }
-
-    const colors = normalizeCardColors(definition.style.color);
-
-    this.setName(definition.name);
-    this.setColors(
-      colors[1] ?? this.titleBackgroundColor,
-      colors[2] ?? this.titleTextColor,
-      colors[0] ?? this.bodyBackgroundColor,
-    );
+  getCardId(): CardId {
+    return this._card_id;
   }
 
-  public setName(name: string): void {
-    this.name = name;
-    this.titleText.text = name;
-    this.redrawCard();
-  }
-
-  public setColors(
-    titleBackgroundColor: number,
-    titleTextColor: number,
-    bodyBackgroundColor: number,
-  ): void {
-    this.titleBackgroundColor = titleBackgroundColor;
-    this.titleTextColor = titleTextColor;
-    this.bodyBackgroundColor = bodyBackgroundColor;
-    this.titleText.style.fill = titleTextColor;
-    this.redrawCard();
-  }
-
-  private getDefinition() {
-    const card = client_cards[this.card_id];
-    if (!card) {
-      return undefined;
-    }
-
-    return getDefinitionByPacked(card.definition);
-  }
-
-  public setTexture(texture: Texture | null): void {
-    this.sprite?.destroy();
-    this.sprite = null;
-
-    if (!texture) {
-      return;
-    }
-
-    this.sprite = new Sprite(texture);
-    this.sprite.anchor.set(0.5);
-    this.spriteContainer.addChild(this.sprite);
-    this.redrawCard();
-  }
-
-  private redrawCard(): void {
-    if (!this.titleText) {
-      return;
-    }
-
-    const x = this.innerRect.x;
-    const y = this.innerRect.y;
-    const width = this.innerRect.width;
-    const height = this.innerRect.height;
-
-    const titleHeight = Math.max(0, height * this.titleHeightRatio);
-    const bodyY = y + titleHeight;
-    const bodyHeight = Math.max(0, height - titleHeight);
-    const radius = Math.min(this.cornerRadius, width / 2, height / 2);
-
-    this.drawTitle(x, y, width, titleHeight, radius);
-    this.drawBody(x, bodyY, width, bodyHeight, radius);
-    this.layoutTitleText(x, y, width, titleHeight);
-    this.layoutSprite(x, bodyY, width, bodyHeight);
-  }
-
-  private drawTitle(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    radius: number,
-  ): void {
-    this.titleGraphics.clear();
-
-    if (width <= 0 || height <= 0) {
-      return;
-    }
-
-    this.titleGraphics
-      .roundRect(x, y, width, height + radius, radius)
-      .fill(this.titleBackgroundColor)
-      .rect(x, y + height, width, radius)
-      .fill(this.titleBackgroundColor);
-  }
-
-  private drawBody(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    radius: number,
-  ): void {
-    this.bodyGraphics.clear();
-
-    if (width <= 0 || height <= 0) {
-      return;
-    }
-
-    this.bodyGraphics
-      .roundRect(x, y - radius, width, height + radius, radius)
-      .fill(this.bodyBackgroundColor)
-      .rect(x, y - radius, width, radius)
-      .fill(this.bodyBackgroundColor);
-  }
-
-  private layoutTitleText(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-  ): void {
-    const fontSize = Math.max(8, Math.round(height * 0.42));
-    this.titleText.style.fontSize = fontSize;
-
-    this.titleText.anchor.set(0.5);
-    this.titleText.x = x + width / 2;
-    this.titleText.y = y + height / 2;
-
-    const maxWidth = Math.max(0, width * 0.92);
-    if (this.titleText.width > maxWidth && this.titleText.width > 0) {
-      this.titleText.scale.set(maxWidth / this.titleText.width);
+  setTexture(texture: Texture | null): void {
+    if (texture) {
+      this._sprite.texture = texture;
+      this._sprite.visible = true;
     } else {
-      this.titleText.scale.set(1);
+      this._sprite.texture = Texture.EMPTY;
+      this._sprite.visible = false;
+    }
+    this.invalidateRender();
+  }
+
+  protected override redraw(): void {
+    const card       = client_cards[this._card_id];
+    const definition = card ? getDefinitionByPacked(card.definition) : undefined;
+    const colors     = definition?.style?.color ?? [];
+
+    const bodyColor  = parseColor(colors[0]) ?? DEFAULT_BODY_COLOR;
+    const titleColor = parseColor(colors[1]) ?? DEFAULT_TITLE_COLOR;
+    const textColor  = parseColor(colors[2]) ?? DEFAULT_TEXT_COLOR;
+
+    const { x, y, width, height } = this.innerRect;
+    const titleH = Math.min(this._titleHeight, height);
+    const bodyH  = height - titleH;
+    const r      = this._radius;
+
+    // ── Background ────────────────────────────────────────────────────────────
+    this._bg.clear();
+
+    // Full card in body color (establishes rounded corners for entire card)
+    this._bg.roundRect(x, y, width, height, r).fill({ color: bodyColor });
+
+    // Title strip in title color
+    if (titleH > 0) {
+      this._bg.roundRect(x, y, width, titleH, r).fill({ color: titleColor });
+
+      // Flush the bottom corners of the title strip
+      if (bodyH > 0) {
+        this._bg.rect(x, y + titleH - r, width, r).fill({ color: titleColor });
+      }
+    }
+
+    // ── Title text ────────────────────────────────────────────────────────────
+    this._label.text    = definition?.name ?? "";
+    this._label.visible = titleH > 0;
+    this._label.x       = x + width / 2;
+    this._label.y       = y + titleH / 2;
+    this._label.style   = {
+      fill:       textColor,
+      fontFamily: "Segoe UI",
+      fontSize:   Math.max(8, Math.floor(titleH * 0.55)),
+      fontWeight: "700",
+      align:      "center",
+    };
+
+    // ── Sprite ────────────────────────────────────────────────────────────────
+    if (this._sprite.visible && bodyH > 0) {
+      const pad    = 4;
+      const availW = Math.max(0, width  - pad * 2);
+      const availH = Math.max(0, bodyH  - pad * 2);
+      const tw     = this._sprite.texture.width;
+      const th     = this._sprite.texture.height;
+      const scale  = (tw > 0 && th > 0)
+        ? Math.min(availW / tw, availH / th)
+        : 1;
+
+      this._sprite.scale.set(scale);
+      this._sprite.x = x + width / 2;
+      this._sprite.y = y + titleH + bodyH / 2;
     }
   }
-
-  private layoutSprite(
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-  ): void {
-    this.spriteContainer.x = x + width / 2;
-    this.spriteContainer.y = y + height / 2;
-
-    if (!this.sprite) {
-      return;
-    }
-
-    const maxSize = Math.max(0, Math.min(width, height) * 0.85);
-    const textureWidth = this.sprite.texture.width;
-    const textureHeight = this.sprite.texture.height;
-    const textureSize = Math.max(textureWidth, textureHeight);
-
-    if (textureSize <= 0 || maxSize <= 0) {
-      this.sprite.visible = false;
-      return;
-    }
-
-    this.sprite.visible = true;
-    this.sprite.scale.set(maxSize / textureSize);
-    this.sprite.x = 0;
-    this.sprite.y = 0;
-  }
-}
-
-function normalizeCardColors(colors: readonly string[] | undefined): number[] {
-  if (!colors) {
-    return [];
-  }
-
-  const normalized: number[] = [];
-  for (const rawColor of colors) {
-    const parsedColor = parseColorNumber(rawColor);
-    if (parsedColor != null) {
-      normalized.push(parsedColor);
-    }
-  }
-
-  return normalized;
-}
-
-function parseColorNumber(rawColor: string): number | null {
-  const normalizedHex = rawColor.trim().replace(/^#/, "");
-  if (!/^[0-9a-fA-F]{6}$/.test(normalizedHex)) {
-    return null;
-  }
-
-  return Number.parseInt(normalizedHex, 16);
 }

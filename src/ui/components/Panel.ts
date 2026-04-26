@@ -1,75 +1,70 @@
-// pixijs/src/ui/components/Panel.ts
 import { Graphics } from "pixi.js";
-import { LayoutRect, type LayoutRectOptions } from "@/ui/layout";
+import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 
-export interface PanelOptions extends LayoutRectOptions {
-  backgroundColor?: number;
-  borderColor?: number;
-  borderWidth?: number;
-  cornerRadius?: number;
+export interface PanelOptions extends LayoutObjectOptions {
+  fill?: number;
+  stroke?: number;
+  strokeWidth?: number;
+  radius?: number;
   alpha?: number;
 }
 
-export class Panel extends LayoutRect {
-  protected readonly background = new Graphics();
+/**
+ * A LayoutObject that draws a rounded rectangle background sized to its inner rect.
+ * Layout children added to a Panel are sized to fill the inner rect.
+ */
+export class Panel extends LayoutObject {
+  private readonly _bg = new Graphics();
 
-  protected backgroundColor: number;
-  protected borderColor: number;
-  protected borderWidth: number;
-  protected cornerRadius: number;
-  protected panelAlpha: number;
+  private _fill: number;
+  private _stroke: number;
+  private _strokeWidth: number;
+  private _radius: number;
+  private _alpha: number;
 
-  public constructor(options: PanelOptions = {}) {
+  constructor(options: PanelOptions = {}) {
     super(options);
-    this.backgroundColor = options.backgroundColor ?? 0x111111;
-    this.borderColor = options.borderColor ?? 0x333333;
-    this.borderWidth = options.borderWidth ?? 1;
-    this.cornerRadius = options.cornerRadius ?? 12;
-    this.panelAlpha = options.alpha ?? 1;
 
-    this.addChildAt(this.background, 0);
+    this._fill        = options.fill        ?? 0x111111;
+    this._stroke      = options.stroke      ?? 0x333333;
+    this._strokeWidth = options.strokeWidth ?? 1;
+    this._radius      = options.radius      ?? 12;
+    this._alpha       = options.alpha       ?? 1;
+
+    this.addDisplay(this._bg);
     this.invalidateRender();
   }
 
-  protected override layoutChildren(): void {
+  setStyle(options: Partial<Omit<PanelOptions, keyof LayoutObjectOptions>>): void {
+    if (options.fill        !== undefined) this._fill        = options.fill;
+    if (options.stroke      !== undefined) this._stroke      = options.stroke;
+    if (options.strokeWidth !== undefined) this._strokeWidth = options.strokeWidth;
+    if (options.radius      !== undefined) this._radius      = options.radius;
+    if (options.alpha       !== undefined) this._alpha       = options.alpha;
+    this.invalidateRender();
+  }
+
+  protected override redraw(): void {
+    const { x, y, width, height } = this.innerRect;
+
+    this._bg.clear();
+    this._bg
+      .roundRect(x, y, width, height, this._radius)
+      .fill({ color: this._fill, alpha: this._alpha });
+
+    if (this._strokeWidth > 0) {
+      this._bg.stroke({ color: this._stroke, width: this._strokeWidth });
+    }
+  }
+
+  protected override updateLayoutChildren(): void {
     for (const child of this.getLayoutChildren()) {
-      child.setLayout(this.innerRect.x, this.innerRect.y, this.innerRect.width, this.innerRect.height);
+      child.setLayout(
+        this.innerRect.x,
+        this.innerRect.y,
+        this.innerRect.width,
+        this.innerRect.height,
+      );
     }
-  }
-
-  public override redraw(): void {
-    this.background.clear();
-
-    this.background
-      .roundRect(
-        this.outerRect.x,
-        this.outerRect.y,
-        this.outerRect.width,
-        this.outerRect.height,
-        this.cornerRadius,
-      )
-      .fill({
-        color: this.backgroundColor,
-        alpha: this.panelAlpha,
-      });
-
-    if (this.borderWidth > 0) {
-      this.background.stroke({
-        color: this.borderColor,
-        width: this.borderWidth,
-      });
-    }
-
-    super.redraw();
-  }
-
-  public setPanelStyle(options: Partial<PanelOptions>): void {
-    if (options.backgroundColor !== undefined) this.backgroundColor = options.backgroundColor;
-    if (options.borderColor !== undefined) this.borderColor = options.borderColor;
-    if (options.borderWidth !== undefined) this.borderWidth = options.borderWidth;
-    if (options.cornerRadius !== undefined) this.cornerRadius = options.cornerRadius;
-    if (options.alpha !== undefined) this.panelAlpha = options.alpha;
-
-    this.invalidateRender();
   }
 }

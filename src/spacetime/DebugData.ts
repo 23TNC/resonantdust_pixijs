@@ -1,224 +1,102 @@
-// pixijs/src/spacetime/debug_data.ts
-
+/**
+ * Synthetic snapshot that stands in for a live SpacetimeDB subscription.
+ * Populate server_* tables exactly as the real callbacks would, then derive
+ * client_* tables via the same upsert path used in production.
+ */
 import {
   type CardId,
   type PlayerId,
   type ServerCard,
   type ServerPlayer,
-  type ServerAction,
   type ServerZone,
   server_cards,
   server_players,
-  server_actions,
   server_zones,
   client_cards,
+  client_zones,
   client_cards_by_zone,
-  setViewedId,
-  setObserverId,
-  clearSelectedState,
-  upsertClientCard,
-  upsertClientZone,
   packDefinition,
   packPosition,
   packZone,
   packZoneDefinition,
+  setObserverId,
+  setViewedId,
+  clearSelectedState,
+  upsertClientCard,
+  upsertClientZone,
 } from "./Data";
 
-function clearRecord<T>(record: Record<number, T>): void {
-  for (const key in record) {
-    delete record[Number(key)];
-  }
+// Readable aliases for flag arguments in packPosition.
+const WORLD   = true;
+const LOCAL   = false;
+const LINKED  = true;
+const UNLINKED = false;
+
+function clearTable(table: Record<number, unknown>): void {
+  for (const key in table) delete table[Number(key)];
 }
 
 function clearZoneIndex(): void {
-  for (const key in client_cards_by_zone) {
-    delete client_cards_by_zone[Number(key)];
-  }
+  for (const key in client_cards_by_zone) delete client_cards_by_zone[Number(key)];
 }
 
-const WORLD = true;
-const LOCAL = false;
-const LINKED = true;
-const UNLINKED = false;
-
+/** Reset all tables and load a known-good snapshot for offline development. */
 export function bootstrap(): void {
-  clearRecord(server_cards);
-  clearRecord(server_players);
-  clearRecord(server_actions);
-  clearRecord(server_zones);
-  clearRecord(client_cards);
+  clearTable(server_cards);
+  clearTable(server_players);
+  clearTable(server_zones);
+  clearTable(client_cards);
+  clearTable(client_zones);
   clearZoneIndex();
 
   setViewedId(1);
   setObserverId(1);
 
-  const world_zone = packZone(0, 0, 1);
+  // ─── Zone IDs ──────────────────────────────────────────────────────────────
+  const world_zone     = packZone(0, 0, 1);
   const inventory_zone = packZone(0, 0, 1);
 
+  // ─── Cards ─────────────────────────────────────────────────────────────────
   const cards: ServerCard[] = [
-    {
-      card_id: 1,
-      definition: packDefinition(5, 1),
-      soul_id: 0,
-      link_id: 0,
-      flags: 0,
-      zone: world_zone,
-      position: packPosition(0, 0, WORLD, UNLINKED),
-    },
-    {
-      card_id: 2,
-      definition: packDefinition(1, 1),
-      soul_id: 1,
-      link_id: 0,
-      flags: 0,
-      zone: inventory_zone,
-      position: packPosition(0, 0, LOCAL, UNLINKED),
-    },
-    {
-      card_id: 3,
-      definition: packDefinition(1, 2),
-      soul_id: 1,
-      link_id: 0,
-      flags: 0,
-      zone: inventory_zone,
-      position: packPosition(1, 0, LOCAL, UNLINKED),
-    },
-    {
-      card_id: 4,
-      definition: packDefinition(1, 3),
-      soul_id: 1,
-      link_id: 0,
-      flags: 0,
-      zone: inventory_zone,
-      position: packPosition(2, 0, LOCAL, UNLINKED),
-    },
-    {
-      card_id: 5,
-      definition: packDefinition(2, 1),
-      soul_id: 1,
-      link_id: 6,
-      flags: 0,
-      zone: inventory_zone,
-      position: packPosition(0, 1, LOCAL, LINKED),
-    },
-    {
-      card_id: 6,
-      definition: packDefinition(2, 1),
-      soul_id: 1,
-      link_id: 0,
-      flags: 0,
-      zone: inventory_zone,
-      position: packPosition(0, 1, LOCAL, UNLINKED),
-    },
-    {
-      card_id: 7,
-      definition: packDefinition(1, 1),
-      soul_id: 1,
-      link_id: 0,
-      flags: 0,
-      zone: world_zone,
-      position: packPosition(1, 0, WORLD, UNLINKED),
-    },
-    {
-      card_id: 8,
-      definition: packDefinition(6, 2),
-      soul_id: 1,
-      link_id: 0,
-      flags: 0,
-      zone: world_zone,
-      position: packPosition(2, 1, WORLD, UNLINKED),
-    },
-    {
-      card_id: 9,
-      definition: packDefinition(2, 2),
-      soul_id: 1,
-      link_id: 10,
-      flags: 0,
-      zone: inventory_zone,
-      position: packPosition(1, 1, LOCAL, LINKED),
-    },
-    {
-      card_id: 10,
-      definition: packDefinition(2, 3),
-      soul_id: 1,
-      link_id: 0,
-      flags: 0,
-      zone: inventory_zone,
-      position: packPosition(1, 1, LOCAL, UNLINKED),
-    },
+    { card_id: 1,  definition: packDefinition(5, 1), soul_id: 0, link_id: 0,  flags: 0, zone: world_zone,     position: packPosition(0, 0, WORLD, UNLINKED) },
+    { card_id: 2,  definition: packDefinition(1, 1), soul_id: 1, link_id: 0,  flags: 0, zone: inventory_zone, position: packPosition(0, 0, LOCAL, UNLINKED) },
+    { card_id: 3,  definition: packDefinition(1, 2), soul_id: 1, link_id: 0,  flags: 0, zone: inventory_zone, position: packPosition(1, 0, LOCAL, UNLINKED) },
+    { card_id: 4,  definition: packDefinition(1, 3), soul_id: 1, link_id: 0,  flags: 0, zone: inventory_zone, position: packPosition(2, 0, LOCAL, UNLINKED) },
+    { card_id: 5,  definition: packDefinition(2, 1), soul_id: 1, link_id: 6,  flags: 0, zone: inventory_zone, position: packPosition(0, 1, LOCAL, LINKED)   },
+    { card_id: 6,  definition: packDefinition(2, 1), soul_id: 1, link_id: 0,  flags: 0, zone: inventory_zone, position: packPosition(0, 1, LOCAL, UNLINKED) },
+    { card_id: 7,  definition: packDefinition(1, 1), soul_id: 1, link_id: 0,  flags: 0, zone: world_zone,     position: packPosition(1, 0, WORLD, UNLINKED) },
+    { card_id: 8,  definition: packDefinition(6, 2), soul_id: 1, link_id: 0,  flags: 0, zone: world_zone,     position: packPosition(2, 1, WORLD, UNLINKED) },
+    { card_id: 9,  definition: packDefinition(2, 2), soul_id: 1, link_id: 10, flags: 0, zone: inventory_zone, position: packPosition(1, 1, LOCAL, LINKED)   },
+    { card_id: 10, definition: packDefinition(2, 3), soul_id: 1, link_id: 0,  flags: 0, zone: inventory_zone, position: packPosition(1, 1, LOCAL, UNLINKED) },
   ];
 
+  // ─── Players ───────────────────────────────────────────────────────────────
   const players: ServerPlayer[] = [
-    {
-      player_id: 1,
-      name: "player1",
-      soul_id: 1,
-      zone: world_zone,
-      position: packPosition(0, 0, WORLD, UNLINKED),
-    },
+    { player_id: 1, name: "player1", soul_id: 1, zone: world_zone, position: packPosition(0, 0, WORLD, UNLINKED) },
   ];
 
-  const actions: ServerAction[] = [];
+  // ─── Zones ─────────────────────────────────────────────────────────────────
+  // t0–t7: each row is 8 bytes, one per tile column. 0x01 = tile definition id 1.
+  const uniformTileRow = 0x0101010101010101n;
+  const uniformTileData = {
+    t0: uniformTileRow, t1: uniformTileRow, t2: uniformTileRow, t3: uniformTileRow,
+    t4: uniformTileRow, t5: uniformTileRow, t6: uniformTileRow, t7: uniformTileRow,
+  };
 
   const zones: ServerZone[] = [
-    {
-      zone: packZone(0, 0, 1),
-      definition: packZoneDefinition(6, 0),
-      t0: 72340172838076673n,
-      t1: 72340172838076673n,
-      t2: 72340172838076673n,
-      t3: 72340172838076673n,
-      t4: 72340172838076673n,
-      t5: 72340172838076673n,
-      t6: 72340172838076673n,
-      t7: 72340172838076673n,
-    },
-    {
-      zone: packZone(-1, 0, 1),
-      definition: packZoneDefinition(6, 0),
-      t0: 72340172838076673n,
-      t1: 72340172838076673n,
-      t2: 72340172838076673n,
-      t3: 72340172838076673n,
-      t4: 72340172838076673n,
-      t5: 72340172838076673n,
-      t6: 72340172838076673n,
-      t7: 72340172838076673n,
-    },
-    {
-      zone: packZone(0, -1, 1),
-      definition: packZoneDefinition(6, 0),
-      t0: 72340172838076673n,
-      t1: 72340172838076673n,
-      t2: 72340172838076673n,
-      t3: 72340172838076673n,
-      t4: 72340172838076673n,
-      t5: 72340172838076673n,
-      t6: 72340172838076673n,
-      t7: 72340172838076673n,
-    },
+    { zone: packZone( 0,  0, 1), definition: packZoneDefinition(6, 0), ...uniformTileData },
+    { zone: packZone(-1,  0, 1), definition: packZoneDefinition(6, 0), ...uniformTileData },
+    { zone: packZone( 0, -1, 1), definition: packZoneDefinition(6, 0), ...uniformTileData },
   ];
 
-  for (const card of cards) {
-    server_cards[card.card_id as CardId] = card;
-  }
+  // ─── Populate server tables ────────────────────────────────────────────────
+  for (const card   of cards)   server_cards[card.card_id     as CardId]     = card;
+  for (const player of players) server_players[player.player_id as PlayerId] = player;
+  for (const zone   of zones)   server_zones[zone.zone]                      = zone;
 
-  for (const player of players) {
-    server_players[player.player_id as PlayerId] = player;
-  }
-
-  for (const action of actions) {
-    server_actions[action.card_id as CardId] = action;
-  }
-
-  for (const zone of zones) {
-    upsertClientZone(zone);
-  }
-
-  for (const key in server_cards) {
-    const card_id = Number(key) as CardId;
-    upsertClientCard(server_cards[card_id]);
-  }
+  // ─── Derive client tables ──────────────────────────────────────────────────
+  for (const zone of zones) upsertClientZone(zone);
+  for (const card of cards) upsertClientCard(card);
 
   clearSelectedState();
 }

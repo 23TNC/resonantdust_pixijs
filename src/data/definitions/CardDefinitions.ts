@@ -1,77 +1,64 @@
-export type CardDefinitionStyle = {
-  color: [string, string, string];
-};
+/**
+ * Card flag tuple: [name, a, b, c].
+ * The three booleans are game-rule semantics defined per card type.
+ */
+export type CardFlag = [name: string, a: boolean, b: boolean, c: boolean];
 
-export type CardDefinitionVarValue = string | number | boolean | null;
+export interface CardStyle {
+  /** Ordered color palette for this card. Length varies by card type. */
+  color: string[];
+}
 
-export type CardDefinitionVars = Record<string, CardDefinitionVarValue>;
-
-export type CardDefinitionFlag = [string, boolean, boolean, boolean];
-
-export type CardDefinitionEntry = {
+export interface CardDefinition {
   name: string;
-  style: CardDefinitionStyle;
-  vars: CardDefinitionVars;
-  flags: CardDefinitionFlag[];
-};
+  style?: CardStyle;
+  vars?: Record<string, string | number | boolean | null>;
+  flags?: CardFlag[];
+}
 
-export type CardDefinitionFile = {
+interface CardDefinitionFile {
   card_type: number;
-  cards: CardDefinitionEntry[];
-};
-
-export type CardDefinitionTypeMap = Map<number, CardDefinitionEntry>;
-export type CardDefinitionGlobalMap = Map<number, CardDefinitionTypeMap>;
-
-const cardDefinitions: CardDefinitionGlobalMap = new Map();
-let initialized = false;
-
-export function unpackDefinition(definition: number): { card_type: number; definition_id: number } {
-  return {
-    card_type: (definition >>> 12) & 0x0f,
-    definition_id: definition & 0x0fff,
-  };
+  cards: CardDefinition[];
 }
 
-export function getDefinition(card_type: number, definition_id: number): CardDefinitionEntry | undefined {
-  return cardDefinitions.get(card_type)?.get(definition_id);
+// Keyed by packed definition: ((card_type & 0xf) << 12) | (definition_id & 0xfff)
+const registry = new Map<number, CardDefinition>();
+
+function pack(card_type: number, definition_id: number): number {
+  return (((card_type & 0xf) << 12) | (definition_id & 0xfff)) >>> 0;
 }
 
-export function getDefinitionByPacked(definition: number): CardDefinitionEntry | undefined {
-  const { card_type, definition_id } = unpackDefinition(definition);
-  return getDefinition(card_type, definition_id-1);
-}
+/**
+ * Load all JSON files from src/data/cards/ into the registry.
+ * Cards are 1-indexed within each file: cards[0] → definition_id 1, cards[1] → 2, etc.
+ * Call once at startup before accessing any definitions.
+ */
+export function bootstrapCardDefinitions(): void {
+  if (registry.size > 0) return;
 
-export function getCardDefinitions(): ReadonlyMap<number, ReadonlyMap<number, CardDefinitionEntry>> {
-  return cardDefinitions;
-}
-
-export async function bootstrapCardDefinitions(): Promise<void> {
-  
-  if (initialized) {
-    return;
-  }
-  
-  const modules = import.meta.glob<CardDefinitionFile>("../cards/*.json", {
+  const files = import.meta.glob<CardDefinitionFile>("../cards/*.json", {
     eager: true,
     import: "default",
   });
 
-  for (const fileData of Object.values(modules)) {
-    if (!fileData.cards) {
-      continue;
-    }
-    let typeMap = cardDefinitions.get(fileData.card_type);
+  for (const file of Object.values(files)) {
+    if (!Array.isArray(file.cards)) continue;
 
-    if (!typeMap) {
-      typeMap = new Map<number, CardDefinitionEntry>();
-      cardDefinitions.set(fileData.card_type, typeMap);
-    }
-
-    for (let definition_id = 0; definition_id < fileData.cards.length; definition_id += 1) {
-      typeMap.set(definition_id, fileData.cards[definition_id]);
+    for (let i = 0; i < file.cards.length; i++) {
+      const definition_id = i + 1; // 1-based to match the packed wire format
+      registry.set(pack(file.card_type, definition_id), file.cards[i]);
     }
   }
+}
 
-  initialized = true;
+export function getDefinition(card_type: number, definition_id: number): CardDefinition | undefined {
+  return registry.get(pack(card_type, definition_id));
+}
+
+export function getDefinitionByPacked(packed: number): CardDefinition | undefined {
+  return registry.get(packed);
+}
+
+export function getRegistry(): ReadonlyMap<number, CardDefinition> {
+  return registry;
 }

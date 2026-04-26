@@ -1,49 +1,54 @@
-import { Container, Ticker } from "pixi.js";
-import { getApp } from "@/app/AppContext";
+import { getApp } from "@/app";
+import { LayoutRoot } from "@/ui/layout/LayoutRoot";
 
-export interface Scene {
-  readonly view: Container;
-
-  resize?(width: number, height: number): void;
-  update?(ticker: Ticker): void;
-  destroy?(): void;
-}
-
+/**
+ * Owns the active scene. Exactly one scene is live at a time.
+ *
+ * Scenes are LayoutRoot subclasses — they are PixiJS Containers that manage
+ * their own resize subscription and expose tick() for the render loop.
+ * SceneManager adds one persistent ticker listener that delegates to whatever
+ * scene is current, so callers never touch the ticker directly.
+ *
+ * setScene() destroys the previous scene (including all its children).
+ * destroy() tears down the manager and the active scene.
+ */
 export class SceneManager {
-  private currentScene: Scene | null = null;
-  private readonly stage: Container;
+  private _current: LayoutRoot | null = null;
 
-  public constructor() {
-    this.stage = getApp().stage;
+  constructor() {
+    getApp().ticker.add(this._onTick, this);
   }
 
-  public setScene(scene: Scene): void {
-    if (this.currentScene) {
-      this.stage.removeChild(this.currentScene.view);
-      this.currentScene.destroy?.();
+  setScene(next: LayoutRoot): void {
+    if (this._current === next) return;
+
+    const prev = this._current;
+    this._current = next;
+
+    const stage = getApp().stage;
+    if (prev) {
+      stage.removeChild(prev);
+      prev.destroy({ children: true });
     }
 
-    this.currentScene = scene;
-    this.stage.addChild(scene.view);
+    stage.addChild(next);
   }
 
-  public resize(width: number, height: number): void {
-    this.currentScene?.resize?.(width, height);
+  getScene(): LayoutRoot | null {
+    return this._current;
   }
 
-  public update(ticker: Ticker): void {
-    this.currentScene?.update?.(ticker);
+  destroy(): void {
+    getApp().ticker.remove(this._onTick, this);
+
+    if (this._current) {
+      getApp().stage.removeChild(this._current);
+      this._current.destroy({ children: true });
+      this._current = null;
+    }
   }
 
-  public destroy(): void {
-    if (!this.currentScene) return;
-
-    this.stage.removeChild(this.currentScene.view);
-    this.currentScene.destroy?.();
-    this.currentScene = null;
-  }
-
-  public get scene(): Scene | null {
-    return this.currentScene;
+  private _onTick(): void {
+    this._current?.tick();
   }
 }

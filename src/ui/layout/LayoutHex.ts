@@ -1,204 +1,201 @@
-import { Point, Rectangle } from "pixi.js";
-import { LayoutRect, type LayoutRectOptions } from "./LayoutRect";
+import { Point } from "pixi.js";
+import { LayoutObject, type LayoutObjectOptions } from "./LayoutObject";
 
-export interface HexCoord {
-  q: number;
-  r: number;
+const SQRT3 = Math.sqrt(3);
+
+// Pack two 16-bit signed integers into a single 32-bit key for Map lookup.
+// Valid for q, r in [-32768, 32767] — well beyond any practical grid.
+function posKey(q: number, r: number): number {
+  return ((q & 0xffff) << 16) | (r & 0xffff);
 }
 
-export interface LayoutHexOptions extends LayoutRectOptions {
-  hexSize?: number;
-}
+/**
+ * Positions layout children at explicit flat-top hex grid coordinates (q, r).
+ *
+ * Odd-q offset convention: odd columns shift down by half a hex height.
+ *
+ * R (circumradius) is computed each layout pass to fit all children within the
+ * inner rect. The computed R is available via getTileRadius() after a layout pass.
+ *
+ * Each child receives a rect of size (2R × √3R) centered on its hex center,
+ * which is exactly the bounding box of the flat-top hexagon drawn by Tile.
+ *
+ * Hit testing uses cube-coordinate math to resolve the hex in O(1) rather than
+ * iterating all children.
+ */
+export class LayoutHex extends LayoutObject {
+  private readonly _childPositions = new Map<LayoutObject, { q: number; r: number }>();
+  private readonly _positionLookup = new Map<number, LayoutObject>();
 
-export class LayoutHex extends LayoutRect {
-  private hexSize: number;
-  private childHexes = new Map<LayoutRect, HexCoord>();
-  private childrenByHex = new Map<string, LayoutRect[]>();
+  private _tileRadius = 0;
+  // Normalized origin stored from the last layout pass; needed by localToHex.
+  private _nMinX = 0;
+  private _nMinY = 0;
 
-  public constructor(options: LayoutHexOptions = {}) {
+  constructor(options: LayoutObjectOptions = {}) {
     super(options);
-
-    this.hexSize = Math.max(1, options.hexSize ?? 32);
   }
 
-  public addLayoutItem<T extends LayoutRect>(child: T, q: number, r: number): T {
-    return this.addHexChild(child, q, r);
+  // ─── Children ────────────────────────────────────────────────────────────
+
+  addItem<T extends LayoutObject>(child: T, q: number, r: number, depth?: number): T {
+    this._childPositions.set(child, { q, r });
+    this._positionLookup.set(posKey(q, r), child);
+    return this.addLayoutChild(child, depth ?? 0);
   }
 
-  public addHexChild<T extends LayoutRect>(child: T, q: number, r: number): T {
-    this.childHexes.set(child, { q, r });
+  override removeLayoutChild<T extends LayoutObject>(child: T): T | null {
+    const pos = this._childPositions.get(child);
+    if (pos) this._positionLookup.delete(posKey(pos.q, pos.r));
+    const result = super.removeLayoutChild(child);
+    if (result) this._childPositions.delete(child);
+    return result;
+  }
+
+  moveItem(child: LayoutObject, q: number, r: number): void {
+    const old = this._childPositions.get(child);
+    if (!old) return;
+    this._positionLookup.delete(posKey(old.q, old.r));
+    this._childPositions.set(child, { q, r });
+    this._positionLookup.set(posKey(q, r), child);
     this.invalidateLayout();
-    return this.addLayoutChild(child);
   }
 
-  public removeLayoutItem<T extends LayoutRect>(child: T): T {
-    return this.removeHexChild(child);
+  getChildPosition(child: LayoutObject): { q: number; r: number } | null {
+    const pos = this._childPositions.get(child);
+    return pos ? { ...pos } : null;
   }
 
-  public removeHexChild<T extends LayoutRect>(child: T): T {
-    this.childHexes.delete(child);
-    this.removeFromHexCache(child);
-    this.invalidateLayout();
-    return this.removeLayoutChild(child);
+  /** Circumradius computed during the last layout pass. */
+  getTileRadius(): number {
+    return this._tileRadius;
   }
 
-  public destroyLayoutItem(child: LayoutRect): void {
-    this.removeLayoutItem(child);
-    child.destroy({ children: true });
-  }
+  // ─── Layout ──────────────────────────────────────────────────────────────
 
-  public destroyHexChild(child: LayoutRect): void {
-    this.removeHexChild(child);
-    child.destroy({ children: true });
-  }
+  protected override updateLayoutChildren(): void {
+    const children = this.getLayoutChildren();
 
-  public setChildHex(child: LayoutRect, q: number, r: number): void {
-    if (!this.childHexes.has(child)) {
+    if (children.length === 0) {
+      this._tileRadius = 0;
       return;
     }
 
-    this.childHexes.set(child, { q, r });
-    this.invalidateLayout();
-  }
+    // Normalized (R=1) positions:
+    //   center_x = q * 1.5
+    //   center_y = r * √3 + (odd(q) ? √3/2 : 0)
+    // Hex rect spans ±1 in x and ±√3/2 in y around the center.
+    let nMinX = Infinity,  nMaxX = -Infinity;
+    let nMinY = Infinity,  nMaxY = -Infinity;
 
-  public getChildHex(child: LayoutRect): HexCoord | null {
-    const hex = this.childHexes.get(child);
-    return hex ? { ...hex } : null;
-  }
-
-  public setHexSize(hexSize: number): void {
-    this.hexSize = Math.max(1, hexSize);
-    this.invalidateLayout();
-  }
-
-  public getHexSize(): number {
-    return this.hexSize;
-  }
-
-  public hexToLocal(q: number, r: number): Point {
-    return new Point(
-      this.innerRect.x + this.hexSize * (3 / 2) * q,
-      this.innerRect.y + this.hexSize * Math.sqrt(3) * (r + q / 2),
-    );
-  }
-
-  public localToHex(x: number, y: number): HexCoord {
-    const localX = x - this.innerRect.x;
-    const localY = y - this.innerRect.y;
-
-    const q = ((2 / 3) * localX) / this.hexSize;
-    const r = ((-1 / 3) * localX + (Math.sqrt(3) / 3) * localY) / this.hexSize;
-
-    return this.roundHex(q, r);
-  }
-
-  public getHexBounds(q: number, r: number): Rectangle {
-    const center = this.hexToLocal(q, r);
-    const width = this.getHexWidth();
-    const height = this.getHexHeight();
-
-    return new Rectangle(
-      center.x - width / 2,
-      center.y - height / 2,
-      width,
-      height,
-    );
-  }
-
-  public getHexWidth(): number {
-    return this.hexSize * 2;
-  }
-
-  public getHexHeight(): number {
-    return Math.sqrt(3) * this.hexSize;
-  }
-
-  public override hitTestLayout(globalX: number, globalY: number): LayoutRect | null {
-    const local = this.toLocal(new Point(globalX, globalY));
-
-    if (!this.innerRect.contains(local.x, local.y)) {
-      return null;
+    for (const child of children) {
+      const pos = this._childPositions.get(child);
+      if (!pos) continue;
+      const { q, r } = pos;
+      const cx = q * 1.5;
+      const cy = r * SQRT3 + ((q & 1) !== 0 ? SQRT3 / 2 : 0);
+      nMinX = Math.min(nMinX, cx - 1);
+      nMaxX = Math.max(nMaxX, cx + 1);
+      nMinY = Math.min(nMinY, cy - SQRT3 / 2);
+      nMaxY = Math.max(nMaxY, cy + SQRT3 / 2);
     }
 
-    const hex = this.localToHex(local.x, local.y);
-    const candidates = this.childrenByHex.get(this.hexKey(hex.q, hex.r)) ?? [];
+    const { x, y, width, height } = this.innerRect;
+    const nW = nMaxX - nMinX;
+    const nH = nMaxY - nMinY;
+    const R = (nW > 0 && nH > 0 && width > 0 && height > 0)
+      ? Math.min(width / nW, height / nH)
+      : 0;
 
-    for (let i = candidates.length - 1; i >= 0; i--) {
-      const hit = candidates[i].hitTestLayout(globalX, globalY);
+    this._tileRadius = R;
+    this._nMinX     = nMinX;
+    this._nMinY     = nMinY;
 
-      if (hit) {
-        return hit;
+    const hexH = SQRT3 * R;
+
+    for (const child of children) {
+      const pos = this._childPositions.get(child);
+      if (!pos) {
+        child.setLayout(x, y, 0, 0);
+        continue;
       }
+      const { q, r } = pos;
+      const cx = q * 1.5;
+      const cy = r * SQRT3 + ((q & 1) !== 0 ? SQRT3 / 2 : 0);
+      child.setLayout(
+        x + (cx - 1        - nMinX) * R,
+        y + (cy - SQRT3 / 2 - nMinY) * R,
+        2 * R,
+        hexH,
+      );
+    }
+  }
+
+  // ─── Hit test ────────────────────────────────────────────────────────────
+
+  /**
+   * Convert a point in this object's LOCAL coordinate space to the nearest
+   * hex grid cell (offset-q, offset-r).  Returns null when R is zero.
+   *
+   * Math:
+   *   1. De-scale by R and shift by _nMinX/_nMinY to reach normalized space.
+   *   2. Apply the flat-top pixel→axial formula.
+   *   3. Round via cube-coordinate rounding (fixes the axis with most error).
+   *   4. Convert axial (q, r) → odd-q offset (q, r).
+   */
+  protected localToHex(lx: number, ly: number): { q: number; r: number } | null {
+    const R = this._tileRadius;
+    if (R <= 0) return null;
+
+    const nx = (lx - this.innerRect.x) / R + this._nMinX;
+    const ny = (ly - this.innerRect.y) / R + this._nMinY;
+
+    const qf = nx * (2 / 3);
+    const rf = nx * (-1 / 3) + ny / SQRT3;
+    const sf = -qf - rf;
+
+    let q = Math.round(qf);
+    let r = Math.round(rf);
+    const s = Math.round(sf);
+
+    const dq = Math.abs(q - qf);
+    const dr = Math.abs(r - rf);
+    const ds = Math.abs(s - sf);
+
+    if (dq > dr && dq > ds) {
+      q = -r - s;
+    } else if (dr > ds) {
+      r = -q - s;
+    }
+
+    // axial → odd-q offset:  offset_r = axial_r + floor(axial_q / 2)
+    return { q, r: r + (q >> 1) };
+  }
+
+  /** Direct lookup of the child registered at grid position (q, r). */
+  protected getChildAtHex(q: number, r: number): LayoutObject | null {
+    return this._positionLookup.get(posKey(q, r)) ?? null;
+  }
+
+  /**
+   * O(1) hit test: convert the cursor to hex coords, then look up the
+   * registered child.  Subclasses may override to check additional layers
+   * (e.g. overlay children) before falling through to the tile.
+   */
+  override hitTestLayout(globalX: number, globalY: number): LayoutObject | null {
+    const local = this.toLocal(new Point(globalX, globalY));
+    if (!this.innerRect.contains(local.x, local.y)) return null;
+
+    if (this._positionLookup.size === 0) return this;
+
+    const hex = this.localToHex(local.x, local.y);
+    if (!hex) return this;
+
+    const child = this._positionLookup.get(posKey(hex.q, hex.r));
+    if (child?.visible) {
+      return child.hitTestLayout(globalX, globalY) ?? this;
     }
 
     return this;
-  }
-
-  protected override layoutChildren(): void {
-    this.childrenByHex.clear();
-
-    for (const child of this.getLayoutChildren()) {
-      const hex = this.childHexes.get(child);
-
-      if (!hex || !child.visible) {
-        continue;
-      }
-
-      const bounds = this.getHexBounds(hex.q, hex.r);
-
-      child.setLayout(bounds.x, bounds.y, bounds.width, bounds.height);
-      this.cacheChildByHex(child, hex.q, hex.r);
-    }
-  }
-
-  protected roundHex(q: number, r: number): HexCoord {
-    const x = q;
-    const z = r;
-    const y = -x - z;
-
-    let rx = Math.round(x);
-    let ry = Math.round(y);
-    let rz = Math.round(z);
-
-    const xDiff = Math.abs(rx - x);
-    const yDiff = Math.abs(ry - y);
-    const zDiff = Math.abs(rz - z);
-
-    if (xDiff > yDiff && xDiff > zDiff) {
-      rx = -ry - rz;
-    } else if (yDiff > zDiff) {
-      ry = -rx - rz;
-    } else {
-      rz = -rx - ry;
-    }
-
-    return { q: rx, r: rz };
-  }
-
-  protected hexKey(q: number, r: number): string {
-    return `${q},${r}`;
-  }
-
-  private cacheChildByHex(child: LayoutRect, q: number, r: number): void {
-    const key = this.hexKey(Math.round(q), Math.round(r));
-    const children = this.childrenByHex.get(key) ?? [];
-
-    if (!children.includes(child)) {
-      children.push(child);
-    }
-
-    this.childrenByHex.set(key, children);
-  }
-
-  private removeFromHexCache(child: LayoutRect): void {
-    for (const [key, children] of this.childrenByHex) {
-      const nextChildren = children.filter((candidate) => candidate !== child);
-
-      if (nextChildren.length === 0) {
-        this.childrenByHex.delete(key);
-      } else {
-        this.childrenByHex.set(key, nextChildren);
-      }
-    }
   }
 }

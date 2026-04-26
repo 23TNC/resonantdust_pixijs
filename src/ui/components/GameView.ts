@@ -1,195 +1,92 @@
-import { LayoutRect, LayoutRoot, type LayoutPadding, type LayoutRootOptions } from "@/ui/layout";
-import { LayoutHorizontal, LayoutVertical } from "@/ui/layout";
-import { Panel } from "@/ui/components/Panel";
-import { World } from "@/ui/components/World";
+import { client_cards, viewed_id } from "@/spacetime/Data";
+import { LayoutRoot } from "@/ui/layout/LayoutRoot";
+import { LayoutHorizontal, LayoutVertical } from "@/ui/layout/LayoutLinear";
+import { Panel } from "./Panel";
+import { World } from "./World";
 
-export interface GameViewOptions extends LayoutRootOptions {
-  viewId: number;
-  width: number;
-  height: number;
-  padding?: LayoutPadding;
-  gap?: number;
-  titleBarSize?: number;
-}
-
-export interface GameViewWeights {
-  bodyColumns?: {
-    left?: number;
-    center?: number;
-    right?: number;
-  };
-  leftPanels?: {
-    top?: number;
-    middle?: number;
-    bottom?: number;
-  };
-  centerPanels?: {
-    top?: number;
-    bottom?: number;
-  };
-  rightPanels?: {
-    top?: number;
-    bottom?: number;
-  };
-}
-
+/**
+ * Top-level game view for a single soul card.
+ *
+ * viewed_id (from Data) identifies the soul card being observed. On each
+ * sync() call, World is centred on that soul's world position and the zone
+ * set is reconciled with client_zones.
+ *
+ * Layout (weights, not fixed sizes — scales with window):
+ *
+ *   ┌─────────────────────────────────────────────┐  weight 1  (top bar)
+ *   ├───────────┬─────────────────────┬───────────┤
+ *   │           │                     │           │
+ *   │           │       World         │           │  weight 4
+ *   │  weight 2 │                     │  weight 2 │
+ *   │           ├─────────────────────┤           │
+ *   │           │                     │           │  weight 1
+ *   └───────────┴─────────────────────┴───────────┘
+ *     weight 2        weight 5          weight 2
+ *                   (center column)
+ *
+ * Call tick() each frame (add to the PixiJS ticker).
+ * Call sync() after any subscription update or when viewed_id changes.
+ * sync() should be called after the first tick() so that World's innerRect is
+ * valid and centerOnHex produces a correctly centred camera.
+ */
 export class GameView extends LayoutRoot {
-  public readonly viewId: number;
+  private readonly _world: World;
 
-  public readonly mainLayout: LayoutVertical;
-  public readonly titleBar: Panel;
-  public readonly bodyLayout: LayoutHorizontal;
+  constructor() {
+    super();
 
-  public readonly leftColumn: LayoutVertical;
-  public readonly centerColumn: LayoutVertical;
-  public readonly rightColumn: LayoutVertical;
+    this._world = new World({ tileRadius: 24 });
 
-  public readonly leftTopPanel: Panel;
-  public readonly leftMiddlePanel: Panel;
-  public readonly leftBottomPanel: Panel;
+    // ── Left column ───────────────────────────────────────────────────────
+    const leftCol = new LayoutVertical();
+    leftCol.addItem(new Panel(), { weight: 1 });
+    leftCol.addItem(new Panel(), { weight: 1 });
+    leftCol.addItem(new Panel(), { weight: 1 });
 
-  public readonly centerTopPanel: Panel;
-  public readonly world: World;
-  public readonly centerBottomPanel: Panel;
+    // ── Center column ─────────────────────────────────────────────────────
+    const worldPanel = new Panel({ radius: 0 });
+    worldPanel.addLayoutChild(this._world);
+    const centerCol = new LayoutVertical();
+    centerCol.addItem(worldPanel, { weight: 4 });
+    centerCol.addItem(new Panel(), { weight: 1 });
 
-  public readonly rightTopPanel: Panel;
-  public readonly rightBottomPanel: Panel;
+    // ── Right column ──────────────────────────────────────────────────────
+    const rightCol = new LayoutVertical();
+    rightCol.addItem(new Panel(), { weight: 1 });
+    rightCol.addItem(new Panel(), { weight: 1 });
 
-  private readonly titleBarSize: number;
+    // ── Main row ──────────────────────────────────────────────────────────
+    const mainRow = new LayoutHorizontal();
+    mainRow.addItem(leftCol,   { weight: 2 });
+    mainRow.addItem(centerCol, { weight: 5 });
+    mainRow.addItem(rightCol,  { weight: 2 });
 
-  public constructor(options: GameViewOptions) {
-    super({ padding: 8, ...options });
+    // ── Outer column ──────────────────────────────────────────────────────
+    const outerCol = new LayoutVertical();
+    outerCol.addItem(new Panel(), { weight: 1 });
+    outerCol.addItem(mainRow,     { weight: 9 });
 
-    this.viewId = options.viewId;
-
-    const gap = Math.max(0, options.gap ?? 8);
-    this.titleBarSize = Math.max(0, options.titleBarSize ?? 80);
-
-    this.mainLayout = this.addLayoutItem(new LayoutVertical({ gap }));
-
-    this.titleBar = this.mainLayout.addLayoutItem(new Panel(), {
-      fixedSize: this.titleBarSize,
-    });
-    
-    this.bodyLayout = this.mainLayout.addLayoutItem(new LayoutHorizontal({ gap }), {
-      weight: 1,
-    });
-    
-    this.leftColumn = this.bodyLayout.addLayoutItem(new LayoutVertical({ gap }), {
-      weight: 1,
-    });
-    
-    this.centerColumn = this.bodyLayout.addLayoutItem(new LayoutVertical({ gap }), {
-      weight: 2,
-    });
-
-    this.rightColumn = this.bodyLayout.addLayoutItem(new LayoutVertical({ gap }), {
-      weight: 1,
-    });
-
-    this.leftTopPanel = this.leftColumn.addLayoutItem(new Panel(), { weight: 1 });
-    this.leftMiddlePanel = this.leftColumn.addLayoutItem(new Panel(), { weight: 1 });
-    this.leftBottomPanel = this.leftColumn.addLayoutItem(new Panel(), { weight: 1 });
-    
-    this.centerTopPanel = this.centerColumn.addLayoutItem(new Panel(), { weight: 1 });
-    this.world = this.centerTopPanel.addLayoutChild(new World());
-    this.centerBottomPanel = this.centerColumn.addLayoutItem(new Panel(), { weight: 1 });
-
-    this.rightTopPanel = this.rightColumn.addLayoutItem(new Panel(), { weight: 1 });
-    this.rightBottomPanel = this.rightColumn.addLayoutItem(new Panel(), { weight: 1 });
+    this.addLayoutChild(outerCol);
   }
 
-  public setTitleBarSize(size: number): void {
-    this.mainLayout.setChildLayoutOptions(this.titleBar, {
-      fixedSize: Math.max(0, size),
-    });
-  }
+  // ─── Sync ────────────────────────────────────────────────────────────────
 
-  public setWeights(weights: GameViewWeights): void {
-    if (weights.bodyColumns) {
-      this.setBodyColumnWeights(weights.bodyColumns);
-    }
+  /**
+   * Reconcile the World with the current viewed_id and client data.
+   * Resolves the soul's z layer and world position, syncs zones, and recentres
+   * the camera.  Best called after the first tick() so innerRect is valid.
+   */
+  sync(): void {
+    const soul = client_cards[viewed_id];
 
-    if (weights.leftPanels) {
-      this.setLeftPanelWeights(weights.leftPanels);
-    }
-
-    if (weights.centerPanels) {
-      this.setCenterPanelWeights(weights.centerPanels);
-    }
-
-    if (weights.rightPanels) {
-      this.setRightPanelWeights(weights.rightPanels);
+    if (soul) {
+      this._world.setZ(soul.z);
+      this._world.syncZones();
+      this._world.centerOnHex(soul.world_q, soul.world_r);
+    } else {
+      this._world.syncZones();
     }
   }
 
-  public setBodyColumnWeights(weights: {
-    left?: number;
-    center?: number;
-    right?: number;
-  }): void {
-    this.setWeight(this.bodyLayout, this.leftColumn, weights.left);
-    this.setWeight(this.bodyLayout, this.centerColumn, weights.center);
-    this.setWeight(this.bodyLayout, this.rightColumn, weights.right);
-  }
-
-  public setLeftPanelWeights(weights: {
-    top?: number;
-    middle?: number;
-    bottom?: number;
-  }): void {
-    this.setWeight(this.leftColumn, this.leftTopPanel, weights.top);
-    this.setWeight(this.leftColumn, this.leftMiddlePanel, weights.middle);
-    this.setWeight(this.leftColumn, this.leftBottomPanel, weights.bottom);
-  }
-
-  public setCenterPanelWeights(weights: { top?: number; bottom?: number }): void {
-    this.setWeight(this.centerColumn, this.centerTopPanel, weights.top);
-    this.setWeight(this.centerColumn, this.centerBottomPanel, weights.bottom);
-  }
-
-  public setRightPanelWeights(weights: { top?: number; bottom?: number }): void {
-    this.setWeight(this.rightColumn, this.rightTopPanel, weights.top);
-    this.setWeight(this.rightColumn, this.rightBottomPanel, weights.bottom);
-  }
-
-  public resetWeights(): void {
-    this.setTitleBarSize(this.titleBarSize);
-
-    this.setBodyColumnWeights({
-      left: 1,
-      center: 2,
-      right: 1,
-    });
-
-    this.setLeftPanelWeights({
-      top: 1,
-      middle: 1,
-      bottom: 1,
-    });
-
-    this.setCenterPanelWeights({
-      top: 1,
-      bottom: 1,
-    });
-
-    this.setRightPanelWeights({
-      top: 1,
-      bottom: 1,
-    });
-  }
-
-  private setWeight(
-    parent: LayoutHorizontal | LayoutVertical,
-    child: LayoutRect,
-    weight: number | undefined,
-  ): void {
-    if (weight === undefined) {
-      return;
-    }
-
-    parent.setChildLayoutOptions(child, {
-      weight: Math.max(0, weight),
-    });
-  }
+  getWorld(): World { return this._world; }
 }
