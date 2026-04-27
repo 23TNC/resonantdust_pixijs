@@ -49,9 +49,9 @@ export class GameView extends LayoutRoot {
     this._layers = new LayoutLayers({ layers: ["world", "game", "overlay"] });
     this.addLayoutChild(this._layers);
 
-    const TILE_R  = 70;
-    const CARD_W  = TILE_R;
-    const CARD_H  = Math.round(TILE_R * 4 / 3);
+    const TILE_R  = 96;
+    const CARD_W  = 70;
+    const CARD_H  = Math.round(CARD_W * 4 / 3);
 
     this._world = new World({ tileRadius: TILE_R, stackWidth: CARD_W, cardHeight: CARD_H });
 

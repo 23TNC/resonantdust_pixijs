@@ -1,73 +1,67 @@
-import { client_cards, stacked_up_children, type CardId } from "@/spacetime/Data";
-import { getDefinitionByPacked } from "@/data/definitions/CardDefinitions";
+import { client_cards, stacked_up_children, stacked_down_children, type CardId } from "@/spacetime/Data";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { Card } from "./Card";
 
 export interface CardStackOptions extends LayoutObjectOptions {
-  card_id?:          CardId;
-  titleHeight?:      number;
-  /** When true, dragging/returning cards are included in the chain. Default: false. */
-  ignoreDragState?:  boolean;
+  card_id?:         CardId;
+  titleHeight?:     number;
+  /** When true, dragging/returning cards are included in branches. Default: false. */
+  ignoreDragState?: boolean;
 }
 
-// Prevents an infinite loop if the server ever sends a malformed link cycle.
 const MAX_STACK_DEPTH = 64;
 
 /**
- * Displays a chain of stacked cards as a visual stack.
+ * Displays a root card with two independent branches of stacked children.
  *
- * Starting from the root card_id, the component follows stacked_up_children,
- * building a chain of Card children.  Each child after the root is shifted by
- * titleHeight pixels and rendered at a lower depth so later cards peek out
- * with only their title bars visible.
+ * The root has neither CARD_FLAG_STACKED_UP nor CARD_FLAG_STACKED_DOWN.
+ * Cards in stacked_up_children   form the UP   branch — each peeks above the
+ * previous card with only its top title bar visible.
+ * Cards in stacked_down_children form the DOWN branch — each peeks below the
+ * previous card with only its bottom title bar visible.
  *
- * Grow direction is determined by the root card's definition (title_on_bottom):
+ * Visual (2 up-branch cards, 1 down-branch card):
  *
- *   title_on_bottom = false → grow upward (titles peek above the root):
+ *   ┌────────────┐  ← up[1]    y = −2·titleHeight   — furthest behind
+ *   │ title      │
+ *   ├────────────┤  ← up[0]    y = −titleHeight
+ *   │ title      │
+ *   ├────────────┤  ← root     y = 0                 — on top
+ *   │ title/body │
+ *   ├────────────┤
+ *   │   body     │
+ *   │   title    │
+ *   └────────────┘  ← down[0]  y = +titleHeight      — behind
  *
- *     ┌────────────┐  ← chain[2]  y = −2·titleHeight   — behind
- *     │ title      │
- *     ├────────────┤  ← chain[1]  y = −titleHeight
- *     │ title      │
- *     ├────────────┤  ← root      y = 0                 — on top
- *     │ title      │
- *     │   body     │
- *     └────────────┘
- *
- *   title_on_bottom = true → grow downward (titles peek below the root):
- *
- *     ┌────────────┐  ← root      y = 0                 — on top
- *     │   body     │
- *     │   title    │
- *     ├────────────┤  ← chain[1]  y = +titleHeight
- *     │   body     │
- *     │   title    │
- *     ├────────────┤  ← chain[2]  y = +2·titleHeight    — behind
- *     │   body     │
- *     │   title    │
- *     └────────────┘
- *
- * The root occupies the full card height supplied by the parent via setLayout.
- * Each additional card extends the rect in the grow direction by titleHeight.
- * All cards share the same width and height.
+ * The rect origin is placed at the root's top-left corner by the parent.
+ * updateLayoutChildren grows the rect upward by upCount*titleHeight and
+ * downward by downCount*titleHeight without calling setOrigin (which would
+ * fire invalidateLayout and create a layout cycle with the parent).
  */
 export class CardStack extends LayoutObject {
   private _rootCardId:               CardId;
   private readonly _titleHeight:     number;
   private readonly _ignoreDragState: boolean;
 
-  // Height given by the parent for a single card — captured in setLayout.
+  // Single-card height supplied by the parent via setLayout.
   private _cardHeight = 0;
 
-  // Resolved chain and parallel Card array — kept in sync by _syncCards().
-  private _chain: CardId[] = [];
-  private readonly _cards: Card[] = [];
+  // Root card display object — created on first non-zero rootCardId.
+  private _rootCard: Card | null = null;
+
+  // UP branch: index 0 is the direct child of root in stacked_up_children.
+  private _upChain: CardId[] = [];
+  private readonly _upCards: Card[] = [];
+
+  // DOWN branch: index 0 is the direct child of root in stacked_down_children.
+  private _downChain: CardId[] = [];
+  private readonly _downCards: Card[] = [];
 
   constructor(options: CardStackOptions = {}) {
     super(options);
-    this._rootCardId       = options.card_id          ?? 0;
-    this._titleHeight      = options.titleHeight      ?? 24;
-    this._ignoreDragState  = options.ignoreDragState  ?? false;
+    this._rootCardId      = options.card_id         ?? 0;
+    this._titleHeight     = options.titleHeight     ?? 24;
+    this._ignoreDragState = options.ignoreDragState ?? false;
     this.invalidateLayout();
   }
 
@@ -89,109 +83,165 @@ export class CardStack extends LayoutObject {
   }
 
   protected override updateLayoutChildren(): void {
-    const chain = this._resolveChain();
-
-    if (!this._chainEquals(chain)) {
-      this._chain = chain;
-      this._syncCards();
+    if (this._rootCardId === 0) {
+      this._clearAll();
+      return;
     }
 
-    const n     = this._cards.length;
-    const extra = (n - 1) * this._titleHeight;
-
-    // Grow direction is determined by the dragged card's (chain[1]) definition.
-    const stackBCard = n > 1 ? client_cards[this._chain[1]] : undefined;
-    const stackBDef  = stackBCard ? getDefinitionByPacked(stackBCard.packed_definition) : undefined;
-    const growDown   = stackBDef?.title_on_bottom ?? false;
-
-    // Extend the rect in the grow direction.  Direct mutation avoids calling
-    // setOrigin, which would fire invalidateLayout and create a layout cycle.
-    if (growDown) {
-      this.outerRect.y      = 0;
-      this.outerRect.height = this._cardHeight + extra;
-      this.innerRect.y      = 0;
-      this.innerRect.height = this._cardHeight + extra;
-    } else {
-      this.outerRect.y      = -extra;
-      this.outerRect.height = this._cardHeight + extra;
-      this.innerRect.y      = -extra;
-      this.innerRect.height = this._cardHeight + extra;
+    // ── Ensure root card exists ───────────────────────────────────────────
+    if (!this._rootCard) {
+      this._rootCard = new Card({ titleHeight: this._titleHeight });
+      this.addLayoutChild(this._rootCard);
     }
+
+    // ── Resolve branches ─────────────────────────────────────────────────
+    const upChain   = this._walkBranch(stacked_up_children);
+    const downChain = this._walkBranch(stacked_down_children);
+
+    if (!this._arraysEqual(this._upChain, upChain)) {
+      this._syncBranch(upChain.length, this._upCards);
+      this._upChain = upChain;
+    }
+    if (!this._arraysEqual(this._downChain, downChain)) {
+      this._syncBranch(downChain.length, this._downCards);
+      this._downChain = downChain;
+    }
+
+    const upCount   = this._upCards.length;
+    const downCount = this._downCards.length;
+    const upExtra   = upCount   * this._titleHeight;
+    const downExtra = downCount * this._titleHeight;
+
+    // ── Grow rect without calling setOrigin (avoids layout cycle) ─────────
+    this.outerRect.y      = -upExtra;
+    this.outerRect.height = this._cardHeight + upExtra + downExtra;
+    this.innerRect.y      = -upExtra;
+    this.innerRect.height = this._cardHeight + upExtra + downExtra;
 
     const { x, width } = this.innerRect;
 
-    for (let i = 0; i < n; i++) {
-      this._cards[i].setCardId(this._chain[i]);
-      this._cards[i].setLayout(
-        x,
-        growDown ? i * this._titleHeight : -i * this._titleHeight,
-        width,
-        this._cardHeight,
-      );
+    // ── Position cards ────────────────────────────────────────────────────
+    this._rootCard.setCardId(this._rootCardId);
+    this._rootCard.setLayout(x, 0, width, this._cardHeight);
+
+    for (let i = 0; i < upCount; i++) {
+      this._upCards[i].setCardId(this._upChain[i]);
+      this._upCards[i].setLayout(x, -(i + 1) * this._titleHeight, width, this._cardHeight);
+    }
+
+    for (let i = 0; i < downCount; i++) {
+      this._downCards[i].setCardId(this._downChain[i]);
+      this._downCards[i].setLayout(x, (i + 1) * this._titleHeight, width, this._cardHeight);
+    }
+
+    // ── Depth: root on top; each branch recedes behind the previous card ──
+    const total = upCount + downCount;
+    this.setChildDepth(this._rootCard, total);
+    for (let i = 0; i < upCount; i++) {
+      this.setChildDepth(this._upCards[i], upCount - 1 - i);
+    }
+    for (let i = 0; i < downCount; i++) {
+      this.setChildDepth(this._downCards[i], downCount - 1 - i);
     }
   }
 
   // ─── Private ─────────────────────────────────────────────────────────────
 
   /**
-   * Walk stacked_up_children from the root to build the ordered chain.
-   * root_card_id is the base (non-stacked) card; each step follows one child
-   * upward until no children remain. Stops early when ignoreDragState is false
-   * and the next child is dragging or returning.
-   * A Set guards against cycles; MAX_STACK_DEPTH provides a hard cap.
+   * Walk one branch index from the root, returning the ordered chain of
+   * child card IDs (root not included).  Stops at cycles, missing cards,
+   * dragging/returning cards (unless ignoreDragState), or MAX_STACK_DEPTH.
    */
-  private _resolveChain(): CardId[] {
+  private _walkBranch(index: Map<CardId, Set<CardId>>): CardId[] {
     const chain: CardId[] = [];
-    if (this._rootCardId === 0) return chain;
+    const seen  = new Set<CardId>([this._rootCardId]);
+    let current = this._rootCardId;
 
-    const seen    = new Set<CardId>();
-    let   current = this._rootCardId;
-
-    while (current !== 0 && chain.length < MAX_STACK_DEPTH) {
-      if (seen.has(current)) break;
-      const card = client_cards[current];
-      if (!this._ignoreDragState && (card?.dragging || card?.returning)) break;
-      seen.add(current);
-      chain.push(current);
-
-      const children = stacked_up_children.get(current);
+    while (chain.length < MAX_STACK_DEPTH) {
+      const children = index.get(current);
       if (!children || children.size === 0) break;
-      current = children.values().next().value!;
+      const next = children.values().next().value!;
+      if (seen.has(next)) break;
+      const card = client_cards[next];
+      if (!this._ignoreDragState && (card?.dragging || card?.returning)) break;
+      seen.add(next);
+      chain.push(next);
+      current = next;
     }
 
     return chain;
   }
 
-  private _chainEquals(other: CardId[]): boolean {
-    if (this._chain.length !== other.length) return false;
-    for (let i = 0; i < other.length; i++) {
-      if (this._chain[i] !== other[i]) return false;
+  /** Grow or shrink a branch card pool to match targetLength. */
+  private _syncBranch(targetLength: number, cards: Card[]): void {
+    while (cards.length < targetLength) {
+      const card = new Card({ titleHeight: this._titleHeight });
+      cards.push(card);
+      this.addLayoutChild(card, 0);
+    }
+    while (cards.length > targetLength) {
+      const card = cards.pop()!;
+      this.removeLayoutChild(card);
+      card.destroy({ children: true });
+    }
+  }
+
+  /** Remove all cards and reset rect when rootCardId is 0. */
+  private _clearAll(): void {
+    if (this._rootCard) {
+      this.removeLayoutChild(this._rootCard);
+      this._rootCard.destroy({ children: true });
+      this._rootCard = null;
+    }
+    this._syncBranch(0, this._upCards);
+    this._syncBranch(0, this._downCards);
+    this._upChain   = [];
+    this._downChain = [];
+    this.outerRect.y      = 0;
+    this.outerRect.height = 0;
+    this.innerRect.y      = 0;
+    this.innerRect.height = 0;
+  }
+
+  private _arraysEqual(a: CardId[], b: CardId[]): boolean {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
     }
     return true;
   }
 
-  /**
-   * Add or remove Card children so _cards.length matches _chain.length.
-   * Root (index 0) gets the highest depth and renders on top.
-   */
-  private _syncCards(): void {
-    const n = this._chain.length;
+  // ─── Static leaf walks ───────────────────────────────────────────────────
+  // Pure data walks for callers (e.g. drag-and-drop merges) that need the
+  // attachment point of an existing stack.  Unlike _walkBranch, these ignore
+  // dragging/returning state — the goal is the true data leaf, not where a
+  // visual chain happens to stop.
 
-    while (this._cards.length < n) {
-      const card = new Card({ titleHeight: this._titleHeight });
-      this._cards.push(card);
-      this.addLayoutChild(card, 0);
+  /** Walk stacked_up_children from rootId; return the up-branch leaf (or rootId if empty). */
+  static findUpLeaf(rootId: CardId): CardId {
+    return CardStack._walkToLeaf(rootId, stacked_up_children);
+  }
+
+  /** Walk stacked_down_children from rootId; return the down-branch leaf (or rootId if empty). */
+  static findDownLeaf(rootId: CardId): CardId {
+    return CardStack._walkToLeaf(rootId, stacked_down_children);
+  }
+
+  private static _walkToLeaf(rootId: CardId, index: Map<CardId, Set<CardId>>): CardId {
+    const seen  = new Set<CardId>([rootId]);
+    let current = rootId;
+    let steps   = 0;
+
+    while (steps < MAX_STACK_DEPTH) {
+      const children = index.get(current);
+      if (!children || children.size === 0) break;
+      const next = children.values().next().value!;
+      if (seen.has(next)) break;
+      seen.add(next);
+      current = next;
+      steps++;
     }
 
-    while (this._cards.length > n) {
-      const card = this._cards.pop()!;
-      this.removeLayoutChild(card);
-      card.destroy({ children: true });
-    }
-
-    // Root (index 0) on top; deepest child (index n-1) behind.
-    for (let i = 0; i < n; i++) {
-      this.setChildDepth(this._cards[i], n - 1 - i);
-    }
+    return current;
   }
 }

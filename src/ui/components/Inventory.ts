@@ -174,17 +174,17 @@ export class Inventory extends LayoutObject {
    * ones separate quickly.  Returns true if any stack moved.
    */
   private _push(): boolean {
-    const ids  = [...this._stacks.keys()];
-    const n    = ids.length;
-    let moved  = false;
+    const entries = [...this._stacks.entries()];
+    const n       = entries.length;
+    let moved     = false;
 
-    const halfW = ids.map(() => this._stackWidth / 2);
-    const halfH = ids.map(_id => this._cardHeight / 2);
+    const halfW = entries.map(() => this._stackWidth / 2);
+    const halfH = entries.map(([, stack]) => stack.outerRect.height / 2);
 
     for (let i = 0; i < n - 1; i++) {
-      const pi = this._floatPos.get(ids[i])!;
+      const pi = this._floatPos.get(entries[i][0])!;
       for (let j = i + 1; j < n; j++) {
-        const pj = this._floatPos.get(ids[j])!;
+        const pj = this._floatPos.get(entries[j][0])!;
 
         const dx = pj.x - pi.x;
         const dy = pj.y - pi.y;
@@ -209,15 +209,20 @@ export class Inventory extends LayoutObject {
     return moved;
   }
 
-  /** Clamp all float positions so each stack's AABB stays within innerRect. */
+  /** Clamp all float positions so each stack's full visual AABB stays within innerRect. */
   private _clamp(): void {
     const hw = this.innerRect.width  / 2;
     const hh = this.innerRect.height / 2;
+    const hch = this._cardHeight / 2;
 
     for (const [id, pos] of this._floatPos) {
-      const sHW = this._stackWidth / 2;
-      pos.x = Math.max(-hw + sHW, Math.min(hw - sHW, pos.x));
-      pos.y = Math.max(-hh + this._cardHeight / 2, Math.min(hh - this._cardHeight / 2, pos.y));
+      const stack    = this._stacks.get(id);
+      // stackTop/stackBot are in CardStack local space relative to its container origin.
+      // Container origin is placed at pos.y - cardHeight/2 by updateLayoutChildren.
+      const stackTop = stack?.outerRect.y                                           ?? 0;
+      const stackBot = stack ? stack.outerRect.y + stack.outerRect.height : this._cardHeight;
+      pos.x = Math.max(-hw + this._stackWidth / 2, Math.min(hw - this._stackWidth / 2, pos.x));
+      pos.y = Math.max(-hh + hch - stackTop, Math.min(hh + hch - stackBot, pos.y));
     }
   }
 
