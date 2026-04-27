@@ -61,6 +61,7 @@ export interface ServerPlayer {
   player_id: PlayerId;
   name: string;
   soul_id: CardId;
+  reference_id: CardId;
   zone: ZoneId;
   position: PackedPosition;
 }

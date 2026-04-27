@@ -59,30 +59,30 @@ export class GameView extends LayoutRoot {
 
     const PAD = 4;
 
-    // ── Left column ───────────────────────────────────────────────────────
-    this._inventory = new Inventory({ observer_id, viewed_id, card_types: [1, 2, 3, 4], stackWidth: CARD_W, cardHeight: CARD_H });
-    const inventoryPanel = new Panel({ padding: PAD });
-    inventoryPanel.addLayoutChild(this._inventory);
-
+    // ── Left column ──────────────────────────────────────────────────────
     const leftCol = new LayoutVertical();
-    leftCol.addItem(inventoryPanel,            { weight: 2 });
+    leftCol.addItem(new LayoutObject(), { weight: 1 });
     leftCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
-
+    
     // ── Center column ─────────────────────────────────────────────────────
     const centerCol = new LayoutVertical();
     centerCol.addItem(new LayoutObject(),          { weight: 4 });
     centerCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
 
-    // ── Right column ──────────────────────────────────────────────────────
+    // ── Right column ───────────────────────────────────────────────────────
+    this._inventory = new Inventory({ observer_id, viewed_id, card_types: [1, 2, 3, 4], stackWidth: CARD_W, cardHeight: CARD_H });
+    const inventoryPanel = new Panel({ padding: PAD });
+    inventoryPanel.addLayoutChild(this._inventory);
+
     const rightCol = new LayoutVertical();
     rightCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
-    rightCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
+    rightCol.addItem(inventoryPanel,              { weight: 2 });
 
     // ── Main row ──────────────────────────────────────────────────────────
     const mainRow = new LayoutHorizontal();
-    mainRow.addItem(rightCol,  { weight: 2 });
+    mainRow.addItem(leftCol,  { weight: 2 });
     mainRow.addItem(centerCol, { weight: 5 });
-    mainRow.addItem(leftCol,   { weight: 2 });
+    mainRow.addItem(rightCol,   { weight: 3 });
 
     // ── Top bar ───────────────────────────────────────────────────────────
     this._viewTitle = new ViewTitle();

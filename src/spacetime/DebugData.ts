@@ -79,16 +79,17 @@ export function bootstrap(): void {
     { card_id: 3,  definition: packDefinition(1, 2), soul_id: 1, link_id: 0,  flags: S,  zone: packZone( -90, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
     { card_id: 4,  definition: packDefinition(1, 3), soul_id: 1, link_id: 0,  flags: S,  zone: packZone(   0, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
     { card_id: 5,  definition: packDefinition(2, 1), soul_id: 1, link_id: 6,  flags: S,  zone: packZone(  90, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
-    { card_id: 6,  definition: packDefinition(2, 1), soul_id: 1, link_id: 0,  flags: ST, zone: packZone(  90, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
+    { card_id: 6,  definition: packDefinition(2, 2), soul_id: 1, link_id: 0,  flags: ST, zone: packZone(  90, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
     { card_id: 7,  definition: packDefinition(1, 1), soul_id: 1, link_id: 0,  flags: S,  zone: world_zone,           position: packPosition(1, 0, WORLD, UNLINKED) },
     { card_id: 8,  definition: packDefinition(6, 2), soul_id: 1, link_id: 0,  flags: 0,  zone: world_zone,           position: packPosition(2, 1, WORLD, UNLINKED) },
-    { card_id: 9,  definition: packDefinition(2, 2), soul_id: 1, link_id: 10, flags: S,  zone: packZone( 180, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
+    { card_id: 9,  definition: packDefinition(2, 4), soul_id: 1, link_id: 10, flags: S,  zone: packZone( 180, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
     { card_id: 10, definition: packDefinition(2, 3), soul_id: 1, link_id: 0,  flags: ST, zone: packZone( 180, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
+    { card_id: 11, definition: packDefinition(9, 0), soul_id: 1, link_id: 0,  flags: 0,  zone: packZone(   0, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
   ];
 
   // ─── Players ───────────────────────────────────────────────────────────────
   const players: ServerPlayer[] = [
-    { player_id: 1, name: "player1", soul_id: 1, zone: world_zone, position: packPosition(0, 0, WORLD, UNLINKED) },
+    { player_id: 1, name: "player1", soul_id: 1, reference_id: 11, zone: world_zone, position: packPosition(0, 0, WORLD, UNLINKED) },
   ];
 
   // ─── Zones ─────────────────────────────────────────────────────────────────

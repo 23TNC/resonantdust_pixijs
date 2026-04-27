@@ -251,7 +251,7 @@ export class Inventory extends LayoutObject {
       const len = this._chainLength(id);
       const sh  = this._cardHeight + (len - 1) * this._titleHeight;
       pos.x = Math.max(-hw + sHW, Math.min(hw - sHW, pos.x));
-      pos.y = Math.max(-hh + this._cardHeight / 2, Math.min(hh + this._cardHeight / 2 - sh, pos.y));
+      pos.y = Math.max(-hh + sh - this._cardHeight / 2, Math.min(hh - this._cardHeight / 2, pos.y));
     }
   }
 

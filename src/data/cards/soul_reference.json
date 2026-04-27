@@ -1,0 +1,11 @@
+{
+  "card_type": 9,
+  "cards": [
+    {
+      "name": "Soul Reference",
+      "style": {
+        "color": [ "#a8e0e6", "#ecd6aa", "#0b1426" ]
+      }
+    }
+  ]
+}

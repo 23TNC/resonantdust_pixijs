@@ -12,7 +12,7 @@
       ]
     },
     {
-      "name": "Anima",
+      "name": "Aether",
       "style": {
         "color": [ "#7D96E3", "#ecd6aa", "#0b1426" ]
       },
@@ -20,9 +20,17 @@
       ]
     },
     {
-      "name": "Soller",
+      "name": "Sollertia",
       "style": {
         "color": [ "#97e3a7", "#ecd6aa", "#0b1426" ]
+      },
+      "flags": [
+      ]
+    },
+    {
+      "name": "Anima",
+      "style": {
+        "color": [ "#FFD966", "#ecd6aa", "#0b1426" ]
       },
       "flags": [
       ]

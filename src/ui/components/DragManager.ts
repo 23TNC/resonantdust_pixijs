@@ -1,6 +1,7 @@
 import { Point } from "pixi.js";
 import {
   client_cards,
+  client_cards_by_zone,
   parseCardFlags,
   packZone,
   packPosition,
@@ -252,6 +253,8 @@ export class DragManager extends LayoutObject {
     const clientCard = client_cards[dragId];
     if (!clientCard) return;
 
+    if (clientCard.card_type < 1 || clientCard.card_type > 4) return;
+
     const flags = parseCardFlags(clientCard.flags);
     if (flags.position_locked || flags.position_hold) return;
 
@@ -329,28 +332,50 @@ export class DragManager extends LayoutObject {
         );
         card.dragging = false;
       } else if (dropTile) {
-        if (card.stacked) {
-          for (const key in client_cards) {
-            const parent = client_cards[Number(key) as CardId];
-            if (!parent || parent.link_id !== rootId) continue;
-            updateClientCardLinkId(parent.card_id, 0);
-            break;
-          }
-          card.flags  &= ~CARD_FLAG_STACKED;
-          card.stacked = false;
-          card.dirty   = true;
-        }
         const { worldQ, worldR } = dropTile.getCoords();
         const zone_q  = Math.floor(worldQ / ZONE_SIZE);
         const zone_r  = Math.floor(worldR / ZONE_SIZE);
         const local_q = worldQ - zone_q * ZONE_SIZE;
         const local_r = worldR - zone_r * ZONE_SIZE;
-        updateClientCardLocation(
-          rootId,
-          packZone(zone_q, zone_r, card.z),
-          packPosition(local_q, local_r, true, false),
-        );
-        card.dragging = false;
+        const zoneId  = packZone(zone_q, zone_r, card.z);
+
+        let blocked = false;
+        const zoneCards = client_cards_by_zone[zoneId];
+        if (zoneCards) {
+          for (const cid of zoneCards) {
+            if (cid === rootId) continue;
+            const c = client_cards[cid];
+            if (!c || !c.world_flag || c.dragging || c.returning || c.stacked || c.hidden) continue;
+            if (c.local_q !== local_q || c.local_r !== local_r) continue;
+            if (c.card_type === 6 || c.card_type === 7 || c.card_type === 8) continue;
+            blocked = true;
+            break;
+          }
+        }
+
+        if (blocked) {
+          card.dragging      = false;
+          card.returning     = true;
+          entry.returnTarget = { x: entry.returnOrigin.x, y: entry.returnOrigin.y };
+        } else {
+          if (card.stacked) {
+            for (const key in client_cards) {
+              const parent = client_cards[Number(key) as CardId];
+              if (!parent || parent.link_id !== rootId) continue;
+              updateClientCardLinkId(parent.card_id, 0);
+              break;
+            }
+            card.flags  &= ~CARD_FLAG_STACKED;
+            card.stacked = false;
+            card.dirty   = true;
+          }
+          updateClientCardLocation(
+            rootId,
+            packZone(zone_q, zone_r, card.z),
+            packPosition(local_q, local_r, true, false),
+          );
+          card.dragging = false;
+        }
       } else if (dropCard) {
         let destId = dropCard.getCardId();
         let alreadyLinked = false;
