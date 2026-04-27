@@ -21,7 +21,6 @@ export interface InventoryOptions extends LayoutObjectOptions {
   pushRate?:     number;
 }
 
-const MAX_CHAIN_DEPTH   = 64;
 const DEFAULT_TITLE_H   = 24;
 const DEFAULT_CARD_H    = 120;
 const DEFAULT_STACK_W   = 80;
@@ -123,13 +122,11 @@ export class Inventory extends LayoutObject {
     for (const [rootId, stack] of this._stacks) {
       const pos = this._floatPos.get(rootId);
       if (!pos) continue;
-      const n  = this._chainLength(rootId);
-      const sh = this._cardHeight + (n - 1) * this._titleHeight;
       stack.setLayout(
         cx + pos.x - this._stackWidth / 2,
         cy + pos.y - this._cardHeight / 2,
         this._stackWidth,
-        sh,
+        this._cardHeight,
       );
     }
   }
@@ -170,22 +167,6 @@ export class Inventory extends LayoutObject {
     return roots;
   }
 
-  private _chainLength(rootId: CardId): number {
-    let n = 0;
-    const seen = new Set<CardId>();
-    let current = rootId;
-    while (current !== 0 && n < MAX_CHAIN_DEPTH) {
-      if (seen.has(current)) break;
-      const card = client_cards[current];
-      if (card?.dragging || card?.returning) break;
-      seen.add(current);
-      n++;
-      if (!card || card.stacked_on_id === 0) break;
-      current = card.stacked_on_id;
-    }
-    return n;
-  }
-
   /**
    * One pairwise AABB push iteration.  Each overlapping pair is separated
    * along the centroid-to-centroid axis; speed is proportional to the smaller
@@ -198,10 +179,7 @@ export class Inventory extends LayoutObject {
     let moved  = false;
 
     const halfW = ids.map(() => this._stackWidth / 2);
-    const halfH = ids.map(id => {
-      const len = this._chainLength(id);
-      return (this._cardHeight + (len - 1) * this._titleHeight) / 2;
-    });
+    const halfH = ids.map(_id => this._cardHeight / 2);
 
     for (let i = 0; i < n - 1; i++) {
       const pi = this._floatPos.get(ids[i])!;
@@ -238,10 +216,8 @@ export class Inventory extends LayoutObject {
 
     for (const [id, pos] of this._floatPos) {
       const sHW = this._stackWidth / 2;
-      const len = this._chainLength(id);
-      const sh  = this._cardHeight + (len - 1) * this._titleHeight;
       pos.x = Math.max(-hw + sHW, Math.min(hw - sHW, pos.x));
-      pos.y = Math.max(-hh + sh - this._cardHeight / 2, Math.min(hh - this._cardHeight / 2, pos.y));
+      pos.y = Math.max(-hh + this._cardHeight / 2, Math.min(hh - this._cardHeight / 2, pos.y));
     }
   }
 

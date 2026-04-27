@@ -10,10 +10,11 @@ export interface CardStyle {
 }
 
 export interface CardDefinition {
-  name: string;
-  style?: CardStyle;
-  vars?: Record<string, string | number | boolean | null>;
-  flags?: CardFlag[];
+  name:            string;
+  style?:          CardStyle;
+  vars?:           Record<string, string | number | boolean | null>;
+  flags?:          CardFlag[];
+  title_on_bottom?: boolean;
 }
 
 interface CardDefinitionFile {

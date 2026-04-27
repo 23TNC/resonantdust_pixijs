@@ -12,6 +12,7 @@ import {
   type ServerAction,
   type ServerZone,
   CARD_FLAG_STACKED_UP,
+  CARD_FLAG_STACKED_DOWN,
   CARD_FLAG_STACKABLE,
   packDefinition,
   packZoneDefinition,
@@ -91,9 +92,12 @@ export function bootstrap(): void {
   // Panel inventory layout (pixel x, y=0):
   //   card 2   card 3   card 4   card 5┐   card 9┐
   //   x=-180   x=-90    x=0      x=90  │   x=180 │
-  //                               card 6┘   card10┘
+  //                               card 6┘   card10┘  ← up-branch (STACKED_UP)
+  //                              card 12┐  card 13┐  ← down-branch (STACKED_DOWN)
+  //                     (Discipline/bot)┘  (Faculty/top)┘
   const S  = CARD_FLAG_STACKABLE;
-  const ST = CARD_FLAG_STACKED_UP | CARD_FLAG_STACKABLE;
+  const ST = CARD_FLAG_STACKED_UP   | CARD_FLAG_STACKABLE;
+  const SD = CARD_FLAG_STACKED_DOWN | CARD_FLAG_STACKABLE;
 
   const cards: ServerCard[] = [
     // Soul card (type 5, category 0, def 1) — world hex (0,0)
@@ -115,6 +119,10 @@ export function bootstrap(): void {
     // Inventory: stack (card 9 parent, card 10 child)
     { card_id: 9,  macro_location: panel_macro, micro_location: packMicroPixel( 180, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(2, 0, 4), data: 0n },
     { card_id: 10, macro_location: panel_macro, micro_location: packMicroStacked(9),     owner_id: 1, flags: ST, packed_definition: packDefinition(2, 0, 3), data: 0n },
+
+    // Inventory: down-branch children — Discipline (title_on_bottom) on stack 5, Faculty (title_on_top) on stack 9
+    { card_id: 12, macro_location: panel_macro, micro_location: packMicroStacked(5),     owner_id: 1, flags: SD, packed_definition: packDefinition(1, 0, 1), data: 0n },
+    { card_id: 13, macro_location: panel_macro, micro_location: packMicroStacked(9),     owner_id: 1, flags: SD, packed_definition: packDefinition(2, 0, 1), data: 0n },
 
     // Inventory: soul reference card (type 9)
     { card_id: 11, macro_location: panel_macro, micro_location: packMicroPixel(   0, 0), owner_id: 1, flags: 0,  packed_definition: packDefinition(9, 0, 0), data: 0n },

@@ -9,7 +9,6 @@ import { World } from "./World";
 import { ViewTitle } from "./ViewTitle";
 import { FrameRate } from "./FrameRate";
 import { Inventory } from "./Inventory";
-import { DragManager } from "./DragManager";
 
 /**
  * Top-level game view for a single soul card.
@@ -40,7 +39,6 @@ import { DragManager } from "./DragManager";
 export class GameView extends LayoutRoot {
   private readonly _layers:      LayoutLayers;
   private readonly _input:       InputManager;
-  private readonly _dragManager: DragManager;
   private readonly _world:       World;
   private readonly _viewTitle:   ViewTitle;
   private readonly _inventory:   Inventory;
@@ -106,12 +104,6 @@ export class GameView extends LayoutRoot {
 
     this._world.setInput(this._input);
 
-    this._dragManager = new DragManager({
-      input:      this._input,
-      stackWidth: CARD_W,
-      cardHeight: CARD_H,
-    });
-    this._layers.add(this._dragManager, "overlay");
   }
 
   override destroy(options?: Parameters<LayoutRoot["destroy"]>[0]): void {

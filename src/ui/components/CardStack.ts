@@ -1,4 +1,5 @@
 import { client_cards, stacked_up_children, type CardId } from "@/spacetime/Data";
+import { getDefinitionByPacked } from "@/data/definitions/CardDefinitions";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { Card } from "./Card";
 
@@ -16,25 +17,39 @@ const MAX_STACK_DEPTH = 64;
  * Displays a chain of stacked cards as a visual stack.
  *
  * Starting from the root card_id, the component follows stacked_up_children,
- * building a chain of Card children.  Each child after the root is shifted
- * up by titleHeight pixels and rendered at a lower depth, so later cards
- * peek above the root with only their title bars visible.
+ * building a chain of Card children.  Each child after the root is shifted by
+ * titleHeight pixels and rendered at a lower depth so later cards peek out
+ * with only their title bars visible.
  *
- * Visual (3 cards):
+ * Grow direction is determined by the root card's definition (title_on_bottom):
  *
- *   ┌────────────┐  ← chain[2] (depth 0, y = −2·titleHeight)   — behind
- *   │ title      │
- *   ├────────────┤  ← chain[1] (depth 1, y = −titleHeight)
- *   │ title      │
- *   ├────────────┤  ← root / chain[0] (depth 2, y = 0)          — on top
- *   │ title      │
- *   │            │
- *   │   body     │
- *   └────────────┘
+ *   title_on_bottom = false → grow upward (titles peek above the root):
+ *
+ *     ┌────────────┐  ← chain[2]  y = −2·titleHeight   — behind
+ *     │ title      │
+ *     ├────────────┤  ← chain[1]  y = −titleHeight
+ *     │ title      │
+ *     ├────────────┤  ← root      y = 0                 — on top
+ *     │ title      │
+ *     │   body     │
+ *     └────────────┘
+ *
+ *   title_on_bottom = true → grow downward (titles peek below the root):
+ *
+ *     ┌────────────┐  ← root      y = 0                 — on top
+ *     │   body     │
+ *     │   title    │
+ *     ├────────────┤  ← chain[1]  y = +titleHeight
+ *     │   body     │
+ *     │   title    │
+ *     ├────────────┤  ← chain[2]  y = +2·titleHeight    — behind
+ *     │   body     │
+ *     │   title    │
+ *     └────────────┘
  *
  * The root occupies the full card height supplied by the parent via setLayout.
- * Each additional card in the chain extends the rect upward by titleHeight so
- * the root is never clipped.  All cards share the same width and height.
+ * Each additional card extends the rect in the grow direction by titleHeight.
+ * All cards share the same width and height.
  */
 export class CardStack extends LayoutObject {
   private _rootCardId:               CardId;
@@ -84,19 +99,35 @@ export class CardStack extends LayoutObject {
     const n     = this._cards.length;
     const extra = (n - 1) * this._titleHeight;
 
-    // Grow the rect upward for stacked children.  We directly mutate
-    // outerRect/innerRect rather than calling setOrigin, which would fire
-    // invalidateLayout and create a layout cycle with the parent.
-    this.outerRect.y      = -extra;
-    this.outerRect.height = this._cardHeight + extra;
-    this.innerRect.y      = -extra;
-    this.innerRect.height = this._cardHeight + extra;
+    // Grow direction is determined by the dragged card's (chain[1]) definition.
+    const stackBCard = n > 1 ? client_cards[this._chain[1]] : undefined;
+    const stackBDef  = stackBCard ? getDefinitionByPacked(stackBCard.packed_definition) : undefined;
+    const growDown   = stackBDef?.title_on_bottom ?? false;
+
+    // Extend the rect in the grow direction.  Direct mutation avoids calling
+    // setOrigin, which would fire invalidateLayout and create a layout cycle.
+    if (growDown) {
+      this.outerRect.y      = 0;
+      this.outerRect.height = this._cardHeight + extra;
+      this.innerRect.y      = 0;
+      this.innerRect.height = this._cardHeight + extra;
+    } else {
+      this.outerRect.y      = -extra;
+      this.outerRect.height = this._cardHeight + extra;
+      this.innerRect.y      = -extra;
+      this.innerRect.height = this._cardHeight + extra;
+    }
 
     const { x, width } = this.innerRect;
 
     for (let i = 0; i < n; i++) {
       this._cards[i].setCardId(this._chain[i]);
-      this._cards[i].setLayout(x, -i * this._titleHeight, width, this._cardHeight);
+      this._cards[i].setLayout(
+        x,
+        growDown ? i * this._titleHeight : -i * this._titleHeight,
+        width,
+        this._cardHeight,
+      );
     }
   }
 

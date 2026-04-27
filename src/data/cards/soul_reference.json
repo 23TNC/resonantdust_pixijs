@@ -3,6 +3,7 @@
   "cards": [
     {
       "name": "Soul Reference",
+      "title_on_bottom": false,
       "style": {
         "color": [ "#a8e0e6", "#ecd6aa", "#0b1426" ]
       }

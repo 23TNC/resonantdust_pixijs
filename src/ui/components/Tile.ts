@@ -160,7 +160,7 @@ export class Tile extends LayoutObject {
 
   private _resolvePackedDefinition(): number {
     if (this._card_id !== 0) {
-      return client_cards[this._card_id]?.definition ?? 0;
+      return client_cards[this._card_id]?.packed_definition ?? 0;
     }
     return this._definition;
   }

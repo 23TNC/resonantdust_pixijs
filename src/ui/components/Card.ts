@@ -4,9 +4,11 @@ import { client_cards, type CardId } from "@/spacetime/Data";
 import { getDefinitionByPacked } from "@/data/definitions/CardDefinitions";
 
 export interface CardOptions extends LayoutObjectOptions {
-  card_id?: CardId;
-  titleHeight?: number;
-  radius?: number;
+  card_id?:       CardId;
+  titleHeight?:   number;
+  radius?:        number;
+  /** When true, the title bar is drawn at the bottom instead of the top. Default: false. */
+  titleOnBottom?: boolean;
 }
 
 const DEFAULT_BODY_COLOR  = 0x1a2a1a;
@@ -22,21 +24,23 @@ function parseColor(value: string | undefined): number | null {
 /**
  * A card-shaped LayoutObject driven by a card_id.
  *
- * Layout (top → bottom):
- *   ┌──────────────┐
- *   │  Title bar   │  titleHeight px, colored with style.color[1]
- *   ├──────────────┤
- *   │              │  body, colored with style.color[0]
- *   │   [sprite]   │  sprite centered + scaled to fit (optional)
- *   │              │
- *   └──────────────┘
+ * titleOnBottom = false (default):       titleOnBottom = true:
+ *   ┌──────────────┐                       ┌──────────────┐
+ *   │  Title bar   │  titleHeight px        │              │  body
+ *   ├──────────────┤                        │   [sprite]   │
+ *   │              │  body                  │              │
+ *   │   [sprite]   │                        ├──────────────┤
+ *   │              │                        │  Title bar   │  titleHeight px
+ *   └──────────────┘                        └──────────────┘
  *
- * Text uses style.color[2]. All colors fall back to defaults when absent.
+ * Colors: style.color[0] = body, [1] = title bar, [2] = text.
+ * All colors fall back to defaults when absent.
  */
 export class Card extends LayoutObject {
-  private _card_id: CardId;
-  private _titleHeight: number;
-  private _radius: number;
+  private _card_id:      CardId;
+  private _titleHeight:  number;
+  private _radius:       number;
+  private _titleOnBottom: boolean;
 
   private readonly _bg     = new Graphics();
   private readonly _sprite = new Sprite({ texture: Texture.EMPTY });
@@ -45,9 +49,10 @@ export class Card extends LayoutObject {
   constructor(options: CardOptions = {}) {
     super({ hitSelf: true, ...options });
 
-    this._card_id     = options.card_id     ?? 0;
-    this._titleHeight = options.titleHeight ?? 24;
-    this._radius      = options.radius      ?? 8;
+    this._card_id      = options.card_id      ?? 0;
+    this._titleHeight  = options.titleHeight  ?? 24;
+    this._radius       = options.radius       ?? 8;
+    this._titleOnBottom = options.titleOnBottom ?? false;
 
     this._sprite.anchor.set(0.5);
     this._sprite.visible = false;
@@ -96,6 +101,18 @@ export class Card extends LayoutObject {
     const bodyH  = height - titleH;
     const r      = this._radius;
 
+    // Stacked cards lock their title position so it faces the visible edge.
+    // Root (unstacked) cards follow the definition, falling back to the option.
+    const titleOnBottom = card?.stacked_down
+      ? true
+      : card?.stacked_up
+        ? false
+        : (definition?.title_on_bottom ?? this._titleOnBottom);
+
+    // titleY = top of the title strip; bodyY = top of the body area.
+    const titleY = titleOnBottom ? y + bodyH : y;
+    const bodyY  = titleOnBottom ? y : y + titleH;
+
     // ── Background ────────────────────────────────────────────────────────────
     this._bg.clear();
 
@@ -104,11 +121,12 @@ export class Card extends LayoutObject {
 
     // Title strip in title color
     if (titleH > 0) {
-      this._bg.roundRect(x, y, width, titleH, r).fill({ color: titleColor });
+      this._bg.roundRect(x, titleY, width, titleH, r).fill({ color: titleColor });
 
-      // Flush the bottom corners of the title strip
+      // Flush the inner corners of the title strip where it meets the body.
       if (bodyH > 0) {
-        this._bg.rect(x, y + titleH - r, width, r).fill({ color: titleColor });
+        const flushY = titleOnBottom ? titleY : titleY + titleH - r;
+        this._bg.rect(x, flushY, width, r).fill({ color: titleColor });
       }
     }
 
@@ -116,7 +134,7 @@ export class Card extends LayoutObject {
     this._label.text    = definition?.name ?? "";
     this._label.visible = titleH > 0;
     this._label.x       = x + width / 2;
-    this._label.y       = y + titleH / 2;
+    this._label.y       = titleY + titleH / 2;
     this._label.style   = {
       fill:       textColor,
       fontFamily: "Segoe UI",
@@ -138,7 +156,7 @@ export class Card extends LayoutObject {
 
       this._sprite.scale.set(scale);
       this._sprite.x = x + width / 2;
-      this._sprite.y = y + titleH + bodyH / 2;
+      this._sprite.y = bodyY + bodyH / 2;
     }
   }
 }

@@ -3,29 +3,31 @@
   "cards": [
     {
       "name": "Plains",
+      "title_on_bottom": false,
       "style": {
         "color": [ "#799E50", "#0b1426", "#0b1426" ]
-      }, 
+      },
       "vars": {
         "cost": 2
       },
       "flags": [
-        ["food",         false,  true, false ]
+        [ "food", false, true, false ]
       ]
     },
     {
       "name": "Forest",
+      "title_on_bottom": false,
       "style": {
         "color": [ "#395C39", "#7fb377", "#0b1426" ]
-      }, 
+      },
       "vars": {
         "cost": 3,
         "tree_regen": 20,
         "food_regen": 60
       },
       "flags": [
-        ["trees",         true,  true, false ],
-        ["food",         false,  true, false ]
+        [ "trees", true,  true, false ],
+        [ "food",  false, true, false ]
       ]
     }
   ]

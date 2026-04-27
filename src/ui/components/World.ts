@@ -28,7 +28,6 @@ const SQRT3 = Math.sqrt(3);
 const DEFAULT_TITLE_H = 24;
 const DEFAULT_CARD_H  = 120;
 const DEFAULT_STACK_W = 80;
-const MAX_CHAIN_DEPTH = 64;
 
 // Pack two 16-bit signed integers into a 32-bit key for Map lookup.
 // Valid for world_q/world_r in [-32768, 32767].
@@ -307,12 +306,10 @@ export class World extends LayoutViewport {
       if (!card) continue;
       const cx = card.world_q * hexW + ((card.world_r & 1) !== 0 ? hexW / 2 : 0);
       const cy = card.world_r * 1.5 * R;
-      const n  = this._chainLength(rootId);
-      const sh = this._cardHeight + (n - 1) * this._titleHeight;
       // Stacks further south (larger world_r) render in front of northern ones.
       // 0x10000 base keeps all stacks above zones (depth 0).
       this.setChildDepth(stack, 0x10000 + card.world_r);
-      stack.setLayout(cx - this._stackWidth / 2, cy - this._cardHeight / 2, this._stackWidth, sh);
+      stack.setLayout(cx - this._stackWidth / 2, cy - this._cardHeight / 2, this._stackWidth, this._cardHeight);
     }
 
     // Zone and stack positions changed; coverage index is stale.
@@ -390,22 +387,6 @@ export class World extends LayoutViewport {
       }
     }
     return roots;
-  }
-
-  private _chainLength(rootId: CardId): number {
-    let n = 0;
-    const seen = new Set<CardId>();
-    let current = rootId;
-    while (current !== 0 && n < MAX_CHAIN_DEPTH) {
-      if (seen.has(current)) break;
-      const card = client_cards[current];
-      if (card?.dragging || card?.returning) break;
-      seen.add(current);
-      n++;
-      if (!card || card.stacked_on_id === 0) break;
-      current = card.stacked_on_id;
-    }
-    return n;
   }
 
   /**
