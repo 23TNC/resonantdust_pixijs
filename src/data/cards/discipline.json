@@ -2,19 +2,19 @@
   "card_type": 1,
   "cards": [
     {
-      "name": "Might",
+      "name": "Attack",
       "style": {
         "color": [ "#E67E7E", "#ecd6aa", "#0b1426" ]
       }
     },
     {
-      "name": "Finesse",
+      "name": "Work",
       "style": {
         "color": [ "#97e3a7", "#ecd6aa", "#0b1426" ]
       }
     },
     {
-      "name": "Insight",
+      "name": "Study",
       "style": {
         "color": [ "#7D96E3", "#ecd6aa", "#0b1426" ]
       }

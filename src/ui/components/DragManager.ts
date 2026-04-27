@@ -24,7 +24,6 @@ import { CardStack } from "./CardStack";
 import { Inventory } from "./Inventory";
 import { Tile } from "./Tile";
 
-const MAX_CHAIN_DEPTH = 64;
 const DEFAULT_TITLE_H = 24;
 const DEFAULT_CARD_H  = 120;
 const DEFAULT_STACK_W = 80;
@@ -183,13 +182,11 @@ export class DragManager extends LayoutObject {
         dead.push(rootId);
         continue;
       }
-      const n  = this._chainLength(rootId);
-      const sh = this._cardHeight + (n - 1) * this._titleHeight;
       entry.stack.setLayout(
         entry.x - this._stackWidth / 2,
         entry.y - this._cardHeight / 2,
         this._stackWidth,
-        sh,
+        this._cardHeight,
       );
     }
 
@@ -426,18 +423,4 @@ export class DragManager extends LayoutObject {
     this.invalidateLayout();
   }
 
-  private _chainLength(rootId: CardId): number {
-    let n = 0;
-    const seen = new Set<CardId>();
-    let current = rootId;
-    while (current !== 0 && n < MAX_CHAIN_DEPTH) {
-      if (seen.has(current)) break;
-      seen.add(current);
-      n++;
-      const card = client_cards[current];
-      if (!card || card.stacked_on_id === 0) break;
-      current = card.stacked_on_id;
-    }
-    return n;
-  }
 }
