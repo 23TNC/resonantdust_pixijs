@@ -1,14 +1,15 @@
 import { Point } from "pixi.js";
 import {
   client_cards,
-  client_cards_by_zone,
-  parseCardFlags,
-  packZone,
-  packPosition,
-  updateClientCardLocation,
-  updateClientCardLinkId,
-  CARD_FLAG_STACKED,
+  macro_location_cards,
+  moveClientCard,
+  stackClientCardUp,
+  packMacroWorld,
+  packMacroPanel,
+  packMicroHex,
+  packMicroPixel,
   ZONE_SIZE,
+  SURFACE_WORLD,
   type CardId,
 } from "@/spacetime/Data";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
@@ -246,7 +247,7 @@ export class DragManager extends LayoutObject {
   private _onDragStart(data: InputPointerData): void {
     if (!(this._downTarget instanceof Card)) return;
 
-    const hitCard  = this._downTarget;
+    const hitCard = this._downTarget;
     if (!(hitCard.getParentLayout() instanceof CardStack)) return;
 
     const dragId     = hitCard.getCardId();
@@ -254,9 +255,7 @@ export class DragManager extends LayoutObject {
     if (!clientCard) return;
 
     if (clientCard.card_type < 1 || clientCard.card_type > 4) return;
-
-    const flags = parseCardFlags(clientCard.flags);
-    if (flags.position_locked || flags.position_hold) return;
+    if (clientCard.position_locked || clientCard.position_hold) return;
 
     // Center of the specific card that was grabbed, in screen space.
     const origin = hitCard.toGlobal(new Point(
@@ -311,24 +310,15 @@ export class DragManager extends LayoutObject {
       if (!card) continue;
 
       if (inventory) {
-        if (card.stacked) {
-          for (const key in client_cards) {
-            const parent = client_cards[Number(key) as CardId];
-            if (!parent || parent.link_id !== rootId) continue;
-            updateClientCardLinkId(parent.card_id, 0);
-            break;
-          }
-          card.flags  &= ~CARD_FLAG_STACKED;
-          card.stacked = false;
-          card.dirty   = true;
-        }
         const entryLocal = inventory.toLocal(new Point(entry.x, entry.y));
         const cx = inventory.innerRect.x + inventory.innerRect.width  / 2;
         const cy = inventory.innerRect.y + inventory.innerRect.height / 2;
-        updateClientCardLocation(
+        const px = Math.round(entryLocal.x - cx);
+        const py = Math.round(entryLocal.y - cy);
+        moveClientCard(
           rootId,
-          packZone(Math.round(entryLocal.x - cx), Math.round(entryLocal.y - cy), card.z),
-          packPosition(0, 0, false, false),
+          packMacroPanel(inventory.getViewedId(), card.layer || 1),
+          packMicroPixel(px, py),
         );
         card.dragging = false;
       } else if (dropTile) {
@@ -337,15 +327,16 @@ export class DragManager extends LayoutObject {
         const zone_r  = Math.floor(worldR / ZONE_SIZE);
         const local_q = worldQ - zone_q * ZONE_SIZE;
         const local_r = worldR - zone_r * ZONE_SIZE;
-        const zoneId  = packZone(zone_q, zone_r, card.z);
+        const layer   = card.surface === SURFACE_WORLD ? card.layer : 1;
+        const macro   = packMacroWorld(zone_q, zone_r, layer);
 
         let blocked = false;
-        const zoneCards = client_cards_by_zone[zoneId];
-        if (zoneCards) {
-          for (const cid of zoneCards) {
+        const zoneCardIds = macro_location_cards.get(macro);
+        if (zoneCardIds) {
+          for (const cid of zoneCardIds) {
             if (cid === rootId) continue;
             const c = client_cards[cid];
-            if (!c || !c.world_flag || c.dragging || c.returning || c.stacked || c.hidden) continue;
+            if (!c || c.dragging || c.returning || c.stacked_up || c.stacked_down || c.hidden) continue;
             if (c.local_q !== local_q || c.local_r !== local_r) continue;
             if (c.card_type === 6 || c.card_type === 7 || c.card_type === 8) continue;
             blocked = true;
@@ -358,60 +349,34 @@ export class DragManager extends LayoutObject {
           card.returning     = true;
           entry.returnTarget = { x: entry.returnOrigin.x, y: entry.returnOrigin.y };
         } else {
-          if (card.stacked) {
-            for (const key in client_cards) {
-              const parent = client_cards[Number(key) as CardId];
-              if (!parent || parent.link_id !== rootId) continue;
-              updateClientCardLinkId(parent.card_id, 0);
-              break;
-            }
-            card.flags  &= ~CARD_FLAG_STACKED;
-            card.stacked = false;
-            card.dirty   = true;
-          }
-          updateClientCardLocation(
-            rootId,
-            packZone(zone_q, zone_r, card.z),
-            packPosition(local_q, local_r, true, false),
-          );
+          moveClientCard(rootId, macro, packMicroHex(local_q, local_r));
           card.dragging = false;
         }
       } else if (dropCard) {
-        let destId = dropCard.getCardId();
-        let alreadyLinked = false;
-        {
-          const seen = new Set<CardId>();
-          let depth = 0;
-          while (depth < MAX_CHAIN_DEPTH) {
-            const destCard = client_cards[destId];
-            if (!destCard || destCard.link_id === 0) break;
-            if (destCard.link_id === rootId) { alreadyLinked = true; break; }
-            if (seen.has(destCard.link_id)) break;
-            seen.add(destId);
-            destId = destCard.link_id;
-            depth++;
-          }
-        }
-        if (alreadyLinked) {
+        const destId = dropCard.getCardId();
+        if (destId === 0 || destId === rootId) {
           card.dragging = false;
         } else {
-          if (card.stacked) {
-            for (const key in client_cards) {
-              const parent = client_cards[Number(key) as CardId];
-              if (!parent || parent.link_id !== rootId) continue;
-              updateClientCardLinkId(parent.card_id, 0);
-              break;
+          // Cycle check: walk destId's ancestor chain; reject if rootId appears.
+          let cycle = false;
+          {
+            const seen = new Set<CardId>();
+            let current = destId;
+            while (current !== 0) {
+              if (current === rootId) { cycle = true; break; }
+              if (seen.has(current)) break;
+              seen.add(current);
+              const c = client_cards[current];
+              if (!c || c.stacked_on_id === 0) break;
+              current = c.stacked_on_id;
             }
-            card.flags  &= ~CARD_FLAG_STACKED;
-            card.stacked = false;
-            card.dirty   = true;
           }
-          updateClientCardLinkId(destId, rootId);
-          card.flags   |= CARD_FLAG_STACKED;
-          card.stacked  = true;
-          card.dirty    = true;
-          updateClientCardLocation(rootId, packZone(0, 0, card.z), packPosition(0, 0, false, false));
-          card.dragging = false;
+          if (cycle) {
+            card.dragging = false;
+          } else {
+            stackClientCardUp(rootId, destId);
+            card.dragging = false;
+          }
         }
       } else {
         card.dragging      = false;
@@ -470,10 +435,8 @@ export class DragManager extends LayoutObject {
       seen.add(current);
       n++;
       const card = client_cards[current];
-      if (!card || !card.stackable || card.link_id === 0) break;
-      const next = client_cards[card.link_id];
-      if (!next?.stacked) break;
-      current = card.link_id;
+      if (!card || card.stacked_on_id === 0) break;
+      current = card.stacked_on_id;
     }
     return n;
   }

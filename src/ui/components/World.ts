@@ -1,13 +1,15 @@
 import { Point } from "pixi.js";
 import {
   client_cards,
-  client_cards_by_zone,
+  macro_location_cards,
   client_zones,
-  packZone,
-  unpackZone,
+  packMacroWorld,
+  zoneQFromMacro,
+  zoneRFromMacro,
   ZONE_SIZE,
+  SURFACE_WORLD,
   type CardId,
-  type ZoneId,
+  type MacroLocation,
 } from "@/spacetime/Data";
 import { LayoutObject } from "@/ui/layout/LayoutObject";
 import { LayoutViewport, type LayoutViewportOptions } from "@/ui/layout/LayoutViewport";
@@ -49,13 +51,13 @@ export interface WorldOptions extends LayoutViewportOptions {
  *
  * Zone management:
  *   Call syncZones() whenever client_zones changes. World maintains one Zone
- *   child per entry in client_zones whose z matches _z. Each Zone is placed at
- *   its world-space pixel rect; the camera transform in LayoutViewport maps
+ *   child per entry in client_zones whose layer matches _z. Each Zone is placed
+ *   at its world-space pixel rect; the camera transform in LayoutViewport maps
  *   world pixels to screen pixels.
  *
  * Card overlay:
  *   World maintains one CardStack child per qualifying client_card. A card
- *   qualifies when its zone is one of the managed zones, world_flag is true,
+ *   qualifies when its zone is one of the managed zones, surface === SURFACE_WORLD,
  *   and it is not dragging, returning, hidden, or stacked. The stack is
  *   centered on world hex (world_q, world_r) = (zone_q*8 + local_q, zone_r*8 + local_r).
  *   Reconciliation runs in updateLayoutChildren so any invalidateLayout() keeps
@@ -89,7 +91,7 @@ export class World extends LayoutViewport {
   private readonly _cardHeight:  number;
   private readonly _stackWidth:  number;
 
-  private readonly _zones  = new Map<ZoneId, Zone>();
+  private readonly _zones  = new Map<MacroLocation, Zone>();
   private readonly _stacks = new Map<CardId, CardStack>();
 
   // ─── Overlay index ───────────────────────────────────────────────────────
@@ -186,36 +188,34 @@ export class World extends LayoutViewport {
    * Call after any zone is added, removed, or if the z layer changes.
    */
   syncZones(): void {
-    const active = new Set<ZoneId>();
+    const active = new Set<MacroLocation>();
 
-    for (const key of Object.keys(client_zones)) {
-      const zone_id = Number(key) as ZoneId;
-      const data    = client_zones[zone_id];
-      if (!data || data.z !== this._z) continue;
+    for (const [macro, data] of client_zones) {
+      if (data.layer !== this._z) continue;
 
-      active.add(zone_id);
+      active.add(macro);
 
-      if (!this._zones.has(zone_id)) {
-        const zone = new Zone({ zone_id });
-        this._zones.set(zone_id, zone);
+      if (!this._zones.has(macro)) {
+        const zone = new Zone({ zone_id: macro });
+        this._zones.set(macro, zone);
         this.addLayoutChild(zone);
       }
     }
 
     // Remove zones absent from client_zones or on a different z layer.
-    for (const [zone_id, zone] of this._zones) {
-      if (!active.has(zone_id)) {
+    for (const [macro, zone] of this._zones) {
+      if (!active.has(macro)) {
         this.removeLayoutChild(zone);
-        this._zones.delete(zone_id);
+        this._zones.delete(macro);
       }
     }
 
     this.invalidateLayout();
   }
 
-  /** Return the Zone for a given zone_id, or undefined if not loaded. */
-  getZone(zone_id: ZoneId): Zone | undefined {
-    return this._zones.get(zone_id);
+  /** Return the Zone for a given macro_location, or undefined if not loaded. */
+  getZone(macro: MacroLocation): Zone | undefined {
+    return this._zones.get(macro);
   }
 
   // ─── Overlay children ────────────────────────────────────────────────────
@@ -274,8 +274,9 @@ export class World extends LayoutViewport {
     const hexW = SQRT3 * R;
 
     // ── Zones ────────────────────────────────────────────────────────────
-    for (const [zone_id, zone] of this._zones) {
-      const { zone_q, zone_r } = unpackZone(zone_id);
+    for (const [macro, zone] of this._zones) {
+      const zone_q = zoneQFromMacro(macro);
+      const zone_r = zoneRFromMacro(macro);
       const px = (zone_q * ZONE_SIZE - 0.5)       * hexW;
       const py = (zone_r * ZONE_SIZE * 1.5 - 1)   * R;
       zone.setLayout(px, py, 8.5 * hexW, 12.5 * R);
@@ -360,8 +361,8 @@ export class World extends LayoutViewport {
     // ── Zone → Tile ──────────────────────────────────────────────────────
     const zone_q  = Math.floor(world_q / ZONE_SIZE);
     const zone_r  = Math.floor(world_r / ZONE_SIZE);
-    const zone_id = packZone(zone_q, zone_r, this._z);
-    const zone    = this._zones.get(zone_id);
+    const macro = packMacroWorld(zone_q, zone_r, this._z);
+    const zone  = this._zones.get(macro);
     if (zone?.visible) {
       return zone.hitTestLayout(globalX, globalY, ignore) ?? (this._hitSelf ? this : null);
     }
@@ -373,18 +374,18 @@ export class World extends LayoutViewport {
 
   private _findRoots(): Set<CardId> {
     const roots = new Set<CardId>();
-    for (const zone_id of this._zones.keys()) {
-      const set = client_cards_by_zone[zone_id];
+    for (const macro of this._zones.keys()) {
+      const set = macro_location_cards.get(macro);
       if (!set) continue;
       for (const card_id of set) {
         const card = client_cards[card_id];
-        if (!card)             continue;
-        if (!card.world_flag)  continue;
-        if (card.dragging)     continue;
-        if (card.returning)    continue;
-        if (card.hidden)          continue;
-        if (card.stacked)         continue;
-        if (card.card_type === 6) continue;
+        if (!card)                                continue;
+        if (card.surface !== SURFACE_WORLD)       continue;
+        if (card.dragging)                        continue;
+        if (card.returning)                       continue;
+        if (card.hidden)                          continue;
+        if (card.stacked_up || card.stacked_down) continue;
+        if (card.card_type === 6)                 continue;
         roots.add(card_id);
       }
     }
@@ -401,10 +402,8 @@ export class World extends LayoutViewport {
       if (card?.dragging || card?.returning) break;
       seen.add(current);
       n++;
-      if (!card || !card.stackable || card.link_id === 0) break;
-      const next = client_cards[card.link_id];
-      if (!next?.stacked) break;
-      current = card.link_id;
+      if (!card || card.stacked_on_id === 0) break;
+      current = card.stacked_on_id;
     }
     return n;
   }

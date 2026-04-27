@@ -13,7 +13,7 @@ import {
 export default {
   zoneQ: __t.i16(),
   zoneR: __t.i16(),
-  zoneZ: __t.u16(),
+  layer: __t.u8(),
   definition: __t.u8(),
   tileDef: __t.u8(),
 };

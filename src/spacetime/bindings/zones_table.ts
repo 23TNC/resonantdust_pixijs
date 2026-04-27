@@ -11,7 +11,7 @@ import {
 } from "spacetimedb";
 
 export default __t.row({
-  zone: __t.u32().primaryKey(),
+  macroLocation: __t.u64().primaryKey().name("macro_location"),
   definition: __t.u8(),
   t0: __t.u64().name("t_0"),
   t1: __t.u64().name("t_1"),

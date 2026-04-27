@@ -11,6 +11,6 @@ import {
 } from "spacetimedb";
 
 export default {
-  zone: __t.u32(),
+  macroLocation: __t.u64(),
   definition: __t.u8(),
 };

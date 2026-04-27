@@ -1,9 +1,9 @@
 import {
   client_cards,
-  client_cards_by_zone,
+  macro_location_cards,
   client_zones,
   type CardId,
-  type ZoneId,
+  type MacroLocation,
   ZONE_SIZE,
 } from "@/spacetime/Data";
 import { LayoutHex } from "@/ui/layout/LayoutHex";
@@ -11,7 +11,7 @@ import { type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { Tile } from "./Tile";
 
 export interface ZoneOptions extends LayoutObjectOptions {
-  zone_id?: ZoneId;
+  zone_id?: MacroLocation;
 }
 
 /**
@@ -28,15 +28,15 @@ export interface ZoneOptions extends LayoutObjectOptions {
  * (players, animating cards) that may span zone boundaries are owned by World
  * and hit-tested there before falling through to Zone → Tile.
  *
- * zone_id is the packed i12/i12/u8 value from Data.packZone.
+ * zone_id is the MacroLocation (u64) for this zone's world surface entry.
  */
 export class Zone extends LayoutHex {
-  private _zone_id: ZoneId;
+  private _zone_id: MacroLocation;
   private readonly _tiles: Tile[][];  // [r][q]
 
   constructor(options: ZoneOptions = {}) {
     super(options);
-    this._zone_id = options.zone_id ?? 0;
+    this._zone_id = options.zone_id ?? 0n;
 
     this._tiles = [];
     for (let r = 0; r < ZONE_SIZE; r++) {
@@ -52,26 +52,26 @@ export class Zone extends LayoutHex {
 
   // ─── Zone ID ─────────────────────────────────────────────────────────────
 
-  setZoneId(zone_id: ZoneId): void {
+  setZoneId(zone_id: MacroLocation): void {
     if (this._zone_id === zone_id) return;
     this._zone_id = zone_id;
     this.invalidateRender();
   }
 
-  getZoneId(): ZoneId {
+  getZoneId(): MacroLocation {
     return this._zone_id;
   }
 
   // ─── Render ──────────────────────────────────────────────────────────────
 
   protected override redraw(): void {
-    const zone = client_zones[this._zone_id];
+    const zone = client_zones.get(this._zone_id);
 
     // Build (local_q, local_r) → card_id for cards whose card_type matches the
     // zone.  These take priority over the default tile definition.
     const cardAtPos = new Map<number, CardId>();
     if (zone) {
-      const ids = client_cards_by_zone[this._zone_id];
+      const ids = macro_location_cards.get(this._zone_id);
       if (ids) {
         for (const card_id of ids) {
           const card = client_cards[card_id];

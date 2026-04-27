@@ -16,7 +16,7 @@ export class ViewTitle extends LayoutLabel {
     const soul = client_cards[viewed_id];
     if (soul) {
       this.setText(
-        `obs:${observer_id}  view:${viewed_id}  q:${soul.world_q}  r:${soul.world_r}  z:${soul.z}`,
+        `obs:${observer_id}  view:${viewed_id}  q:${soul.world_q}  r:${soul.world_r}  z:${soul.layer}`,
       );
     } else {
       this.setText(`obs:${observer_id}  view:${viewed_id}  —`);

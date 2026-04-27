@@ -130,7 +130,7 @@ export class GameView extends LayoutRoot {
     const soul = client_cards[viewed_id];
 
     if (soul) {
-      this._world.setZ(soul.z);
+      this._world.setZ(soul.layer);
       this._world.syncZones();
       this._world.centerOnHex(soul.world_q, soul.world_r);
     } else {

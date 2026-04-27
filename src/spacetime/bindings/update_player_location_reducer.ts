@@ -11,6 +11,8 @@ import {
 } from "spacetimedb";
 
 export default {
-  cardId: __t.u32(),
-  flags: __t.u64(),
+  playerId: __t.u32(),
+  q: __t.i32(),
+  r: __t.i32(),
+  layer: __t.u8(),
 };

@@ -11,24 +11,26 @@ import {
 } from "spacetimedb";
 
 export const Action = __t.object("Action", {
+  actionId: __t.u32(),
   cardId: __t.u32(),
   recipe: __t.u16(),
   start: __t.u32(),
   end: __t.u32(),
   flags: __t.u8(),
-  zone: __t.u32(),
-  position: __t.u8(),
+  ownerId: __t.u32(),
+  macroLocation: __t.u64(),
+  microLocation: __t.u32(),
 });
 export type Action = __Infer<typeof Action>;
 
 export const Card = __t.object("Card", {
   cardId: __t.u32(),
-  definition: __t.u16(),
-  soulId: __t.u32(),
-  linkId: __t.u32(),
-  flags: __t.u64(),
-  zone: __t.u32(),
-  position: __t.u8(),
+  macroLocation: __t.u64(),
+  microLocation: __t.u32(),
+  ownerId: __t.u32(),
+  flags: __t.u16(),
+  packedDefinition: __t.u16(),
+  data: __t.u64(),
 });
 export type Card = __Infer<typeof Card>;
 
@@ -36,11 +38,13 @@ export const Player = __t.object("Player", {
   playerId: __t.u32(),
   name: __t.string(),
   soulId: __t.u32(),
+  macroLocation: __t.u64(),
+  microLocation: __t.u32(),
 });
 export type Player = __Infer<typeof Player>;
 
 export const Zone = __t.object("Zone", {
-  zone: __t.u32(),
+  macroLocation: __t.u64(),
   definition: __t.u8(),
   t0: __t.u64(),
   t1: __t.u64(),

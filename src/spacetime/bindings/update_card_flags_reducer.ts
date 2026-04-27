@@ -12,5 +12,5 @@ import {
 
 export default {
   cardId: __t.u32(),
-  soulId: __t.u32(),
+  flags: __t.u16(),
 };

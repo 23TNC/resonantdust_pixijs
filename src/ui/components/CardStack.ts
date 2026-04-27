@@ -13,13 +13,13 @@ export interface CardStackOptions extends LayoutObjectOptions {
 const MAX_STACK_DEPTH = 64;
 
 /**
- * Displays a chain of linked cards as a visual stack.
+ * Displays a chain of stacked cards as a visual stack.
  *
- * Starting from the root card_id, the component follows link_id while
- * linked_flag is true, building a chain of Card children.  Each child after
- * the root is shifted down by titleHeight pixels and rendered at a higher
- * depth, so earlier cards peek above later ones with only their title bars
- * visible.  The final card in the chain is fully visible on top.
+ * Starting from the root card_id, the component follows stacked_on_id,
+ * building a chain of Card children.  Each child after the root is shifted
+ * down by titleHeight pixels and rendered at a higher depth, so earlier cards
+ * peek above later ones with only their title bars visible.  The final card
+ * in the chain is fully visible on top.
  *
  * Visual (3 cards, arrows show link direction):
  *
@@ -95,8 +95,8 @@ export class CardStack extends LayoutObject {
   // ─── Private ─────────────────────────────────────────────────────────────
 
   /**
-   * Walk link_id/linked_flag from the root to build the ordered chain.
-   * Stops at the first card where linked_flag is false or link_id is zero.
+   * Walk stacked_on_id from the root to build the ordered chain.
+   * Stops when a card has no parent (stacked_on_id === 0).
    * A Set guards against link cycles; MAX_STACK_DEPTH provides a hard cap.
    */
   private _resolveChain(): CardId[] {
@@ -113,10 +113,8 @@ export class CardStack extends LayoutObject {
       seen.add(current);
       chain.push(current);
 
-      if (!card || !card.stackable || card.link_id === 0) break;
-      const next = client_cards[card.link_id];
-      if (!next?.stacked) break;
-      current = card.link_id;
+      if (!card || card.stacked_on_id === 0) break;
+      current = card.stacked_on_id;
     }
 
     return chain;

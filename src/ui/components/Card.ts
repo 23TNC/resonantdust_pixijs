@@ -84,7 +84,7 @@ export class Card extends LayoutObject {
 
   protected override redraw(): void {
     const card       = client_cards[this._card_id];
-    const definition = card ? getDefinitionByPacked(card.definition) : undefined;
+    const definition = card ? getDefinitionByPacked(card.packed_definition) : undefined;
     const colors     = definition?.style?.color ?? [];
 
     const bodyColor  = parseColor(colors[0]) ?? DEFAULT_BODY_COLOR;

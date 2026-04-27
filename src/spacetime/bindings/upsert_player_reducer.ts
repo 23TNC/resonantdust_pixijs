@@ -13,9 +13,10 @@ import {
 export default {
   name: __t.string(),
   cardType: __t.u8(),
-  definitionId: __t.u16(),
-  flags: __t.u64(),
+  category: __t.u8(),
+  definitionId: __t.u8(),
+  flags: __t.u16(),
   q: __t.i32(),
   r: __t.i32(),
-  z: __t.u16(),
+  layer: __t.u8(),
 };

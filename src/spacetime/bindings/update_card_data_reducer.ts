@@ -11,7 +11,6 @@ import {
 } from "spacetimedb";
 
 export default {
-  zoneQ: __t.i16(),
-  zoneR: __t.i16(),
-  layer: __t.u8(),
+  cardId: __t.u32(),
+  data: __t.u64(),
 };

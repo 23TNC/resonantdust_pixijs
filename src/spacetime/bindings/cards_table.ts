@@ -12,10 +12,10 @@ import {
 
 export default __t.row({
   cardId: __t.u32().primaryKey().name("card_id"),
-  definition: __t.u16(),
-  soulId: __t.u32().name("soul_id"),
-  linkId: __t.u32().name("link_id"),
-  flags: __t.u64(),
-  zone: __t.u32(),
-  position: __t.u8(),
+  macroLocation: __t.u64().name("macro_location"),
+  microLocation: __t.u32().name("micro_location"),
+  ownerId: __t.u32().name("owner_id"),
+  flags: __t.u16(),
+  packedDefinition: __t.u16().name("packed_definition"),
+  data: __t.u64(),
 });

@@ -14,4 +14,6 @@ export default __t.row({
   playerId: __t.u32().primaryKey().name("player_id"),
   name: __t.string(),
   soulId: __t.u32().name("soul_id"),
+  macroLocation: __t.u64().name("macro_location"),
+  microLocation: __t.u32().name("micro_location"),
 });

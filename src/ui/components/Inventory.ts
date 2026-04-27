@@ -1,8 +1,10 @@
 import {
   client_cards,
+  macro_location_cards,
+  moveClientCard,
+  packMacroPanel,
+  packMicroPixel,
   type CardId,
-  packZone,
-  updateClientCardLocation,
 } from "@/spacetime/Data";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { CardStack } from "./CardStack";
@@ -27,17 +29,14 @@ const DEFAULT_PUSH_RATE = 0.25;
 const DEFAULT_Z         = 1; // inventory surface
 
 /**
- * Displays and manages CardStack objects for cards owned by a given soul.
+ * Displays and manages CardStack objects for cards at a soul's panel.
  *
  * Only cards that pass all of these filters are shown:
- *   • soul_id === viewed_id
- *   • z === the configured z layer (1 = inventory surface, default)
+ *   • macro_location === packMacroPanel(viewed_id, z)
  *   • dragging === false
  *   • returning === false
- *   • world_flag === false
- *   • not the sentinel position (zone_q === -1 && zone_r === -1 && local_q === 0 && local_r === 0)
+ *   • not stacked (stacked_up === false && stacked_down === false)
  *   • card_type is in the provided card_types set
- *   • not a link target of another qualifying card (so each chain shows once)
  *
  * Reconciliation (add/remove stacks) happens in updateLayoutChildren so that
  * any invalidateLayout() — including those triggered by flag mutations like
@@ -107,13 +106,12 @@ export class Inventory extends LayoutObject {
         stack.setCardId(rootId);
         this._stacks.set(rootId, stack);
         this._floatPos.set(rootId, {
-          x: card?.zone_q ?? 0,
-          y: card?.zone_r ?? 0,
+          x: card?.pixel_x ?? 0,
+          y: card?.pixel_y ?? 0,
         });
         this.addLayoutChild(stack);
       }
     }
-
 
     if (this.innerRect.width > 0 && this.innerRect.height > 0) {
       this._clamp();
@@ -154,28 +152,22 @@ export class Inventory extends LayoutObject {
 
   // ─── Private ─────────────────────────────────────────────────────────────
 
-  /**
-   * Run the push simulation synchronously until no overlaps remain or the
-   * iteration cap is reached, then clamp and write back.  Used to settle
-   * initial positions before the first render pass.
-   */
   private _findRoots(): Set<CardId> {
-    const candidates = new Set<CardId>();
+    const roots = new Set<CardId>();
+    const ids   = macro_location_cards.get(packMacroPanel(this._viewedId, this._z));
+    if (!ids) return roots;
 
-    for (const key in client_cards) {
-      const card = client_cards[Number(key) as CardId];
-      if (!card) continue;
-      if (card.soul_id !== this._viewedId)    continue;
-      if (card.z       !== this._z)            continue;
-      if (card.dragging)                       continue;
-      if (card.returning)                      continue;
-      if (card.world_flag)                     continue;
-      if (card.stacked) continue;
+    for (const card_id of ids) {
+      const card = client_cards[card_id];
+      if (!card)                                continue;
+      if (card.dragging)                        continue;
+      if (card.returning)                       continue;
+      if (card.stacked_up || card.stacked_down) continue;
       if (!this._cardTypeSet.has(card.card_type)) continue;
-      candidates.add(card.card_id);
+      roots.add(card_id);
     }
 
-    return candidates;
+    return roots;
   }
 
   private _chainLength(rootId: CardId): number {
@@ -188,10 +180,8 @@ export class Inventory extends LayoutObject {
       if (card?.dragging || card?.returning) break;
       seen.add(current);
       n++;
-      if (!card || !card.stackable || card.link_id === 0) break;
-      const next = client_cards[card.link_id];
-      if (!next?.stacked) break;
-      current = card.link_id;
+      if (!card || card.stacked_on_id === 0) break;
+      current = card.stacked_on_id;
     }
     return n;
   }
@@ -255,18 +245,16 @@ export class Inventory extends LayoutObject {
     }
   }
 
-  /**
-   * Round float positions to integers and write zone_q / zone_r back into
-   * client_cards via updateClientCardLocation so other systems see the move.
-   */
+  /** Round float positions to integers and write pixel_x/pixel_y back into client_cards. */
   private _writeBack(): void {
+    const macro = packMacroPanel(this._viewedId, this._z);
     for (const [id, pos] of this._floatPos) {
       const card = client_cards[id];
       if (!card) continue;
-      const newQ = Math.round(pos.x);
-      const newR = Math.round(pos.y);
-      if (newQ === card.zone_q && newR === card.zone_r) continue;
-      updateClientCardLocation(id, packZone(newQ, newR, card.z), card.position);
+      const newX = Math.round(pos.x);
+      const newY = Math.round(pos.y);
+      if (newX === card.pixel_x && newY === card.pixel_y) continue;
+      moveClientCard(id, macro, packMicroPixel(newX, newY));
     }
   }
 }

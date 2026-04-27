@@ -11,11 +11,13 @@ import {
 } from "spacetimedb";
 
 export default __t.row({
-  cardId: __t.u32().primaryKey().name("card_id"),
+  actionId: __t.u32().primaryKey().name("action_id"),
+  cardId: __t.u32().name("card_id"),
   recipe: __t.u16(),
   start: __t.u32(),
   end: __t.u32(),
   flags: __t.u8(),
-  zone: __t.u32(),
-  position: __t.u8(),
+  ownerId: __t.u32().name("owner_id"),
+  macroLocation: __t.u64().name("macro_location"),
+  microLocation: __t.u32().name("micro_location"),
 });

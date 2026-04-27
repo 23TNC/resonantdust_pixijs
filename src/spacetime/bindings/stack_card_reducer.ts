@@ -12,5 +12,5 @@ import {
 
 export default {
   cardId: __t.u32(),
-  linkId: __t.u32(),
+  ontoId: __t.u32(),
 };

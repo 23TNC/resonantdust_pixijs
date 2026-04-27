@@ -13,7 +13,7 @@ import {
 export default {
   zoneQ: __t.i16(),
   zoneR: __t.i16(),
-  zoneZ: __t.u16(),
+  layer: __t.u8(),
   localR: __t.u8(),
   rowValue: __t.u64(),
 };

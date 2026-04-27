@@ -11,5 +11,5 @@ import {
 } from "spacetimedb";
 
 export default {
-  cardId: __t.u32(),
+  actionId: __t.u32(),
 };

@@ -1,119 +1,155 @@
 /**
  * Synthetic snapshot that stands in for a live SpacetimeDB subscription.
- * Populate server_* tables exactly as the real callbacks would, then derive
+ * Populates server_* tables exactly as real callbacks would, then derives
  * client_* tables via the same upsert path used in production.
  */
 import {
   type CardId,
   type PlayerId,
+  type ActionId,
   type ServerCard,
   type ServerPlayer,
+  type ServerAction,
   type ServerZone,
+  CARD_FLAG_STACKED_UP,
+  CARD_FLAG_STACKABLE,
+  packDefinition,
+  packZoneDefinition,
+  packMacroWorld,
+  packMacroPanel,
+  packMicroHex,
+  packMicroPixel,
+  packMicroStacked,
   server_cards,
   server_players,
+  server_actions,
   server_zones,
   client_cards,
+  client_players,
+  client_actions,
   client_zones,
-  client_cards_by_zone,
-  packDefinition,
-  packPosition,
-  packZone,
-  packZoneDefinition,
-  CARD_FLAG_STACKED,
-  CARD_FLAG_STACKABLE,
+  macro_location_cards,
+  macro_location_players,
+  macro_location_actions,
+  stacked_up_children,
+  stacked_down_children,
+  setPlayerId,
+  setPlayerName,
+  setSoulId,
   setObserverId,
   setViewedId,
   clearSelectedState,
   upsertClientCard,
+  upsertClientPlayer,
+  upsertClientAction,
   upsertClientZone,
 } from "./Data";
 
-// Readable aliases for flag arguments in packPosition.
-const WORLD    = true;
-const LOCAL    = false;
-const UNLINKED = false;
-
-function clearTable(table: Record<number, unknown>): void {
-  for (const key in table) delete table[Number(key)];
-}
-
-function clearZoneIndex(): void {
-  for (const key in client_cards_by_zone) delete client_cards_by_zone[Number(key)];
+function clearRecord(record: Record<PropertyKey, unknown>): void {
+  for (const key in record) delete record[key];
 }
 
 /** Reset all tables and load a known-good snapshot for offline development. */
 export function bootstrap(): void {
-  clearTable(server_cards);
-  clearTable(server_players);
-  clearTable(server_zones);
-  clearTable(client_cards);
-  clearTable(client_zones);
-  clearZoneIndex();
+  // ─── Clear all tables ──────────────────────────────────────────────────────
+  clearRecord(server_cards);
+  clearRecord(server_players);
+  clearRecord(server_actions);
+  server_zones.clear();
 
-  setViewedId(1);
-  setObserverId(1);
+  clearRecord(client_cards);
+  clearRecord(client_players);
+  clearRecord(client_actions);
+  client_zones.clear();
 
-  // ─── Zone IDs ──────────────────────────────────────────────────────────────
-  const world_zone = packZone(0, 0, 1);
+  macro_location_cards.clear();
+  macro_location_players.clear();
+  macro_location_actions.clear();
+  stacked_up_children.clear();
+  stacked_down_children.clear();
+
+  // ─── Session ───────────────────────────────────────────────────────────────
+  const soul_card_id = 1 as CardId;
+  setPlayerId(1 as PlayerId);
+  setPlayerName("player1");
+  setSoulId(soul_card_id);
+  setObserverId(soul_card_id);
+  setViewedId(soul_card_id);
+  clearSelectedState();
+
+  // ─── Locations ─────────────────────────────────────────────────────────────
+  const world_macro = packMacroWorld(0, 0, 1);          // zone (0,0), layer 1
+  const panel_macro = packMacroPanel(soul_card_id, 1);  // soul 1's inventory panel, layer 1
 
   // ─── Cards ─────────────────────────────────────────────────────────────────
   //
-  // Stack convention:
-  //   Stack parent — CARD_FLAG_STACKABLE, link_id = child card_id
-  //   Stack child  — CARD_FLAG_STACKED (+ CARD_FLAG_STACKABLE if it can also have children)
+  // Stacking convention:
+  //   Parent — CARD_FLAG_STACKABLE, world or panel position via micro
+  //   Child  — CARD_FLAG_STACKED_UP or CARD_FLAG_STACKED_DOWN (+ STACKABLE if it can also be a parent)
+  //            micro_location = packMicroStacked(parent_card_id)
   //
-  // Card_type 6 (world tile): no STACKABLE flag — CardStack never follows these links.
-  //
-  // Inventory LOCAL positioning:
-  //   zone_q / zone_r are pixel x / y (center-of-first-card, relative to inventory center).
-  //   Five stacks placed in a row at 90 px intervals (stack width = 80 px → 10 px gap).
-  //
-  //   card 2  card 3  card 4  card 5┐ card 9┐
-  //    x=-180  x=-90   x=0    x=90  │  x=180│
-  //                            card 6┘  card10┘
+  // Panel inventory layout (pixel x, y=0):
+  //   card 2   card 3   card 4   card 5┐   card 9┐
+  //   x=-180   x=-90    x=0      x=90  │   x=180 │
+  //                               card 6┘   card10┘
   const S  = CARD_FLAG_STACKABLE;
-  const ST = CARD_FLAG_STACKED | CARD_FLAG_STACKABLE;
+  const ST = CARD_FLAG_STACKED_UP | CARD_FLAG_STACKABLE;
+
   const cards: ServerCard[] = [
-    { card_id: 1,  definition: packDefinition(5, 1), soul_id: 0, link_id: 0,  flags: S,  zone: world_zone,           position: packPosition(0, 0, WORLD, UNLINKED) },
-    { card_id: 2,  definition: packDefinition(1, 1), soul_id: 1, link_id: 0,  flags: S,  zone: packZone(-180, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
-    { card_id: 3,  definition: packDefinition(1, 2), soul_id: 1, link_id: 0,  flags: S,  zone: packZone( -90, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
-    { card_id: 4,  definition: packDefinition(1, 3), soul_id: 1, link_id: 0,  flags: S,  zone: packZone(   0, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
-    { card_id: 5,  definition: packDefinition(2, 1), soul_id: 1, link_id: 6,  flags: S,  zone: packZone(  90, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
-    { card_id: 6,  definition: packDefinition(2, 2), soul_id: 1, link_id: 0,  flags: ST, zone: packZone(  90, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
-    { card_id: 7,  definition: packDefinition(1, 1), soul_id: 1, link_id: 0,  flags: S,  zone: world_zone,           position: packPosition(1, 0, WORLD, UNLINKED) },
-    { card_id: 8,  definition: packDefinition(6, 2), soul_id: 1, link_id: 0,  flags: 0,  zone: world_zone,           position: packPosition(2, 1, WORLD, UNLINKED) },
-    { card_id: 9,  definition: packDefinition(2, 4), soul_id: 1, link_id: 10, flags: S,  zone: packZone( 180, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
-    { card_id: 10, definition: packDefinition(2, 3), soul_id: 1, link_id: 0,  flags: ST, zone: packZone( 180, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
-    { card_id: 11, definition: packDefinition(9, 0), soul_id: 1, link_id: 0,  flags: 0,  zone: packZone(   0, 0, 1), position: packPosition(0, 0, LOCAL, UNLINKED) },
+    // Soul card (type 5, category 0, def 1) — world hex (0,0)
+    { card_id: 1,  macro_location: world_macro, micro_location: packMicroHex(0, 0),      owner_id: 1, flags: S,  packed_definition: packDefinition(5, 0, 1), data: 0n },
+
+    // Inventory: standalone cards
+    { card_id: 2,  macro_location: panel_macro, micro_location: packMicroPixel(-180, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(1, 0, 1), data: 0n },
+    { card_id: 3,  macro_location: panel_macro, micro_location: packMicroPixel( -90, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(1, 0, 2), data: 0n },
+    { card_id: 4,  macro_location: panel_macro, micro_location: packMicroPixel(   0, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(1, 0, 3), data: 0n },
+
+    // Inventory: stack (card 5 parent, card 6 child)
+    { card_id: 5,  macro_location: panel_macro, micro_location: packMicroPixel(  90, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(2, 0, 1), data: 0n },
+    { card_id: 6,  macro_location: panel_macro, micro_location: packMicroStacked(5),     owner_id: 1, flags: ST, packed_definition: packDefinition(2, 0, 2), data: 0n },
+
+    // World: item card and tile card
+    { card_id: 7,  macro_location: world_macro, micro_location: packMicroHex(1, 0),      owner_id: 1, flags: S,  packed_definition: packDefinition(1, 0, 1), data: 0n },
+    { card_id: 8,  macro_location: world_macro, micro_location: packMicroHex(2, 1),      owner_id: 1, flags: 0,  packed_definition: packDefinition(6, 0, 2), data: 0n },
+
+    // Inventory: stack (card 9 parent, card 10 child)
+    { card_id: 9,  macro_location: panel_macro, micro_location: packMicroPixel( 180, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(2, 0, 4), data: 0n },
+    { card_id: 10, macro_location: panel_macro, micro_location: packMicroStacked(9),     owner_id: 1, flags: ST, packed_definition: packDefinition(2, 0, 3), data: 0n },
+
+    // Inventory: soul reference card (type 9)
+    { card_id: 11, macro_location: panel_macro, micro_location: packMicroPixel(   0, 0), owner_id: 1, flags: 0,  packed_definition: packDefinition(9, 0, 0), data: 0n },
   ];
 
   // ─── Players ───────────────────────────────────────────────────────────────
   const players: ServerPlayer[] = [
-    { player_id: 1, name: "player1", soul_id: 1, reference_id: 11, zone: world_zone, position: packPosition(0, 0, WORLD, UNLINKED) },
+    { player_id: 1, name: "player1", soul_id: 1, macro_location: world_macro, micro_location: packMicroHex(0, 0) },
+  ];
+
+  // ─── Actions ───────────────────────────────────────────────────────────────
+  const actions: ServerAction[] = [
+    { action_id: 1, card_id: 7, recipe: 1, start: 0, end: 0, flags: 0, owner_id: 1, macro_location: world_macro, micro_location: packMicroHex(1, 0) },
   ];
 
   // ─── Zones ─────────────────────────────────────────────────────────────────
-  // t0–t7: each row is 8 bytes, one per tile column. 0x01 = tile definition id 1.
-  const uniformTileRow = 0x0101010101010101n;
-  const uniformTileData = {
-    t0: uniformTileRow, t1: uniformTileRow, t2: uniformTileRow, t3: uniformTileRow,
-    t4: uniformTileRow, t5: uniformTileRow, t6: uniformTileRow, t7: uniformTileRow,
-  };
+  const uniform_row   = 0x0101010101010101n;
+  const uniform_tiles = { t0: uniform_row, t1: uniform_row, t2: uniform_row, t3: uniform_row,
+                          t4: uniform_row, t5: uniform_row, t6: uniform_row, t7: uniform_row };
 
   const zones: ServerZone[] = [
-    { zone: packZone( 0,  0, 1), definition: packZoneDefinition(6, 0), ...uniformTileData },
-    { zone: packZone(-1,  0, 1), definition: packZoneDefinition(6, 0), ...uniformTileData },
-    { zone: packZone( 0, -1, 1), definition: packZoneDefinition(6, 0), ...uniformTileData },
+    { macro_location: packMacroWorld( 0,  0, 1), definition: packZoneDefinition(6, 0), ...uniform_tiles },
+    { macro_location: packMacroWorld(-1,  0, 1), definition: packZoneDefinition(6, 0), ...uniform_tiles },
+    { macro_location: packMacroWorld( 0, -1, 1), definition: packZoneDefinition(6, 0), ...uniform_tiles },
   ];
 
   // ─── Populate server tables ────────────────────────────────────────────────
-  for (const card   of cards)   server_cards[card.card_id     as CardId]     = card;
+  for (const card   of cards)   server_cards[card.card_id as CardId]       = card;
   for (const player of players) server_players[player.player_id as PlayerId] = player;
-  for (const zone   of zones)   server_zones[zone.zone]                      = zone;
+  for (const action of actions) server_actions[action.action_id as ActionId] = action;
+  for (const zone   of zones)   server_zones.set(zone.macro_location, zone);
 
   // ─── Derive client tables ──────────────────────────────────────────────────
-  for (const zone of zones) upsertClientZone(zone);
-  for (const card of cards) upsertClientCard(card);
-
-  clearSelectedState();
+  for (const zone   of zones)   upsertClientZone(zone);
+  for (const card   of cards)   upsertClientCard(card);
+  for (const player of players) upsertClientPlayer(player);
+  for (const action of actions) upsertClientAction(action);
 }
