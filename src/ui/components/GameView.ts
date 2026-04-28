@@ -9,13 +9,14 @@ import { World } from "./World";
 import { ViewTitle } from "./ViewTitle";
 import { FrameRate } from "./FrameRate";
 import { Inventory } from "./Inventory";
+import { DragManager } from "./DragManager";
 
 /**
  * Top-level game view for a single soul card.
  *
- * viewed_id (from Data) identifies the soul card being observed. On each
- * sync() call, World is centred on that soul's world position and the zone
- * set is reconciled with client_zones.
+ * viewed_id (from Data) identifies the soul card being observed.  At
+ * construction the World is initialised at the soul's z layer and its zones
+ * are synced with client_zones.
  *
  * Layout (weights, not fixed sizes — scales with window):
  *
@@ -32,9 +33,12 @@ import { Inventory } from "./Inventory";
  *                   (center column)
  *
  * Call tick() each frame (add to the PixiJS ticker).
- * Call sync() after any subscription update or when viewed_id changes.
- * sync() should be called after the first tick() so that World's innerRect is
- * valid and centerOnHex produces a correctly centred camera.
+ *
+ * Children update reactively from client_cards / client_zones — there is no
+ * external sync() entry point.  ViewTitle refreshes on a ticker; Inventory
+ * and World re-resolve their displayed sets every layout pass.  The only
+ * one-shot action is centerCameraOnViewedSoul(), which the host scene calls
+ * after the first tick() so World.innerRect is valid.
  */
 export class GameView extends LayoutRoot {
   private readonly _layers:      LayoutLayers;
@@ -42,6 +46,7 @@ export class GameView extends LayoutRoot {
   private readonly _world:       World;
   private readonly _viewTitle:   ViewTitle;
   private readonly _inventory:   Inventory;
+  private readonly _dragManager: DragManager;
 
   constructor() {
     super();
@@ -53,7 +58,14 @@ export class GameView extends LayoutRoot {
     const CARD_W  = 70;
     const CARD_H  = Math.round(CARD_W * 4 / 3);
 
-    this._world = new World({ tileRadius: TILE_R, stackWidth: CARD_W, cardHeight: CARD_H });
+    const soul = client_cards[viewed_id];
+    this._world = new World({
+      z:          soul?.layer ?? 1,
+      tileRadius: TILE_R,
+      stackWidth: CARD_W,
+      cardHeight: CARD_H,
+    });
+    this._world.syncZones();
 
     const PAD = 4;
 
@@ -104,6 +116,12 @@ export class GameView extends LayoutRoot {
 
     this._world.setInput(this._input);
 
+    this._dragManager = new DragManager({
+      input:      this._input,
+      stackWidth: CARD_W,
+      cardHeight: CARD_H,
+    });
+    this._layers.add(this._dragManager, "overlay");
   }
 
   override destroy(options?: Parameters<LayoutRoot["destroy"]>[0]): void {
@@ -111,25 +129,17 @@ export class GameView extends LayoutRoot {
     super.destroy(options);
   }
 
-  // ─── Sync ────────────────────────────────────────────────────────────────
+  // ─── Camera ──────────────────────────────────────────────────────────────
 
   /**
-   * Reconcile the World with the current viewed_id and client data.
-   * Resolves the soul's z layer and world position, syncs zones, and recentres
-   * the camera.  Best called after the first tick() so innerRect is valid.
+   * Pan the world view so the currently-viewed soul is centred. One-shot
+   * action — call after the first tick() so World.innerRect is valid, and
+   * again whenever you want to recentre (e.g. on viewed_id change).
    */
-  sync(): void {
+  centerCameraOnViewedSoul(): void {
     const soul = client_cards[viewed_id];
-
-    if (soul) {
-      this._world.setZ(soul.layer);
-      this._world.syncZones();
-      this._world.centerOnHex(soul.world_q, soul.world_r);
-    } else {
-      this._world.syncZones();
-    }
-    this._viewTitle.sync();
-    this._inventory.invalidateLayout();
+    if (!soul) return;
+    this._world.centerOnHex(soul.world_q, soul.world_r);
   }
 
   getWorld(): World { return this._world; }
