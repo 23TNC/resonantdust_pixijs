@@ -9,11 +9,17 @@ export interface CardOptions extends LayoutObjectOptions {
   radius?:        number;
   /** When true, the title bar is drawn at the bottom instead of the top. Default: false. */
   titleOnBottom?: boolean;
+  /** Outline thickness in pixels. Default: 1.  Set to 0 to disable. */
+  outlineWidth?:  number;
+  /** Outline color. Default: DEFAULT_OUTLINE_COLOR. */
+  outlineColor?:  number;
 }
 
-const DEFAULT_BODY_COLOR  = 0x1a2a1a;
-const DEFAULT_TITLE_COLOR = 0x111a11;
-const DEFAULT_TEXT_COLOR  = 0xf4f8ff;
+const DEFAULT_BODY_COLOR    = 0x1a2a1a;
+const DEFAULT_TITLE_COLOR   = 0x111a11;
+const DEFAULT_TEXT_COLOR    = 0xf4f8ff;
+const DEFAULT_OUTLINE_COLOR = 0x0b160b;
+const DEFAULT_OUTLINE_WIDTH = 1.2;
 
 function parseColor(value: string | undefined): number | null {
   if (!value) return null;
@@ -41,6 +47,8 @@ export class Card extends LayoutObject {
   private _titleHeight:   number;
   private _radius:        number;
   private _titleOnBottom: boolean;
+  private _outlineWidth:  number;
+  private _outlineColor:  number;
 
   private readonly _bg     = new Graphics();
   private readonly _sprite = new Sprite({ texture: Texture.EMPTY });
@@ -53,6 +61,8 @@ export class Card extends LayoutObject {
     this._titleHeight   = options.titleHeight   ?? 24;
     this._radius        = options.radius        ?? 8;
     this._titleOnBottom = options.titleOnBottom ?? false;
+    this._outlineWidth  = options.outlineWidth  ?? DEFAULT_OUTLINE_WIDTH;
+    this._outlineColor  = options.outlineColor  ?? DEFAULT_OUTLINE_COLOR;
 
     this._sprite.anchor.set(0.5);
     this._sprite.visible = false;
@@ -128,6 +138,13 @@ export class Card extends LayoutObject {
         const flushY = titleOnBottom ? titleY : titleY + titleH - r;
         this._bg.rect(x, flushY, width, r).fill({ color: titleColor });
       }
+    }
+
+    // Outline — drawn last so it sits on top of any earlier fills along the edge.
+    if (this._outlineWidth > 0) {
+      this._bg
+        .roundRect(x, y, width, height, r)
+        .stroke({ color: this._outlineColor, width: this._outlineWidth });
     }
 
     // ── Title text ────────────────────────────────────────────────────────────

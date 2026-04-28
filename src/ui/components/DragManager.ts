@@ -344,31 +344,46 @@ export class DragManager extends LayoutObject {
     const sourceRoot = this._findRoot(rootId);
     if (sourceRoot === destRoot)                   { this._dropInvalid(rootId, entry); return; }
 
+    // Reject if the source has both an up-branch and a down-branch — merging
+    // such a stack into another would force one branch onto the wrong side.
+    const sourceHasUp   = (stacked_up_children.get(rootId)?.size   ?? 0) > 0;
+    const sourceHasDown = (stacked_down_children.get(rootId)?.size ?? 0) > 0;
+    if (sourceHasUp && sourceHasDown)              { this._dropInvalid(rootId, entry); return; }
+
     // Direction rule:
-    //   • Dragged card displays title-on-bottom → bottom leaf, always.
-    //   • Dragged card displays title-on-top    → top leaf, except:
-    //     when the destination has BOTH branches and its root displays
-    //     title-on-top, the cursor's vertical position relative to the
-    //     destination root's centre picks the side (below → bottom).
+    //   • Source is bottom-title → bottom, always.
+    //   • Source is top-title → the dest has a "natural" branch (top for a
+    //     top-title dest, bottom for a bottom-title dest).  If the opposite
+    //     branch exists on the dest, the cursor's vertical position decides
+    //     (above dest centre → top, below → bottom).  Otherwise the dest's
+    //     natural branch is used regardless of cursor.
+    //
+    // When a top-title source ends up on a bottom branch, _flipDescendants
+    // marks the entire source chain stacked_down so every card renders with
+    // its title on the bottom edge to match its new direction.
     let useDown: boolean;
     if (this._effectiveTitleOnBottom(rootId)) {
       useDown = true;
     } else {
-      useDown = false;
-      if (!this._effectiveTitleOnBottom(destRoot)) {
-        const hasUp   = (stacked_up_children.get(destRoot)?.size   ?? 0) > 0;
-        const hasDown = (stacked_down_children.get(destRoot)?.size ?? 0) > 0;
-        if (hasUp && hasDown) {
-          const destStack = dropCard.getParentLayout();
-          if (destStack instanceof CardStack) {
-            const destRootCard = destStack.getRootCard();
-            if (destRootCard) {
-              const centre = destRootCard.toGlobal(new Point(
-                destRootCard.outerRect.width  / 2,
-                destRootCard.outerRect.height / 2,
-              ));
-              if (this._cursorY > centre.y) useDown = true;
-            }
+      const hasUp           = (stacked_up_children.get(destRoot)?.size   ?? 0) > 0;
+      const hasDown         = (stacked_down_children.get(destRoot)?.size ?? 0) > 0;
+      const destBottomTitle = this._effectiveTitleOnBottom(destRoot);
+      // "Opposite-natural" branch: the one that contradicts the dest's title.
+      const hasOpposite     = destBottomTitle ? hasUp : hasDown;
+
+      if (!hasOpposite) {
+        useDown = destBottomTitle;
+      } else {
+        useDown = false;
+        const destStack = dropCard.getParentLayout();
+        if (destStack instanceof CardStack) {
+          const destRootCard = destStack.getRootCard();
+          if (destRootCard) {
+            const centre = destRootCard.toGlobal(new Point(
+              destRootCard.outerRect.width  / 2,
+              destRootCard.outerRect.height / 2,
+            ));
+            if (this._cursorY > centre.y) useDown = true;
           }
         }
       }
