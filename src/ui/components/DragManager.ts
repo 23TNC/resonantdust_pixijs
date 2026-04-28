@@ -317,16 +317,57 @@ export class DragManager extends LayoutObject {
     const cy = inventory.innerRect.y + inventory.innerRect.height / 2;
     const px = Math.round(local.x - cx);
     const py = Math.round(local.y - cy);
+    const macro = packMacroPanel(inventory.getViewedId(), card.layer || 1);
+    const micro = packMicroPixel(px, py);
 
-    moveClientCard(
-      rootId,
-      packMacroPanel(inventory.getViewedId(), card.layer || 1),
-      packMicroPixel(px, py),
-    );
+    // Pick the new root.  If the source is naturally bottom-title, its
+    // stacked_down chain is the natural arrangement and the source itself
+    // stays the root.  Otherwise walk through consecutive top-by-definition
+    // descendants — the last one becomes the new root, and the cards
+    // between (in chain order) get flipped onto its top stack from the end
+    // working back toward the original root.  This preserves their visual
+    // order while restoring their natural top-title display.
+    const rootDef = getDefinitionByPacked(card.packed_definition);
+    const chain   = rootDef?.title_on_bottom ? [rootId] : this._naturalTopChain(rootId);
+    const newRoot = chain[chain.length - 1];
+
+    moveClientCard(newRoot, macro, micro);
+    for (let i = chain.length - 2; i >= 0; i--) {
+      stackClientCardUp(chain[i], chain[i + 1]);
+    }
+
     card.dragging = false;
     this._removeEntry(rootId, entry);
     this._invalidateSource(entry.source);
     if (!inventory.destroyed) inventory.invalidateLayout();
+  }
+
+  /**
+   * Walk rootId's stacked_down chain through consecutive cards whose
+   * definition is top-title.  Returns the chain [rootId, child, …, last_top]
+   * — stops just before any bottom-title-by-definition card or the end of
+   * the chain.  Used by _dropOnInventory to choose the new visual root.
+   */
+  private _naturalTopChain(rootId: CardId): CardId[] {
+    const chain: CardId[] = [rootId];
+    const seen  = new Set<CardId>([rootId]);
+    let current = rootId;
+
+    while (true) {
+      const children = stacked_down_children.get(current);
+      if (!children || children.size === 0) break;
+      const next = children.values().next().value!;
+      if (seen.has(next)) break;
+      const nextCard = client_cards[next];
+      if (!nextCard) break;
+      const def = getDefinitionByPacked(nextCard.packed_definition);
+      if (def?.title_on_bottom) break;
+      seen.add(next);
+      chain.push(next);
+      current = next;
+    }
+
+    return chain;
   }
 
   private _dropOnCard(rootId: CardId, dropCard: Card, entry: Entry): void {
@@ -344,25 +385,34 @@ export class DragManager extends LayoutObject {
     const sourceRoot = this._findRoot(rootId);
     if (sourceRoot === destRoot)                   { this._dropInvalid(rootId, entry); return; }
 
-    // Reject if the source has both an up-branch and a down-branch — merging
-    // such a stack into another would force one branch onto the wrong side.
+    // Reject only the genuine "both branches" structural case.  A top-title-
+    // by-definition source with a stacked_down chain (a leftover flip from a
+    // previous drop) is allowed; the direction rule below treats it by its
+    // natural top-title state regardless of how it currently displays.
     const sourceHasUp   = (stacked_up_children.get(rootId)?.size   ?? 0) > 0;
     const sourceHasDown = (stacked_down_children.get(rootId)?.size ?? 0) > 0;
-    if (sourceHasUp && sourceHasDown)              { this._dropInvalid(rootId, entry); return; }
+    if (sourceHasUp && sourceHasDown) {
+      this._dropInvalid(rootId, entry);
+      return;
+    }
 
-    // Direction rule:
-    //   • Source is bottom-title → bottom, always.
-    //   • Source is top-title → the dest has a "natural" branch (top for a
-    //     top-title dest, bottom for a bottom-title dest).  If the opposite
-    //     branch exists on the dest, the cursor's vertical position decides
-    //     (above dest centre → top, below → bottom).  Otherwise the dest's
-    //     natural branch is used regardless of cursor.
+    // Direction rule (uses the source's NATURAL title — its definition —
+    // not the current effective state.  A top-title card flipped into a
+    // bottom stack is still treated as a top-title source on its next drop):
+    //   • Source naturally bottom-title → bottom, always.
+    //   • Source naturally top-title    → the dest has a "natural" branch
+    //     (top for a top-title dest, bottom for a bottom-title dest).  If
+    //     the opposite branch exists on the dest, the cursor's vertical
+    //     position decides (above dest centre → top, below → bottom).
+    //     Otherwise the dest's natural branch is used regardless of cursor.
     //
     // When a top-title source ends up on a bottom branch, _flipDescendants
     // marks the entire source chain stacked_down so every card renders with
     // its title on the bottom edge to match its new direction.
+    const sourceBottomByDef =
+      getDefinitionByPacked(card.packed_definition)?.title_on_bottom ?? false;
     let useDown: boolean;
-    if (this._effectiveTitleOnBottom(rootId)) {
+    if (sourceBottomByDef) {
       useDown = true;
     } else {
       const hasUp           = (stacked_up_children.get(destRoot)?.size   ?? 0) > 0;
