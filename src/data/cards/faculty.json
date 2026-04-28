@@ -38,6 +38,15 @@
       },
       "flags": [
       ]
+    },
+    {
+      "name": "Vigor",
+      "title_on_bottom": false,
+      "abilities": [ "fleeting" ],
+      "style": {
+        "color": [ "#E67E7E", "#ecd6aa", "#0b1426", "#4caf6f", "#8B2020" ],
+        "progress_direction": "ltr"
+      }
     }
   ]
 }

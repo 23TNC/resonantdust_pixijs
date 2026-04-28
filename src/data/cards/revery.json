@@ -2,7 +2,7 @@
   "card_type": 4,
   "cards": [
     {
-      "name": "Soul Reference",
+      "name": "Soul",
       "title_on_bottom": false,
       "abilities": [ "card_target" ],
       "style": {

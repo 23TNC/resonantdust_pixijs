@@ -1,7 +1,12 @@
 import { Graphics, Sprite, Text, Texture } from "pixi.js";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { client_cards, type CardId } from "@/spacetime/Data";
-import { getDefinitionByPacked, getEffectiveTitleOnBottom } from "@/data/definitions/CardDefinitions";
+import { spacetime } from "@/spacetime/SpacetimeManager";
+import {
+  getDefinitionByPacked,
+  getEffectiveTitleOnBottom,
+  type CardStyle,
+} from "@/data/definitions/CardDefinitions";
 
 export interface CardOptions extends LayoutObjectOptions {
   card_id?:       CardId;
@@ -39,9 +44,18 @@ function parseColor(value: string | undefined): number | null {
  *   │              │                        │  Title bar   │  titleHeight px
  *   └──────────────┘                        └──────────────┘
  *
- * Colors: style.color[0] = body, [1] = title bar, [2] = text.
+ * Colors (style.color[]):
+ *   [0] body     [1] title bar     [2] text
+ *   [3] progress left color        [4] progress right color
+ *
+ * Progress bar: call setProgress(0–1) to split the title bar into two colored
+ * halves.  The split point moves left→right as progress increases (ltr, the
+ * default) or right→left (rtl).  colors[3] is always the left half; colors[4]
+ * is always the right half — swap them with progress_swap in the style.
  * All colors fall back to defaults when absent.
  */
+const DEATH_FADE_MS = 600;
+
 export class Card extends LayoutObject {
   private _card_id:       CardId;
   private _titleHeight:   number;
@@ -49,6 +63,9 @@ export class Card extends LayoutObject {
   private _titleOnBottom: boolean;
   private _outlineWidth:  number;
   private _outlineColor:  number;
+  private _progress:      number | null = null;
+  private _deathStartTime: number | null = null;
+  private _unlisten:       (() => void) | null = null;
 
   private readonly _bg     = new Graphics();
   private readonly _sprite = new Sprite({ texture: Texture.EMPTY });
@@ -73,17 +90,35 @@ export class Card extends LayoutObject {
     this.addDisplay(this._sprite);
     this.addDisplay(this._label);
 
+    if (this._card_id) this._registerListener();
     this.invalidateRender();
+  }
+
+  override destroy(options?: Parameters<InstanceType<typeof LayoutObject>["destroy"]>[0]): void {
+    this._unlisten?.();
+    this._unlisten = null;
+    super.destroy(options);
   }
 
   setCardId(card_id: CardId): void {
     if (this._card_id === card_id) return;
-    this._card_id = card_id;
+    this._unlisten?.();
+    this._unlisten      = null;
+    this._card_id       = card_id;
+    this._deathStartTime = null;
+    if (card_id) this._registerListener();
     this.invalidateRender();
   }
 
   getCardId(): CardId {
     return this._card_id;
+  }
+
+  private _registerListener(): void {
+    this._unlisten = spacetime.registerCardListener(
+      this._card_id,
+      () => this.invalidateRender(),
+    );
   }
 
   setTexture(texture: Texture | null): void {
@@ -97,9 +132,48 @@ export class Card extends LayoutObject {
     this.invalidateRender();
   }
 
+  /**
+   * Set the progress bar fill amount (0 = empty, 1 = full), or null to hide it.
+   * The visual interpretation of 0/1 depends on progress_direction in the card style.
+   */
+  setProgress(value: number | null): void {
+    if (this._progress === value) return;
+    this._progress = value;
+    this.invalidateRender();
+  }
+
+  getProgress(): number | null {
+    return this._progress;
+  }
+
   protected override redraw(): void {
-    const card       = client_cards[this._card_id];
-    const definition = card ? getDefinitionByPacked(card.packed_definition) : undefined;
+    const card = client_cards[this._card_id];
+
+    if (!card || card.dead === 2) {
+      this.visible = false;
+      this._bg.clear();
+      this._label.visible  = false;
+      this._sprite.visible = false;
+      return;
+    }
+
+    if (card.dead === 1) {
+      if (this._deathStartTime === null) this._deathStartTime = Date.now();
+      const t = Math.min(1, (Date.now() - this._deathStartTime) / DEATH_FADE_MS);
+      this.alpha = 1 - t;
+      if (t < 1) {
+        this.invalidateRender();
+      } else {
+        card.dead = 2;
+        spacetime.notifyCardListeners(this._card_id);
+      }
+      return;
+    }
+
+    this.visible = true;
+    this.alpha   = 1;
+
+    const definition = getDefinitionByPacked(card.packed_definition);
     const colors     = definition?.style?.color ?? [];
 
     const bodyColor  = parseColor(colors[0]) ?? DEFAULT_BODY_COLOR;
@@ -122,29 +196,34 @@ export class Card extends LayoutObject {
     const titleY = titleOnBottom ? y + bodyH : y;
     const bodyY  = titleOnBottom ? y : y + titleH;
 
+    // ── Effective progress ────────────────────────────────────────────────────
+    // Fleeting cards compute progress from their two u32 timestamps in data.
+    // Other cards use the externally-set _progress value (null = no bar).
+    let effectiveProgress = this._progress;
+    if (definition?.abilities?.includes("fleeting")) {
+      const start_s  = Number(card.data & 0xFFFF_FFFFn);
+      const end_s    = Number((card.data >> 32n) & 0xFFFF_FFFFn);
+      const duration = end_s - start_s;
+      const now_s    = Date.now() / 1000;
+      effectiveProgress = duration > 0
+        ? Math.max(0, Math.min(1, (end_s - now_s) / duration))
+        : 0;
+      // Re-render every frame to animate the bar; on expiry, delete the card row
+      // (the following redraw will find card missing and hide this widget).
+      this.invalidateRender();
+      if (now_s >= end_s) spacetime.deleteCard(this._card_id);
+    }
+
     // ── Background ────────────────────────────────────────────────────────────
     this._bg.clear();
 
-    // Full card in body color (establishes rounded corners for entire card)
-    this._bg.roundRect(x, y, width, height, r).fill({ color: bodyColor });
-
-    // Title strip in title color
-    if (titleH > 0) {
-      this._bg.roundRect(x, titleY, width, titleH, r).fill({ color: titleColor });
-
-      // Flush the inner corners of the title strip where it meets the body.
-      if (bodyH > 0) {
-        const flushY = titleOnBottom ? titleY : titleY + titleH - r;
-        this._bg.rect(x, flushY, width, r).fill({ color: titleColor });
-      }
-    }
-
-    // Outline — drawn last so it sits on top of any earlier fills along the edge.
-    if (this._outlineWidth > 0) {
-      this._bg
-        .roundRect(x, y, width, height, r)
-        .stroke({ color: this._outlineColor, width: this._outlineWidth });
-    }
+    this._drawCard(
+      x, y, width, height, titleH, r,
+      [bodyColor, titleColor],
+      effectiveProgress,
+      titleOnBottom,
+      definition?.style,
+    );
 
     // ── Title text ────────────────────────────────────────────────────────────
     this._label.text    = definition?.name ?? "";
@@ -175,4 +254,273 @@ export class Card extends LayoutObject {
       this._sprite.y = bodyY + bodyH / 2;
     }
   }
+
+  // ─── Card drawing ──────────────────────────────────────────────────────────
+
+  private _drawCard(
+    x:             number,
+    y:             number,
+    width:         number,
+    height:        number,
+    titleHeight:   number,
+    radius:        number,
+    colors:        number[],
+    progress:      number | null,
+    titleOnBottom: boolean,
+    style:         CardStyle | undefined,
+  ): void {
+    const bodyColor  = colors[0] ?? DEFAULT_BODY_COLOR;
+    const titleColor = colors[1] ?? DEFAULT_TITLE_COLOR;
+    const r          = Math.min(radius, width / 2, height / 2, titleHeight);
+
+    this._bg.roundRect(x, y, width, height, r).fill({ color: bodyColor });
+
+    if (titleHeight > 0) {
+      this._drawTitleBar(
+        x,
+        titleOnBottom ? y + height - titleHeight : y,
+        width,
+        titleHeight,
+        r,
+        titleColor,
+        progress,
+        titleOnBottom,
+        style,
+      );
+    }
+
+    if (this._outlineWidth > 0) {
+      this._bg
+        .roundRect(x, y, width, height, r)
+        .stroke({ color: this._outlineColor, width: this._outlineWidth });
+    }
+  }
+
+  private _drawTitleBar(
+    x:             number,
+    y:             number,
+    width:         number,
+    height:        number,
+    radius:        number,
+    titleColor:    number,
+    progress:      number | null,
+    titleOnBottom: boolean,
+    style:         CardStyle | undefined,
+  ): void {
+    if (progress === null) {
+      this._drawTitleSlice(x, y, width, height, radius, 0, width, titleColor, titleOnBottom);
+      return;
+    }
+
+    const colors    = style?.color ?? [];
+    const direction = style?.progress_direction ?? "ltr";
+    const swap      = style?.progress_swap      ?? false;
+
+    const colorA     = parseColor(colors[3]) ?? titleColor;
+    const colorB     = parseColor(colors[4]) ?? titleColor;
+    const leftColor  = swap ? colorB : colorA;
+    const rightColor = swap ? colorA : colorB;
+
+    const clamped   = Math.max(0, Math.min(1, progress));
+    const splitFrac = direction === "ltr" ? clamped : 1 - clamped;
+    const splitX    = width * splitFrac;
+
+    this._drawTitleSlice(x, y, width, height, radius, 0, splitX, leftColor, titleOnBottom);
+    this._drawTitleSlice(x, y, width, height, radius, splitX, width, rightColor, titleOnBottom);
+  }
+
+  private _drawTitleSlice(
+    x:             number,
+    y:             number,
+    width:         number,
+    height:        number,
+    radius:        number,
+    x0:            number,
+    x1:            number,
+    color:         number,
+    titleOnBottom: boolean,
+  ): void {
+    const r = Math.min(radius, width / 2, height);
+
+    x0 = Math.max(0, Math.min(width, x0));
+    x1 = Math.max(0, Math.min(width, x1));
+
+    if (x1 <= x0) return;
+
+    if (titleOnBottom) {
+      this._drawBottomTitleSlice(x, y, width, height, r, x0, x1, color);
+    } else {
+      this._drawTopTitleSlice(x, y, width, height, r, x0, x1, color);
+    }
+  }
+
+  private _drawTopTitleSlice(
+    x:      number,
+    y:      number,
+    width:  number,
+    height: number,
+    r:      number,
+    x0:     number,
+    x1:     number,
+    color:  number,
+  ): void {
+    this._bg.moveTo(x + x0, y + height);
+    this._bg.lineTo(x + x0, y + this._topTitleY(x0, width, r));
+
+    this._drawTopEdge(x, y, width, r, x0, x1);
+
+    this._bg.lineTo(x + x1, y + height);
+    this._bg.lineTo(x + x0, y + height);
+    this._bg.fill({ color });
+  }
+
+  private _drawBottomTitleSlice(
+    x:      number,
+    y:      number,
+    width:  number,
+    height: number,
+    r:      number,
+    x0:     number,
+    x1:     number,
+    color:  number,
+  ): void {
+    this._bg.moveTo(x + x0, y);
+    this._bg.lineTo(x + x1, y);
+    this._bg.lineTo(x + x1, y + this._bottomTitleY(x1, width, height, r));
+
+    this._drawBottomEdgeRightToLeft(x, y, width, height, r, x0, x1);
+
+    this._bg.lineTo(x + x0, y);
+    this._bg.fill({ color });
+  }
+
+  private _drawTopEdge(
+    x:     number,
+    y:     number,
+    width: number,
+    r:     number,
+    x0:    number,
+    x1:    number,
+  ): void {
+    if (x0 < r && x1 > 0) {
+      const from = Math.max(x0, 0);
+      const to   = Math.min(x1, r);
+      if (to > from) {
+        this._bg.arc(x + r, y + r, r, this._topLeftAngle(from, r), this._topLeftAngle(to, r));
+      }
+    }
+
+    const flatFrom = Math.max(x0, r);
+    const flatTo   = Math.min(x1, width - r);
+    if (flatTo > flatFrom) {
+      this._bg.lineTo(x + flatTo, y);
+    }
+
+    if (x0 < width && x1 > width - r) {
+      const from = Math.max(x0, width - r);
+      const to   = Math.min(x1, width);
+      if (to > from) {
+        this._bg.arc(
+          x + width - r,
+          y + r,
+          r,
+          this._topRightAngle(from, width, r),
+          this._topRightAngle(to, width, r),
+        );
+      }
+    }
+  }
+
+  private _drawBottomEdgeRightToLeft(
+    x:      number,
+    y:      number,
+    width:  number,
+    height: number,
+    r:      number,
+    x0:     number,
+    x1:     number,
+  ): void {
+    if (x1 > width - r && x0 < width) {
+      const from = Math.min(x1, width);
+      const to   = Math.max(x0, width - r);
+      if (from > to) {
+        this._bg.arc(
+          x + width - r,
+          y + height - r,
+          r,
+          this._bottomRightAngle(from, width, r),
+          this._bottomRightAngle(to, width, r),
+        );
+      }
+    }
+
+    const flatRight = Math.min(x1, width - r);
+    const flatLeft  = Math.max(x0, r);
+    if (flatRight > flatLeft) {
+      this._bg.lineTo(x + flatLeft, y + height);
+    }
+
+    if (x0 < r && x1 > 0) {
+      const from = Math.min(x1, r);
+      const to   = Math.max(x0, 0);
+      if (from > to) {
+        this._bg.arc(
+          x + r,
+          y + height - r,
+          r,
+          this._bottomLeftAngle(from, r),
+          this._bottomLeftAngle(to, r),
+        );
+      }
+    }
+  }
+
+  private _topTitleY(x: number, width: number, r: number): number {
+    if (r <= 0) return 0;
+
+    if (x < r) {
+      const dx = x - r;
+      return r - Math.sqrt(r * r - dx * dx);
+    }
+
+    if (x > width - r) {
+      const dx = x - (width - r);
+      return r - Math.sqrt(r * r - dx * dx);
+    }
+
+    return 0;
+  }
+
+  private _bottomTitleY(x: number, width: number, height: number, r: number): number {
+    if (r <= 0) return height;
+
+    if (x < r) {
+      const dx = x - r;
+      return height - r + Math.sqrt(r * r - dx * dx);
+    }
+
+    if (x > width - r) {
+      const dx = x - (width - r);
+      return height - r + Math.sqrt(r * r - dx * dx);
+    }
+
+    return height;
+  }
+
+  private _topLeftAngle(x: number, r: number): number {
+    return Math.PI * 2 - Math.acos((x - r) / r);
+  }
+
+  private _topRightAngle(x: number, width: number, r: number): number {
+    return Math.PI * 2 - Math.acos((x - (width - r)) / r);
+  }
+
+  private _bottomLeftAngle(x: number, r: number): number {
+    return Math.acos((x - r) / r);
+  }
+
+  private _bottomRightAngle(x: number, width: number, r: number): number {
+    return Math.acos((x - (width - r)) / r);
+  }
+
 }

@@ -178,10 +178,7 @@ export class Inventory extends LayoutObject {
         const stack = new CardStack({ titleHeight: this._titleHeight });
         stack.setCardId(rootId);
         this._stacks.set(rootId, stack);
-        this._floatPos.set(rootId, {
-          x: card?.pixel_x ?? 0,
-          y: card?.pixel_y ?? 0,
-        });
+        this._floatPos.set(rootId, this._findPlacementPos(card?.pixel_x ?? 0, card?.pixel_y ?? 0));
         this.addLayoutChild(stack);
       }
     }
@@ -337,6 +334,40 @@ export class Inventory extends LayoutObject {
   }
 
   // ─── Private ─────────────────────────────────────────────────────────────
+
+  /**
+   * Choose a grid-aligned placement position for a new stack.
+   * Tries the preferred position (snapped to grid) first, then up to N random
+   * grid cells, then falls back to the preferred position and lets _push separate.
+   */
+  private _findPlacementPos(preferredX: number, preferredY: number): { x: number; y: number } {
+    const N     = 10;
+    const cellW = this._gridCellWidth;
+    const cellH = this._gridCellHeight;
+
+    const occupied = (x: number, y: number): boolean => {
+      for (const pos of this._floatPos.values()) {
+        if (Math.abs(pos.x - x) < cellW && Math.abs(pos.y - y) < cellH) return true;
+      }
+      return false;
+    };
+
+    if (!occupied(preferredX, preferredY) || (preferredX !== 0 || preferredY !== 0)) {
+      return { x: preferredX, y: preferredY };
+    }
+
+    if (this.innerRect.width > 0 && this.innerRect.height > 0) {
+      const cols = Math.max(1, Math.floor(this.innerRect.width  / 2 / cellW));
+      const rows = Math.max(1, Math.floor(this.innerRect.height / 2 / cellH));
+      for (let i = 0; i < N; i++) {
+        const rx = (Math.floor(Math.random() * (cols * 2 + 1)) - cols) * cellW;
+        const ry = (Math.floor(Math.random() * (rows * 2 + 1)) - rows) * cellH;
+        if (!occupied(rx, ry)) return { x: rx, y: ry };
+      }
+    }
+
+    return { x: preferredX, y: preferredY };
+  }
 
   private _findRoots(): Set<CardId> {
     const roots = new Set<CardId>();

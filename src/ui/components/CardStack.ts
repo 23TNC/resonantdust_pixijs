@@ -1,5 +1,16 @@
-import { client_cards, stacked_up_children, stacked_down_children, type CardId } from "@/spacetime/Data";
+import {
+  client_cards,
+  stacked_up_children,
+  stacked_down_children,
+  moveClientCard,
+  packMacroPanel,
+  packMicroPixel,
+  soul_id,
+  SURFACE_PANEL,
+  type CardId,
+} from "@/spacetime/Data";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
+import { spacetime } from "@/spacetime/SpacetimeManager";
 import { Card } from "./Card";
 
 export interface CardStackOptions extends LayoutObjectOptions {
@@ -49,6 +60,10 @@ export class CardStack extends LayoutObject {
   // Single-card height supplied by the parent via setLayout.
   private _cardHeight = 0;
 
+  // Listeners keyed by card_id for every card currently in the chain (root + branches).
+  // Each fires invalidateLayout() so deaths are caught on the next layout pass.
+  private _chainUnlistens = new Map<CardId, () => void>();
+
   // Root card display object — created on first non-zero rootCardId.
   private _rootCard: Card | null = null;
 
@@ -74,6 +89,9 @@ export class CardStack extends LayoutObject {
   setCardId(cardId: CardId): void {
     if (this._rootCardId === cardId) return;
     this._rootCardId = cardId;
+    // Eagerly register the root listener so deaths fire before the first layout pass.
+    // _syncChainListeners will expand coverage to branch cards during updateLayoutChildren.
+    this._syncChainListeners(cardId ? new Set([cardId]) : new Set());
     this.invalidateLayout();
   }
 
@@ -139,13 +157,27 @@ export class CardStack extends LayoutObject {
       return;
     }
 
+    if (client_cards[this._rootCardId]?.dead !== 0) {
+      this._detachBranchChildren(this._rootCardId, stacked_up_children);
+      this._detachBranchChildren(this._rootCardId, stacked_down_children);
+      const dying_id     = this._rootCardId;
+      this._rootCardId   = 0;
+      this._clearAll();
+      spacetime.finalizeCardRemoval(dying_id);
+      return;
+    }
+
+    // Splice out any dead===2 branch cards before re-walking the chains.
+    this._spliceBranchDeaths(this._upChain,   stacked_up_children);
+    this._spliceBranchDeaths(this._downChain, stacked_down_children);
+
     // ── Ensure root card exists ───────────────────────────────────────────
     if (!this._rootCard) {
       this._rootCard = new Card({ titleHeight: this._titleHeight });
       this.addLayoutChild(this._rootCard);
     }
 
-    // ── Resolve branches ─────────────────────────────────────────────────
+    // ── Resolve branches (stops at dead>=1 cards) ─────────────────────────
     const upChain   = this._walkBranch(stacked_up_children);
     const downChain = this._walkBranch(stacked_down_children);
 
@@ -157,6 +189,9 @@ export class CardStack extends LayoutObject {
       this._syncBranch(downChain.length, this._downCards);
       this._downChain = downChain;
     }
+
+    // Register/unregister listeners for the full current chain.
+    this._syncChainListeners(new Set([this._rootCardId, ...upChain, ...downChain]));
 
     this._growRect();
 
@@ -222,7 +257,8 @@ export class CardStack extends LayoutObject {
   /**
    * Walk one branch index from the root, returning the ordered chain of
    * child card IDs (root not included).  Stops at cycles, missing cards,
-   * dragging/animating cards (unless ignoreDragState), or MAX_STACK_DEPTH.
+   * dying/dead cards (dead >= 1), dragging/animating cards (unless
+   * ignoreDragState), or MAX_STACK_DEPTH.
    */
   private _walkBranch(index: Map<CardId, Set<CardId>>): CardId[] {
     const chain: CardId[] = [];
@@ -235,13 +271,51 @@ export class CardStack extends LayoutObject {
       const next = children.values().next().value!;
       if (seen.has(next)) break;
       const card = client_cards[next];
-      if (!this._ignoreDragState && (card?.dragging || card?.animating)) break;
+      if (!card || card.dead >= 1) break;
+      if (!this._ignoreDragState && (card.dragging || card.animating)) break;
       seen.add(next);
       chain.push(next);
       current = next;
     }
 
     return chain;
+  }
+
+  /** Move a card to the soul's inventory at (0,0); its stacked children follow. */
+  private _returnToInventory(card_id: CardId): void {
+    if (!client_cards[card_id]) return;
+    const root  = client_cards[this._rootCardId];
+    const micro = (root?.surface === SURFACE_PANEL && root.panel_card_id === soul_id)
+      ? root.micro_location
+      : packMicroPixel(0, 0);
+    moveClientCard(card_id, packMacroPanel(soul_id, 1), micro);
+    spacetime.notifyCardListeners(card_id);
+  }
+
+  /** For each dead===2 card in a previous chain, send its children to inventory then finalize. */
+  private _spliceBranchDeaths(chain: CardId[], index: Map<CardId, Set<CardId>>): void {
+    for (const id of chain) {
+      if (client_cards[id]?.dead === 0) continue;
+      for (const child of (index.get(id) ?? [])) this._returnToInventory(child);
+      spacetime.finalizeCardRemoval(id);
+    }
+  }
+
+  /** When the root dies, send its direct branch children back to inventory. */
+  private _detachBranchChildren(rootId: CardId, index: Map<CardId, Set<CardId>>): void {
+    for (const child of (index.get(rootId) ?? [])) this._returnToInventory(child);
+  }
+
+  /** Keep _chainUnlistens in sync with the set of active chain card IDs. */
+  private _syncChainListeners(activeIds: Set<CardId>): void {
+    for (const [id, unlisten] of this._chainUnlistens) {
+      if (!activeIds.has(id)) { unlisten(); this._chainUnlistens.delete(id); }
+    }
+    for (const id of activeIds) {
+      if (!this._chainUnlistens.has(id)) {
+        this._chainUnlistens.set(id, spacetime.registerCardListener(id, () => this.invalidateLayout()));
+      }
+    }
   }
 
   /** Grow or shrink a branch card pool to match targetLength. */
@@ -258,8 +332,11 @@ export class CardStack extends LayoutObject {
     }
   }
 
-  /** Remove all cards and reset rect when rootCardId is 0. */
+  /** Remove all cards, clear all chain listeners, and reset rect. */
   private _clearAll(): void {
+    for (const unlisten of this._chainUnlistens.values()) unlisten();
+    this._chainUnlistens.clear();
+
     if (this._rootCard) {
       this.removeLayoutChild(this._rootCard);
       this._rootCard.destroy({ children: true });

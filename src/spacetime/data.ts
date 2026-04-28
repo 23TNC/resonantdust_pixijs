@@ -55,7 +55,8 @@ export interface ServerCard {
   owner_id:          CardId;
   flags:             number;           // u16
   packed_definition: number;           // u16: [card_type:u4][category:u4][definition_id:u8]
-  data:              bigint;           // u64, type-specific payload
+  data:              bigint;           // u64, type-specific payload (abilities slot 0…)
+  data2:             bigint;           // u64, type-specific payload (abilities slot 1…)
 }
 
 export interface ServerPlayer {
@@ -125,6 +126,8 @@ export interface ClientCard extends ServerCard {
   hidden:    boolean;
   stale:     boolean;
   dirty:     boolean;
+  /** Death state: 0=alive, 1=dying (animation running), 2=ready for removal. */
+  dead: 0 | 1 | 2;
 }
 
 export interface ClientPlayer extends ServerPlayer {
@@ -423,6 +426,7 @@ export function buildClientCard(server: ServerCard, previous?: ClientCard): Clie
     dragging:  previous?.dragging  ?? false,
     animating: previous?.animating ?? false,
     hidden:    previous?.hidden    ?? false,
+    dead:      previous?.dead      ?? 0,
     stale: false,
     dirty: true,
   };
