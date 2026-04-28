@@ -136,8 +136,8 @@ export class LayoutObject extends Container {
    */
   updateLayout(): void {
     if (!this._layoutDirty) return;
-    this.updateLayoutChildren();
     this._layoutDirty = false;
+    this.updateLayoutChildren();
     for (const { object } of this._layoutChildren) {
       object.updateLayout();
     }
@@ -154,8 +154,8 @@ export class LayoutObject extends Container {
    */
   renderLayout(): void {
     if (!this._renderDirty) return;
-    this.redraw();
     this._renderDirty = false;
+    this.redraw();
     for (const { object } of this._layoutChildren) {
       if (object.visible) object.renderLayout();
     }

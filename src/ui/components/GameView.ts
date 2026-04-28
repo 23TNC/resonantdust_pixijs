@@ -106,7 +106,7 @@ export class GameView extends LayoutRoot {
     // ── Main row ──────────────────────────────────────────────────────────
     const mainRow = new LayoutHorizontal();
     mainRow.addItem(inventoryPanel,  { weight: 3});
-    mainRow.addItem(centerCol, { weight: 5 });
+    mainRow.addItem(centerCol, { weight: 6 });
     mainRow.addItem(leftCol,   { weight: 2 });
 
     // ── Top bar ───────────────────────────────────────────────────────────

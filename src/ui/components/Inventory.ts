@@ -289,6 +289,12 @@ export class Inventory extends LayoutObject {
       width: this._gridLineWidth,
       alpha: this._gridAlpha,
     });
+
+    // Keep the redraw cycle alive while the grid is on screen so the fade
+    // animation continues frame-to-frame even when nothing else is dirtying
+    // this node (e.g. the user holds E with a quiet inventory, or releases
+    // E and we need a few more frames to fade out from peak alpha to zero).
+    this.invalidateRender();
   }
 
   // ─── Key handlers ────────────────────────────────────────────────────────
