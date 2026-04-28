@@ -51,7 +51,8 @@ import SetZoneRowReducer from "./set_zone_row_reducer";
 import SetZoneRowAtReducer from "./set_zone_row_at_reducer";
 import SetZoneTileReducer from "./set_zone_tile_reducer";
 import SetZoneTileAtReducer from "./set_zone_tile_at_reducer";
-import StackCardReducer from "./stack_card_reducer";
+import StackCardDownReducer from "./stack_card_down_reducer";
+import StackCardUpReducer from "./stack_card_up_reducer";
 import StartActionReducer from "./start_action_reducer";
 import UnstackCardReducer from "./unstack_card_reducer";
 import UpdateCardDataReducer from "./update_card_data_reducer";
@@ -167,7 +168,8 @@ const reducersSchema = __reducers(
   __reducerSchema("set_zone_row_at", SetZoneRowAtReducer),
   __reducerSchema("set_zone_tile", SetZoneTileReducer),
   __reducerSchema("set_zone_tile_at", SetZoneTileAtReducer),
-  __reducerSchema("stack_card", StackCardReducer),
+  __reducerSchema("stack_card_down", StackCardDownReducer),
+  __reducerSchema("stack_card_up", StackCardUpReducer),
   __reducerSchema("start_action", StartActionReducer),
   __reducerSchema("unstack_card", UnstackCardReducer),
   __reducerSchema("update_card_data", UpdateCardDataReducer),

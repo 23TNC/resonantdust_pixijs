@@ -54,6 +54,11 @@ export class GameView extends LayoutRoot {
     this._layers = new LayoutLayers({ layers: ["world", "game", "overlay"] });
     this.addLayoutChild(this._layers);
 
+    // InputManager is constructed first so child views can subscribe to its
+    // events (key_down for Inventory's grid-snap, etc.) at their own
+    // construction time.
+    this._input = new InputManager(this);
+
     const TILE_R  = 96;
     const CARD_W  = 70;
     const CARD_H  = Math.round(CARD_W * 4 / 3);
@@ -67,6 +72,7 @@ export class GameView extends LayoutRoot {
       cardHeight:  CARD_H,
       titleHeight: TITLE_H,
     });
+    this._world.setInput(this._input);
     this._world.syncZones();
 
     const PAD = 4;
@@ -88,19 +94,20 @@ export class GameView extends LayoutRoot {
       stackWidth:  CARD_W,
       cardHeight:  CARD_H,
       titleHeight: TITLE_H,
+      input:       this._input,
     });
     const inventoryPanel = new Panel({ padding: PAD });
     inventoryPanel.addLayoutChild(this._inventory);
 
-    // const rightCol = new LayoutVertical();
-    // rightCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
-    // rightCol.addItem(inventoryPanel,              { weight: 2 });
+    const rightCol = new LayoutVertical();
+    rightCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
+    rightCol.addItem(inventoryPanel,              { weight: 5 });
 
     // ── Main row ──────────────────────────────────────────────────────────
     const mainRow = new LayoutHorizontal();
-    mainRow.addItem(leftCol,  { weight: 2 });
+    mainRow.addItem(inventoryPanel,  { weight: 3});
     mainRow.addItem(centerCol, { weight: 5 });
-    mainRow.addItem(inventoryPanel,   { weight: 3 });
+    mainRow.addItem(leftCol,   { weight: 2 });
 
     // ── Top bar ───────────────────────────────────────────────────────────
     this._viewTitle = new ViewTitle();
@@ -119,11 +126,7 @@ export class GameView extends LayoutRoot {
     this._layers.add(this._world, "world");
     this._layers.add(outerCol, "game");
 
-    // ── Input & drag overlay ──────────────────────────────────────────────
-    this._input = new InputManager(this);
-
-    this._world.setInput(this._input);
-
+    // ── Drag overlay ──────────────────────────────────────────────────────
     this._dragManager = new DragManager({
       input:       this._input,
       stackWidth:  CARD_W,

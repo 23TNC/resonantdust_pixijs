@@ -36,12 +36,15 @@ import { CardStack } from "./CardStack";
 import { Inventory } from "./Inventory";
 import { Tile } from "./Tile";
 
-const DEFAULT_TITLE_H     = 24;
-const DEFAULT_CARD_H      = 120;
-const DEFAULT_STACK_W     = 80;
-const DEFAULT_LERP        = 0.18;
-const DEFAULT_RETURN_LERP = 0.25;
-const ARRIVE_THRESHOLD    = 0.5;
+const DEFAULT_TITLE_H        = 24;
+const DEFAULT_CARD_H         = 120;
+const DEFAULT_STACK_W        = 80;
+const DEFAULT_LERP           = 0.18;
+const DEFAULT_RETURN_LERP    = 0.25;
+const ARRIVE_THRESHOLD       = 0.5;
+const DEFAULT_GAP_MIN        = -6;
+const DEFAULT_GAP_SHRINK     = 0.18;
+const GAP_SETTLE_THRESHOLD   = 0.05;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -88,6 +91,10 @@ export interface DragManagerOptions extends LayoutObjectOptions {
   lerpFactor?:  number;
   /** Lerp factor while returning to origin. Default: 0.25. */
   returnLerp?:  number;
+  /** Minimum titleGap an overlay stack shrinks toward while dragging. Default: 0. */
+  gapMinimum?:    number;
+  /** Lerp fraction toward gapMinimum applied each redraw. Default: 0.18. */
+  gapShrinkRate?: number;
 }
 
 // ─── DragManager ─────────────────────────────────────────────────────────────
@@ -104,12 +111,14 @@ export interface DragManagerOptions extends LayoutObjectOptions {
  * invalidateLayout() on the cached source chain.
  */
 export class DragManager extends LayoutObject {
-  private readonly _input:       InputManager;
-  private readonly _titleHeight: number;
-  private readonly _cardHeight:  number;
-  private readonly _stackWidth:  number;
-  private readonly _lerpFactor:  number;
-  private readonly _returnLerp:  number;
+  private readonly _input:         InputManager;
+  private readonly _titleHeight:   number;
+  private readonly _cardHeight:    number;
+  private readonly _stackWidth:    number;
+  private readonly _lerpFactor:    number;
+  private readonly _returnLerp:    number;
+  private readonly _gapMinimum:    number;
+  private readonly _gapShrinkRate: number;
 
   private readonly _entries = new Map<CardId, Entry>();
 
@@ -127,12 +136,14 @@ export class DragManager extends LayoutObject {
 
   constructor(options: DragManagerOptions) {
     super(options);
-    this._input       = options.input;
-    this._titleHeight = options.titleHeight ?? DEFAULT_TITLE_H;
-    this._cardHeight  = options.cardHeight  ?? DEFAULT_CARD_H;
-    this._stackWidth  = options.stackWidth  ?? DEFAULT_STACK_W;
-    this._lerpFactor  = options.lerpFactor  ?? DEFAULT_LERP;
-    this._returnLerp  = options.returnLerp  ?? DEFAULT_RETURN_LERP;
+    this._input         = options.input;
+    this._titleHeight   = options.titleHeight   ?? DEFAULT_TITLE_H;
+    this._cardHeight    = options.cardHeight    ?? DEFAULT_CARD_H;
+    this._stackWidth    = options.stackWidth    ?? DEFAULT_STACK_W;
+    this._lerpFactor    = options.lerpFactor    ?? DEFAULT_LERP;
+    this._returnLerp    = options.returnLerp    ?? DEFAULT_RETURN_LERP;
+    this._gapMinimum    = options.gapMinimum    ?? DEFAULT_GAP_MIN;
+    this._gapShrinkRate = options.gapShrinkRate ?? DEFAULT_GAP_SHRINK;
 
     this._boundDown      = this._onDown.bind(this);
     this._boundDragStart = this._onDragStart.bind(this);
@@ -185,6 +196,16 @@ export class DragManager extends LayoutObject {
     const completed: CardId[] = [];
 
     for (const [rootId, entry] of this._entries) {
+      // Title gap shrink — independent of position settling, so the gap
+      // continues to compact even after the cards have caught up to the
+      // cursor.  Uses exponential approach toward _gapMinimum.
+      const currentGap = entry.stack.getTitleGap();
+      if (currentGap > this._gapMinimum + GAP_SETTLE_THRESHOLD) {
+        const nextGap = currentGap + (this._gapMinimum - currentGap) * this._gapShrinkRate;
+        entry.stack.setTitleGap(nextGap);
+        moved = true;
+      }
+
       const tx = entry.returnTarget
         ? entry.returnTarget.x
         : this._cursorX - entry.grabOffsetX;
@@ -488,7 +509,14 @@ export class DragManager extends LayoutObject {
   // ─── Entry lifecycle ─────────────────────────────────────────────────────
 
   private _addEntry(rootId: CardId, args: AddEntryArgs): void {
-    const stack = new CardStack({ titleHeight: this._titleHeight, ignoreDragState: true });
+    const stack = new CardStack({
+      titleHeight:     this._titleHeight,
+      // Inherit the source stack's current gap so the overlay starts in
+      // visual continuity with where the cards came from, then shrinks each
+      // frame in redraw() toward _gapMinimum.
+      titleGap:        args.source.hitStack.getTitleGap(),
+      ignoreDragState: true,
+    });
     stack.setCardId(rootId);
     this._entries.set(rootId, {
       stack,

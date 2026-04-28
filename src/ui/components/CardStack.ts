@@ -43,7 +43,7 @@ const MAX_STACK_DEPTH = 64;
 export class CardStack extends LayoutObject {
   private _rootCardId:               CardId;
   private readonly _titleHeight:     number;
-  private readonly _titleGap:        number;
+  private _titleGap:                 number;
   private readonly _ignoreDragState: boolean;
 
   // Single-card height supplied by the parent via setLayout.
@@ -64,7 +64,7 @@ export class CardStack extends LayoutObject {
     super(options);
     this._rootCardId      = options.card_id         ?? 0;
     this._titleHeight     = options.titleHeight     ?? 24;
-    this._titleGap        = options.titleGap        ?? 2;
+    this._titleGap        = options.titleGap        ?? -2;
     this._ignoreDragState = options.ignoreDragState ?? false;
     this.invalidateLayout();
   }
@@ -81,6 +81,19 @@ export class CardStack extends LayoutObject {
 
   /** The Card display object for the root, or null when rootCardId is 0. */
   getRootCard(): Card | null { return this._rootCard; }
+
+  getTitleGap(): number { return this._titleGap; }
+
+  /**
+   * Update the gap between adjacent stacked-card titles.  Triggers a layout
+   * pass so card positions and the rect bounds re-compute.  No-op if the
+   * value matches the current gap.
+   */
+  setTitleGap(gap: number): void {
+    if (this._titleGap === gap) return;
+    this._titleGap = gap;
+    this.invalidateLayout();
+  }
 
   // ─── Layout ──────────────────────────────────────────────────────────────
 

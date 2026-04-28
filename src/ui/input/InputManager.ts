@@ -26,6 +26,18 @@ export interface InputDragMoveData {
   down:   InputPointerData;
 }
 
+/** Keyboard event data — modifier state plus key/code from the DOM event. */
+export interface InputKeyData {
+  /** KeyboardEvent.key — printable character or named key (e.g. "e", "E", "Enter"). */
+  key:   string;
+  /** KeyboardEvent.code — physical key identifier (e.g. "KeyE", "Enter"). */
+  code:  string;
+  ctrl:  boolean;
+  shift: boolean;
+  alt:   boolean;
+  time:  number;
+}
+
 // ─── Event map ───────────────────────────────────────────────────────────────
 
 export interface InputEventMap {
@@ -35,6 +47,8 @@ export interface InputEventMap {
   left_drag_end:   InputActionData;
   left_click:      InputActionData;
   left_click_long: InputActionData;
+  key_down:        InputKeyData;
+  key_up:          InputKeyData;
 }
 
 export type InputEventType = keyof InputEventMap;
@@ -82,6 +96,8 @@ export class InputManager {
   private readonly _boundPointerDown: (e: PointerEvent) => void;
   private readonly _boundPointerMove: (e: PointerEvent) => void;
   private readonly _boundPointerUp:   (e: PointerEvent) => void;
+  private readonly _boundKeyDown:     (e: KeyboardEvent) => void;
+  private readonly _boundKeyUp:       (e: KeyboardEvent) => void;
 
   constructor(root: LayoutObject, options: InputManagerOptions = {}) {
     this._root          = root;
@@ -91,16 +107,22 @@ export class InputManager {
     this._boundPointerDown = this._onPointerDown.bind(this);
     this._boundPointerMove = this._onPointerMove.bind(this);
     this._boundPointerUp   = this._onPointerUp.bind(this);
+    this._boundKeyDown     = this._onKeyDown.bind(this);
+    this._boundKeyUp       = this._onKeyUp.bind(this);
 
     getApp().canvas.addEventListener("pointerdown", this._boundPointerDown);
     window.addEventListener("pointermove", this._boundPointerMove);
     window.addEventListener("pointerup",   this._boundPointerUp);
+    window.addEventListener("keydown",     this._boundKeyDown);
+    window.addEventListener("keyup",       this._boundKeyUp);
   }
 
   destroy(): void {
     getApp().canvas.removeEventListener("pointerdown", this._boundPointerDown);
     window.removeEventListener("pointermove", this._boundPointerMove);
     window.removeEventListener("pointerup",   this._boundPointerUp);
+    window.removeEventListener("keydown",     this._boundKeyDown);
+    window.removeEventListener("keyup",       this._boundKeyUp);
     this._listeners.clear();
   }
 
@@ -195,5 +217,27 @@ export class InputManager {
     } else {
       this._emit("left_click", { down, up });
     }
+  }
+
+  private _onKeyDown(e: KeyboardEvent): void {
+    // Browsers fire repeated keydown events while a key is held — skip them
+    // so subscribers see clean down/up boundaries.
+    if (e.repeat) return;
+    this._emit("key_down", this._keyData(e));
+  }
+
+  private _onKeyUp(e: KeyboardEvent): void {
+    this._emit("key_up", this._keyData(e));
+  }
+
+  private _keyData(e: KeyboardEvent): InputKeyData {
+    return {
+      key:   e.key,
+      code:  e.code,
+      ctrl:  e.ctrlKey,
+      shift: e.shiftKey,
+      alt:   e.altKey,
+      time:  Date.now(),
+    };
   }
 }
