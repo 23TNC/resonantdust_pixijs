@@ -1,3 +1,5 @@
+import { client_cards, type CardId } from "@/spacetime/Data";
+
 /**
  * Card flag tuple: [name, a, b, c].
  * The three booleans are game-rule semantics defined per card type.
@@ -62,4 +64,28 @@ export function getDefinitionByPacked(packed: number): CardDefinition | undefine
 
 export function getRegistry(): ReadonlyMap<number, CardDefinition> {
   return registry;
+}
+
+// ─── Per-card title helpers ──────────────────────────────────────────────────
+
+/** True iff the card's definition has title_on_bottom set. Missing card or definition → false. */
+export function isBottomTitleByDef(cardId: CardId): boolean {
+  const c = client_cards[cardId];
+  if (!c) return false;
+  return getDefinitionByPacked(c.packed_definition)?.title_on_bottom ?? false;
+}
+
+/**
+ * Effective title-on-bottom for a card: stacked_down → true, stacked_up →
+ * false, otherwise the definition's title_on_bottom value.  Mirrors the rule
+ * Card.redraw applies, so renderers and consumers (DragManager, etc.) agree
+ * on what edge a card visually presents its title.
+ * Missing card → false.
+ */
+export function getEffectiveTitleOnBottom(cardId: CardId): boolean {
+  const c = client_cards[cardId];
+  if (!c) return false;
+  if (c.stacked_down) return true;
+  if (c.stacked_up)   return false;
+  return getDefinitionByPacked(c.packed_definition)?.title_on_bottom ?? false;
 }

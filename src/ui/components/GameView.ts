@@ -79,7 +79,7 @@ export class GameView extends LayoutRoot {
     // ── Center column ─────────────────────────────────────────────────────
     const centerCol = new LayoutVertical();
     centerCol.addItem(new LayoutObject(),          { weight: 4 });
-    centerCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
+    centerCol.addItem(new LayoutObject(), { weight: 1 });
 
     // ── Right column ───────────────────────────────────────────────────────
     this._inventory = new Inventory({
@@ -92,15 +92,15 @@ export class GameView extends LayoutRoot {
     const inventoryPanel = new Panel({ padding: PAD });
     inventoryPanel.addLayoutChild(this._inventory);
 
-    const rightCol = new LayoutVertical();
-    rightCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
-    rightCol.addItem(inventoryPanel,              { weight: 2 });
+    // const rightCol = new LayoutVertical();
+    // rightCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
+    // rightCol.addItem(inventoryPanel,              { weight: 2 });
 
     // ── Main row ──────────────────────────────────────────────────────────
     const mainRow = new LayoutHorizontal();
     mainRow.addItem(leftCol,  { weight: 2 });
     mainRow.addItem(centerCol, { weight: 5 });
-    mainRow.addItem(rightCol,   { weight: 3 });
+    mainRow.addItem(inventoryPanel,   { weight: 3 });
 
     // ── Top bar ───────────────────────────────────────────────────────────
     this._viewTitle = new ViewTitle();
@@ -113,7 +113,7 @@ export class GameView extends LayoutRoot {
 
     // ── Outer column ──────────────────────────────────────────────────────
     const outerCol = new LayoutVertical();
-    outerCol.addItem(topPanel, { weight: 1 });
+    outerCol.addItem(new LayoutObject(), { weight: 1 });
     outerCol.addItem(mainRow,  { weight: 19 });
 
     this._layers.add(this._world, "world");

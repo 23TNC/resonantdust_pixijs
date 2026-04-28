@@ -8,6 +8,7 @@ import {
   zoneRFromMacro,
   ZONE_SIZE,
   SURFACE_WORLD,
+  CARD_TYPE_TILE,
   type CardId,
   type MacroLocation,
 } from "@/spacetime/Data";
@@ -382,7 +383,7 @@ export class World extends LayoutViewport {
         if (card.returning)                       continue;
         if (card.hidden)                          continue;
         if (card.stacked_up || card.stacked_down) continue;
-        if (card.card_type === 6)                 continue;
+        if (card.card_type === CARD_TYPE_TILE)    continue;
         roots.add(card_id);
       }
     }

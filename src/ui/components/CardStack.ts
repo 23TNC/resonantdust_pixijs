@@ -87,6 +87,37 @@ export class CardStack extends LayoutObject {
   override setLayout(x: number, y: number, width: number, height: number): void {
     this._cardHeight = height;
     super.setLayout(x, y, width, height);
+    // super.setLayout resets innerRect to single-card size.  Re-grow it
+    // immediately so layout calculations that read outerRect/innerRect
+    // (Inventory's clamp / push, debug visualisation) see the correct
+    // extent without waiting for the recursive updateLayoutChildren pass.
+    this._growRect();
+  }
+
+  /**
+   * Hit testing on a CardStack defers entirely to its child cards.
+   * The default innerRect-based hit test would short-circuit on the
+   * single-card-sized rect that super.setLayout reset before _growRect
+   * had a chance to extend it for this frame, AND it doesn't account for
+   * a child whose layout hasn't yet been refreshed in this pass.  Asking
+   * each card directly is both simpler and correct: a card is hit iff
+   * the cursor falls within that card's own innerRect (in its local
+   * space), regardless of how the parent stack thinks of its own extent.
+   */
+  override hitTestLayout(
+    globalX: number,
+    globalY: number,
+    ignore?: ReadonlySet<LayoutObject>,
+  ): LayoutObject | null {
+    if (ignore?.has(this)) return null;
+    const children = this.getLayoutChildren();
+    for (let i = children.length - 1; i >= 0; i--) {
+      const child = children[i];
+      if (!child.visible) continue;
+      const hit = child.hitTestLayout(globalX, globalY, ignore);
+      if (hit) return hit;
+    }
+    return null;
   }
 
   protected override updateLayoutChildren(): void {
@@ -114,17 +145,11 @@ export class CardStack extends LayoutObject {
       this._downChain = downChain;
     }
 
+    this._growRect();
+
     const upCount   = this._upCards.length;
     const downCount = this._downCards.length;
     const step      = this._titleHeight + this._titleGap;
-    const upExtra   = upCount   * step;
-    const downExtra = downCount * step;
-
-    // ── Grow rect without calling setOrigin (avoids layout cycle) ─────────
-    this.outerRect.y      = -upExtra;
-    this.outerRect.height = this._cardHeight + upExtra + downExtra;
-    this.innerRect.y      = -upExtra;
-    this.innerRect.height = this._cardHeight + upExtra + downExtra;
 
     const { x, width } = this.innerRect;
 
@@ -154,6 +179,32 @@ export class CardStack extends LayoutObject {
   }
 
   // ─── Private ─────────────────────────────────────────────────────────────
+
+  /**
+   * Resize outerRect/innerRect from the current chain state.  Called both by
+   * setLayout (so the hitbox is correct immediately) and by
+   * updateLayoutChildren (so it stays in sync after chain changes).  Direct
+   * mutation avoids setOrigin, which would fire invalidateLayout and create
+   * a layout cycle with the parent.
+   */
+  private _growRect(): void {
+    if (this._rootCardId === 0) {
+      this.outerRect.y      = 0;
+      this.outerRect.height = 0;
+      this.innerRect.y      = 0;
+      this.innerRect.height = 0;
+      return;
+    }
+    const upChain   = this._walkBranch(stacked_up_children);
+    const downChain = this._walkBranch(stacked_down_children);
+    const step      = this._titleHeight + this._titleGap;
+    const upExtra   = upChain.length   * step;
+    const downExtra = downChain.length * step;
+    this.outerRect.y      = -upExtra;
+    this.outerRect.height = this._cardHeight + upExtra + downExtra;
+    this.innerRect.y      = -upExtra;
+    this.innerRect.height = this._cardHeight + upExtra + downExtra;
+  }
 
   /**
    * Walk one branch index from the root, returning the ordered chain of

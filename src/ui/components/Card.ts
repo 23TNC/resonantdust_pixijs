@@ -1,7 +1,7 @@
 import { Graphics, Sprite, Text, Texture } from "pixi.js";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { client_cards, type CardId } from "@/spacetime/Data";
-import { getDefinitionByPacked } from "@/data/definitions/CardDefinitions";
+import { getDefinitionByPacked, getEffectiveTitleOnBottom } from "@/data/definitions/CardDefinitions";
 
 export interface CardOptions extends LayoutObjectOptions {
   card_id?:       CardId;
@@ -111,13 +111,12 @@ export class Card extends LayoutObject {
     const bodyH  = height - titleH;
     const r      = this._radius;
 
-    // Stacked cards lock their title position so it faces the visible edge.
-    // Root (unstacked) cards follow the definition, falling back to the option.
-    const titleOnBottom = card?.stacked_down
-      ? true
-      : card?.stacked_up
-        ? false
-        : (definition?.title_on_bottom ?? this._titleOnBottom);
+    // Shared rule (see CardDefinitions.getEffectiveTitleOnBottom): stacked_down
+    // forces bottom, stacked_up forces top, otherwise definition.title_on_bottom.
+    // Falls back to the constructor option only when no card is bound.
+    const titleOnBottom = card
+      ? getEffectiveTitleOnBottom(this._card_id)
+      : this._titleOnBottom;
 
     // titleY = top of the title strip; bodyY = top of the body area.
     const titleY = titleOnBottom ? y + bodyH : y;

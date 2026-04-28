@@ -13,10 +13,17 @@ import {
   packMicroPixel,
   ZONE_SIZE,
   SURFACE_WORLD,
+  isDraggableCardType,
+  isPassableCardType,
   type CardId,
+  type ClientCard,
   type MacroLocation,
+  type MicroLocation,
 } from "@/spacetime/Data";
-import { getDefinitionByPacked } from "@/data/definitions/CardDefinitions";
+import {
+  isBottomTitleByDef,
+  getEffectiveTitleOnBottom,
+} from "@/data/definitions/CardDefinitions";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import {
   type InputManager,
@@ -39,14 +46,14 @@ const ARRIVE_THRESHOLD    = 0.5;
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 /**
- * References cached at drag start so we can invalidate the source's parent
- * chain when the drag completes. Each may become destroyed mid-drag, so every
- * use is guarded by .destroyed.
+ * References cached at drag start so the source's parent chain can be
+ * invalidated when the drag completes.  Each may become destroyed mid-drag,
+ * so every use is guarded by `.destroyed`.
  */
 interface SourceCache {
   hitCard:      Card;
-  hitStack:     LayoutObject | null;       // Card.parent (CardStack)
-  hitContainer: LayoutObject | null;       // CardStack.parent (Inventory or World overlay parent)
+  hitStack:     CardStack;
+  hitContainer: LayoutObject | null;
 }
 
 interface Entry {
@@ -64,6 +71,14 @@ interface Entry {
   source:       SourceCache;
 }
 
+interface AddEntryArgs {
+  x:           number;
+  y:           number;
+  grabOffsetX: number;
+  grabOffsetY: number;
+  source:      SourceCache;
+}
+
 export interface DragManagerOptions extends LayoutObjectOptions {
   input:        InputManager;
   titleHeight?: number;
@@ -78,16 +93,14 @@ export interface DragManagerOptions extends LayoutObjectOptions {
 // ─── DragManager ─────────────────────────────────────────────────────────────
 
 /**
- * Overlay component that visualises every card whose `dragging` or `returning`
- * flag is set in client_cards.
+ * Overlay component that visualises every card whose `dragging` or
+ * `returning` flag is set in client_cards.
  *
- * Pickup mutates only `client_cards[id].dragging`. Drop calls Data.ts mutation
- * helpers (moveClientCard / stackClientCardUp / stackClientCardDown) for valid
- * targets, or sets `returning = true` for invalid drops and tweens the card
- * back to its origin before clearing the flag.
- *
- * Source views (Inventory, World, CardStack) update by reading the flags out
- * of client_cards on their next layout pass — DragManager pokes them via
+ * Pickup mutates only `client_cards[id].dragging`.  A successful drop calls
+ * Data.ts mutation helpers; an invalid drop sets `returning = true` and
+ * tweens the card back to its origin before clearing the flag.  Source
+ * views (Inventory, World, CardStack) update by reading the flags out of
+ * client_cards on their next layout pass — DragManager pokes them via
  * invalidateLayout() on the cached source chain.
  */
 export class DragManager extends LayoutObject {
@@ -143,18 +156,11 @@ export class DragManager extends LayoutObject {
   // ─── Hit test ────────────────────────────────────────────────────────────
 
   /** Overlay is non-interactive — clicks pass through to the layer below. */
-  override hitTestLayout(
-    _globalX: number,
-    _globalY: number,
-    _ignore?: ReadonlySet<LayoutObject>,
-  ): LayoutObject | null {
-    return null;
-  }
+  override hitTestLayout(): LayoutObject | null { return null; }
 
   // ─── Layout ──────────────────────────────────────────────────────────────
 
   protected override updateLayoutChildren(): void {
-    // Tear down entries whose flags have been cleared elsewhere.
     for (const [rootId, entry] of this._entries) {
       const card = client_cards[rootId];
       if (!card?.dragging && !card?.returning) {
@@ -210,23 +216,18 @@ export class DragManager extends LayoutObject {
 
   private _onDown(data: InputPointerData): void {
     this._downTarget = data.target;
-    this._cursorX    = data.x;
-    this._cursorY    = data.y;
   }
 
   private _onDragStart(data: InputPointerData): void {
     if (!(this._downTarget instanceof Card)) return;
-    const hitCard = this._downTarget;
-
+    const hitCard  = this._downTarget;
     const hitStack = hitCard.getParentLayout();
     if (!(hitStack instanceof CardStack)) return;
 
     const dragId = hitCard.getCardId();
     const card   = client_cards[dragId];
-    if (!card) return;
-
-    // Eligibility — same gate as the previous DragManager.
-    if (card.card_type < 1 || card.card_type > 4) return;
+    if (!card)                                      return;
+    if (!isDraggableCardType(card.card_type))       return;
     if (card.position_locked || card.position_hold) return;
 
     // Origin: centre of the hit Card, in screen space.
@@ -236,10 +237,6 @@ export class DragManager extends LayoutObject {
     ));
 
     card.dragging = true;
-
-    const grabOffsetX = data.x - origin.x;
-    const grabOffsetY = data.y - origin.y;
-
     this._cursorX = data.x;
     this._cursorY = data.y;
 
@@ -249,7 +246,13 @@ export class DragManager extends LayoutObject {
       hitContainer: hitStack.getParentLayout(),
     };
 
-    this._addEntry(dragId, origin.x, origin.y, grabOffsetX, grabOffsetY, source);
+    this._addEntry(dragId, {
+      x:           origin.x,
+      y:           origin.y,
+      grabOffsetX: data.x - origin.x,
+      grabOffsetY: data.y - origin.y,
+      source,
+    });
     this._invalidateSource(source);
     this.invalidateLayout();
   }
@@ -268,26 +271,46 @@ export class DragManager extends LayoutObject {
     let any = false;
 
     for (const [rootId, entry] of this._entries) {
-      // Already returning from a previous invalid drop; let it finish.
-      if (entry.returnTarget !== null) continue;
+      if (entry.returnTarget !== null) continue;     // already tweening back
 
-      if      (target instanceof Tile)      this._dropOnTile(rootId, target, entry);
-      else if (target instanceof Card)      this._dropOnCard(rootId, target, entry);
-      else if (target instanceof Inventory) this._dropOnInventory(rootId, target, entry);
-      else                                  this._dropInvalid(rootId, entry);
+      const card = client_cards[rootId];
+      if (!card) {
+        this._removeEntry(rootId, entry);
+        any = true;
+        continue;
+      }
 
+      // Drop handlers return either the LayoutObject to invalidate (success)
+      // or null (handler called _dropInvalid; entry stays alive for tween).
+      const invalidate = this._performDrop(card, rootId, entry, target);
+      if (invalidate !== null) {
+        card.dragging = false;
+        this._removeEntry(rootId, entry);
+        this._invalidateSource(entry.source);
+        if (!invalidate.destroyed) invalidate.invalidateLayout();
+      }
       any = true;
     }
 
     if (any) this.invalidateLayout();
   }
 
+  private _performDrop(
+    card:   ClientCard,
+    rootId: CardId,
+    entry:  Entry,
+    target: LayoutObject | null,
+  ): LayoutObject | null {
+    if (target instanceof Tile)      return this._dropOnTile(card, rootId, entry, target);
+    if (target instanceof Card)      return this._dropOnCard(rootId, entry, target);
+    if (target instanceof Inventory) return this._dropOnInventory(card, rootId, entry, target);
+    this._dropInvalid(rootId, entry);
+    return null;
+  }
+
   // ─── Drop handlers ───────────────────────────────────────────────────────
 
-  private _dropOnTile(rootId: CardId, tile: Tile, entry: Entry): void {
-    const card = client_cards[rootId];
-    if (!card) { this._removeEntry(rootId, entry); return; }
-
+  private _dropOnTile(card: ClientCard, rootId: CardId, entry: Entry, tile: Tile): LayoutObject | null {
     const { worldQ, worldR } = tile.getCoords();
     const zone_q  = Math.floor(worldQ / ZONE_SIZE);
     const zone_r  = Math.floor(worldR / ZONE_SIZE);
@@ -298,37 +321,24 @@ export class DragManager extends LayoutObject {
 
     if (this._isHexBlocked(macro, local_q, local_r, rootId)) {
       this._dropInvalid(rootId, entry);
-      return;
+      return null;
     }
 
     moveClientCard(rootId, macro, packMicroHex(local_q, local_r));
-    card.dragging = false;
-    this._removeEntry(rootId, entry);
-    this._invalidateSource(entry.source);
-    if (!tile.destroyed) tile.invalidateLayout();
+    return tile;
   }
 
-  private _dropOnInventory(rootId: CardId, inventory: Inventory, entry: Entry): void {
-    const card = client_cards[rootId];
-    if (!card) { this._removeEntry(rootId, entry); return; }
+  private _dropOnInventory(card: ClientCard, rootId: CardId, entry: Entry, inventory: Inventory): LayoutObject | null {
+    const { macro, micro } = this._inventoryDropTarget(inventory, entry, card);
 
-    const local = inventory.toLocal(new Point(entry.x, entry.y));
-    const cx = inventory.innerRect.x + inventory.innerRect.width  / 2;
-    const cy = inventory.innerRect.y + inventory.innerRect.height / 2;
-    const px = Math.round(local.x - cx);
-    const py = Math.round(local.y - cy);
-    const macro = packMacroPanel(inventory.getViewedId(), card.layer || 1);
-    const micro = packMicroPixel(px, py);
-
-    // Pick the new root.  If the source is naturally bottom-title, its
-    // stacked_down chain is the natural arrangement and the source itself
-    // stays the root.  Otherwise walk through consecutive top-by-definition
-    // descendants — the last one becomes the new root, and the cards
-    // between (in chain order) get flipped onto its top stack from the end
-    // working back toward the original root.  This preserves their visual
-    // order while restoring their natural top-title display.
-    const rootDef = getDefinitionByPacked(card.packed_definition);
-    const chain   = rootDef?.title_on_bottom ? [rootId] : this._naturalTopChain(rootId);
+    // Naturally bottom-title source: stacked_down chain is the natural
+    // arrangement, source stays the root.  Naturally top-title source:
+    // walk through consecutive top-by-definition descendants — the last
+    // becomes the new root, and the cards between (in chain order) get
+    // flipped onto its top stack starting from the end working back
+    // toward the original root.  Preserves visual order while restoring
+    // each card's natural top-title display.
+    const chain   = isBottomTitleByDef(rootId) ? [rootId] : this._naturalTopChain(rootId);
     const newRoot = chain[chain.length - 1];
 
     moveClientCard(newRoot, macro, micro);
@@ -336,128 +346,41 @@ export class DragManager extends LayoutObject {
       stackClientCardUp(chain[i], chain[i + 1]);
     }
 
-    card.dragging = false;
-    this._removeEntry(rootId, entry);
-    this._invalidateSource(entry.source);
-    if (!inventory.destroyed) inventory.invalidateLayout();
+    return inventory;
   }
 
-  /**
-   * Walk rootId's stacked_down chain through consecutive cards whose
-   * definition is top-title.  Returns the chain [rootId, child, …, last_top]
-   * — stops just before any bottom-title-by-definition card or the end of
-   * the chain.  Used by _dropOnInventory to choose the new visual root.
-   */
-  private _naturalTopChain(rootId: CardId): CardId[] {
-    const chain: CardId[] = [rootId];
-    const seen  = new Set<CardId>([rootId]);
-    let current = rootId;
-
-    while (true) {
-      const children = stacked_down_children.get(current);
-      if (!children || children.size === 0) break;
-      const next = children.values().next().value!;
-      if (seen.has(next)) break;
-      const nextCard = client_cards[next];
-      if (!nextCard) break;
-      const def = getDefinitionByPacked(nextCard.packed_definition);
-      if (def?.title_on_bottom) break;
-      seen.add(next);
-      chain.push(next);
-      current = next;
-    }
-
-    return chain;
-  }
-
-  private _dropOnCard(rootId: CardId, dropCard: Card, entry: Entry): void {
-    const card = client_cards[rootId];
-    if (!card) { this._removeEntry(rootId, entry); return; }
-
+  private _dropOnCard(rootId: CardId, entry: Entry, dropCard: Card): LayoutObject | null {
     const destId = dropCard.getCardId();
-    if (destId === 0 || destId === rootId)         { this._dropInvalid(rootId, entry); return; }
+    if (destId === 0 || destId === rootId)         { this._dropInvalid(rootId, entry); return null; }
 
-    const destRoot = this._findRoot(destId);
-    if (destRoot === 0)                            { this._dropInvalid(rootId, entry); return; }
-
-    // Reject any drop onto the same stack the dragged card is already in —
-    // covers self, descendants, ancestors, and the source root alike.
+    const destRoot   = this._findRoot(destId);
     const sourceRoot = this._findRoot(rootId);
-    if (sourceRoot === destRoot)                   { this._dropInvalid(rootId, entry); return; }
+    if (destRoot === 0 || sourceRoot === 0)        { this._dropInvalid(rootId, entry); return null; }
+    if (sourceRoot === destRoot)                   { this._dropInvalid(rootId, entry); return null; }
 
-    // Reject only the genuine "both branches" structural case.  A top-title-
-    // by-definition source with a stacked_down chain (a leftover flip from a
-    // previous drop) is allowed; the direction rule below treats it by its
+    // Reject the genuine "both branches" structural case.  A top-title-by-
+    // definition source with a stacked_down chain (a leftover flip from a
+    // previous drop) is allowed; the merge-branch rule treats it by its
     // natural top-title state regardless of how it currently displays.
     const sourceHasUp   = (stacked_up_children.get(rootId)?.size   ?? 0) > 0;
     const sourceHasDown = (stacked_down_children.get(rootId)?.size ?? 0) > 0;
-    if (sourceHasUp && sourceHasDown) {
-      this._dropInvalid(rootId, entry);
-      return;
-    }
+    if (sourceHasUp && sourceHasDown)              { this._dropInvalid(rootId, entry); return null; }
 
-    // Direction rule (uses the source's NATURAL title — its definition —
-    // not the current effective state.  A top-title card flipped into a
-    // bottom stack is still treated as a top-title source on its next drop):
-    //   • Source naturally bottom-title → bottom, always.
-    //   • Source naturally top-title    → the dest has a "natural" branch
-    //     (top for a top-title dest, bottom for a bottom-title dest).  If
-    //     the opposite branch exists on the dest, the cursor's vertical
-    //     position decides (above dest centre → top, below → bottom).
-    //     Otherwise the dest's natural branch is used regardless of cursor.
-    //
-    // When a top-title source ends up on a bottom branch, _flipDescendants
-    // marks the entire source chain stacked_down so every card renders with
-    // its title on the bottom edge to match its new direction.
-    const sourceBottomByDef =
-      getDefinitionByPacked(card.packed_definition)?.title_on_bottom ?? false;
-    let useDown: boolean;
-    if (sourceBottomByDef) {
-      useDown = true;
-    } else {
-      const hasUp           = (stacked_up_children.get(destRoot)?.size   ?? 0) > 0;
-      const hasDown         = (stacked_down_children.get(destRoot)?.size ?? 0) > 0;
-      const destBottomTitle = this._effectiveTitleOnBottom(destRoot);
-      // "Opposite-natural" branch: the one that contradicts the dest's title.
-      const hasOpposite     = destBottomTitle ? hasUp : hasDown;
-
-      if (!hasOpposite) {
-        useDown = destBottomTitle;
-      } else {
-        useDown = false;
-        const destStack = dropCard.getParentLayout();
-        if (destStack instanceof CardStack) {
-          const destRootCard = destStack.getRootCard();
-          if (destRootCard) {
-            const centre = destRootCard.toGlobal(new Point(
-              destRootCard.outerRect.width  / 2,
-              destRootCard.outerRect.height / 2,
-            ));
-            if (this._cursorY > centre.y) useDown = true;
-          }
-        }
-      }
-    }
-
-    const leafId = useDown
-      ? CardStack.findDownLeaf(destRoot)
-      : CardStack.findUpLeaf(destRoot);
+    const useDown = this._pickMergeBranch(rootId, destRoot, dropCard);
+    const leafId  = useDown ? CardStack.findDownLeaf(destRoot) : CardStack.findUpLeaf(destRoot);
 
     if (useDown) {
       stackClientCardDown(rootId, leafId);
       // Source root is now on a down-branch; any pre-existing up-branch
       // descendants would orphan because CardStack walks a single direction
-      // per branch. Flip them to the matching direction.
+      // per branch.  Flip them to match.
       this._flipDescendants(rootId, true);
     } else {
       stackClientCardUp(rootId, leafId);
       this._flipDescendants(rootId, false);
     }
 
-    card.dragging = false;
-    this._removeEntry(rootId, entry);
-    this._invalidateSource(entry.source);
-    if (!dropCard.destroyed) dropCard.invalidateLayout();
+    return dropCard;
   }
 
   private _dropInvalid(rootId: CardId, entry: Entry): void {
@@ -479,27 +402,103 @@ export class DragManager extends LayoutObject {
     this._invalidateSource(entry.source);
   }
 
-  // ─── Helpers ─────────────────────────────────────────────────────────────
+  // ─── Drop-target helpers ─────────────────────────────────────────────────
 
-  private _addEntry(
-    rootId:      CardId,
-    x:           number,
-    y:           number,
-    grabOffsetX: number,
-    grabOffsetY: number,
-    source:      SourceCache,
-  ): void {
+  private _inventoryDropTarget(
+    inventory: Inventory,
+    entry:     Entry,
+    card:      ClientCard,
+  ): { macro: MacroLocation; micro: MicroLocation } {
+    const local = inventory.toLocal(new Point(entry.x, entry.y));
+    const cx = inventory.innerRect.x + inventory.innerRect.width  / 2;
+    const cy = inventory.innerRect.y + inventory.innerRect.height / 2;
+    const px = Math.round(local.x - cx);
+    const py = Math.round(local.y - cy);
+    return {
+      macro: packMacroPanel(inventory.getViewedId(), card.layer || 1),
+      micro: packMicroPixel(px, py),
+    };
+  }
+
+  /**
+   * Decide which branch of destRoot a merge drop should attach to.
+   *
+   * Uses the source's NATURAL title (its definition) — not the current
+   * effective state.  A top-title card flipped into a bottom stack is
+   * still treated as a top-title source on its next drop.
+   *
+   *   • Source naturally bottom-title → bottom, always.
+   *   • Source naturally top-title    → the dest has a "natural" branch
+   *     (top for a top-title dest, bottom for a bottom-title dest).  If
+   *     the opposite branch exists on the dest, the cursor's vertical
+   *     position decides (above dest centre → top, below → bottom).
+   *     Otherwise the dest's natural branch is used regardless of cursor.
+   */
+  private _pickMergeBranch(rootId: CardId, destRoot: CardId, dropCard: Card): boolean {
+    if (isBottomTitleByDef(rootId)) return true;
+
+    const hasUp           = (stacked_up_children.get(destRoot)?.size   ?? 0) > 0;
+    const hasDown         = (stacked_down_children.get(destRoot)?.size ?? 0) > 0;
+    const destBottomTitle = getEffectiveTitleOnBottom(destRoot);
+    const hasOpposite     = destBottomTitle ? hasUp : hasDown;
+
+    if (!hasOpposite) return destBottomTitle;
+    return this._cursorBelowCardCentre(dropCard);
+  }
+
+  /** True when the current cursor Y lies below the centre of the card's parent CardStack root. */
+  private _cursorBelowCardCentre(dropCard: Card): boolean {
+    const destStack = dropCard.getParentLayout();
+    if (!(destStack instanceof CardStack)) return false;
+    const destRootCard = destStack.getRootCard();
+    if (!destRootCard) return false;
+    const centre = destRootCard.toGlobal(new Point(
+      destRootCard.outerRect.width  / 2,
+      destRootCard.outerRect.height / 2,
+    ));
+    return this._cursorY > centre.y;
+  }
+
+  /**
+   * Walk rootId's stacked_down chain through consecutive cards whose
+   * definition is top-title.  Returns the chain [rootId, child, …, last_top]
+   * — stops just before any bottom-title-by-definition card or the end of
+   * the chain.
+   */
+  private _naturalTopChain(rootId: CardId): CardId[] {
+    const chain: CardId[] = [rootId];
+    const seen  = new Set<CardId>([rootId]);
+    let current = rootId;
+
+    while (true) {
+      const children = stacked_down_children.get(current);
+      if (!children || children.size === 0) break;
+      const next = children.values().next().value!;
+      if (seen.has(next)) break;
+      if (!client_cards[next]) break;
+      if (isBottomTitleByDef(next)) break;
+      seen.add(next);
+      chain.push(next);
+      current = next;
+    }
+
+    return chain;
+  }
+
+  // ─── Entry lifecycle ─────────────────────────────────────────────────────
+
+  private _addEntry(rootId: CardId, args: AddEntryArgs): void {
     const stack = new CardStack({ titleHeight: this._titleHeight, ignoreDragState: true });
     stack.setCardId(rootId);
     this._entries.set(rootId, {
       stack,
-      x,
-      y,
-      grabOffsetX,
-      grabOffsetY,
-      returnOrigin: { x, y },
+      x:            args.x,
+      y:            args.y,
+      grabOffsetX:  args.grabOffsetX,
+      grabOffsetY:  args.grabOffsetY,
+      returnOrigin: { x: args.x, y: args.y },
       returnTarget: null,
-      source,
+      source:       args.source,
     });
     this.addLayoutChild(stack);
   }
@@ -513,9 +512,11 @@ export class DragManager extends LayoutObject {
 
   private _invalidateSource(src: SourceCache): void {
     if (!src.hitCard.destroyed)                          src.hitCard.invalidateLayout();
-    if (src.hitStack     && !src.hitStack.destroyed)     src.hitStack.invalidateLayout();
+    if (!src.hitStack.destroyed)                         src.hitStack.invalidateLayout();
     if (src.hitContainer && !src.hitContainer.destroyed) src.hitContainer.invalidateLayout();
   }
+
+  // ─── Graph helpers ───────────────────────────────────────────────────────
 
   /** Walk stacked_on_id upward; return the unstacked root, or 0 on cycle/missing. */
   private _findRoot(cardId: CardId): CardId {
@@ -538,8 +539,7 @@ export class DragManager extends LayoutObject {
    * this, a pre-existing chain on one branch is orphaned when the drop puts
    * its root on the other branch — CardStack._walkBranch is direction-locked.
    *
-   * Each flip mutates the index we're iterating, so the children set is
-   * snapshotted before the loop.
+   * Each flip mutates the index we're iterating, so children are snapshotted.
    */
   private _flipDescendants(cardId: CardId, toDown: boolean): void {
     const oppositeIndex = toDown ? stacked_up_children : stacked_down_children;
@@ -564,18 +564,6 @@ export class DragManager extends LayoutObject {
   }
 
   /**
-   * Mirrors Card.redraw's title-position logic: stacked_down forces bottom,
-   * stacked_up forces top, otherwise the definition's title_on_bottom flag.
-   */
-  private _effectiveTitleOnBottom(cardId: CardId): boolean {
-    const c = client_cards[cardId];
-    if (!c) return false;
-    if (c.stacked_down) return true;
-    if (c.stacked_up)   return false;
-    return getDefinitionByPacked(c.packed_definition)?.title_on_bottom ?? false;
-  }
-
-  /**
    * True if any non-passable card occupies (local_q, local_r) at this macro.
    * Skips: ignoreId, dragging/returning cards, stacked cards, hidden cards,
    * and tile-type cards (they are the floor, not occupants).
@@ -587,11 +575,11 @@ export class DragManager extends LayoutObject {
       if (cid === ignoreId) continue;
       const c = client_cards[cid];
       if (!c) continue;
-      if (c.dragging || c.returning)        continue;
-      if (c.stacked_up || c.stacked_down)   continue;
-      if (c.hidden)                         continue;
+      if (c.dragging || c.returning)      continue;
+      if (c.stacked_up || c.stacked_down) continue;
+      if (c.hidden)                       continue;
       if (c.local_q !== local_q || c.local_r !== local_r) continue;
-      if (c.card_type === 6 || c.card_type === 7 || c.card_type === 8) continue;
+      if (isPassableCardType(c.card_type)) continue;
       return true;
     }
     return false;

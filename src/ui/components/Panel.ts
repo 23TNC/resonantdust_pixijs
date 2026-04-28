@@ -29,7 +29,7 @@ export class Panel extends LayoutObject {
     this._stroke      = options.stroke      ?? 0x1e3a6e;
     this._strokeWidth = options.strokeWidth ?? 1;
     this._radius      = options.radius      ?? 12;
-    this._alpha       = options.alpha       ?? 0.82;
+    this._alpha       = options.alpha       ?? 0.60;
 
     this.addDisplay(this._bg);
     this.invalidateRender();

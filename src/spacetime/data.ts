@@ -23,6 +23,28 @@ export const CARD_FLAG_POSITION_HOLD   = 1 << 4;
 export const ACTION_FLAG_STARTED   = 1 << 0;
 export const ACTION_FLAG_COMPLETED = 1 << 1;
 
+// card_type values (high nibble of packed_definition)
+export const CARD_TYPE_DISCIPLINE     = 1;
+export const CARD_TYPE_FACULTY        = 2;
+export const CARD_TYPE_REQUISITES     = 3;
+export const CARD_TYPE_REVERY         = 4;
+export const CARD_TYPE_SOUL           = 5;
+export const CARD_TYPE_TILE           = 6;
+export const CARD_TYPE_TILE_OBJECT    = 7;
+export const CARD_TYPE_TILE_DECORATOR = 8;
+
+/** Card types that participate in drag-and-drop pickup. */
+export function isDraggableCardType(card_type: number): boolean {
+  return card_type >= CARD_TYPE_DISCIPLINE && card_type <= CARD_TYPE_REVERY;
+}
+
+/** Card types that are part of the floor and don't block hex drop targets. */
+export function isPassableCardType(card_type: number): boolean {
+  return card_type === CARD_TYPE_TILE
+      || card_type === CARD_TYPE_TILE_OBJECT
+      || card_type === CARD_TYPE_TILE_DECORATOR;
+}
+
 // ─── Server row types ─────────────────────────────────────────────────────────
 // Mirror of SpacetimeDB table schemas. No derived fields.
 
