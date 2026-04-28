@@ -1,7 +1,8 @@
-import { Graphics, Sprite, Text, Texture } from "pixi.js";
+import { Graphics, Point, Sprite, Text, Texture } from "pixi.js";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { client_cards, type CardId } from "@/spacetime/Data";
 import { spacetime } from "@/spacetime/SpacetimeManager";
+import { ParticleManager } from "@/ui/effects/ParticleManager";
 import {
   getDefinitionByPacked,
   getEffectiveTitleOnBottom,
@@ -158,7 +159,15 @@ export class Card extends LayoutObject {
     }
 
     if (card.dead === 1) {
-      if (this._deathStartTime === null) this._deathStartTime = Date.now();
+      if (this._deathStartTime === null) {
+        this._deathStartTime = Date.now();
+        const pm = ParticleManager.getInstance();
+        if (pm) {
+          const { x, y, width, height } = this.innerRect;
+          const pt = this.toGlobal(new Point(x + width / 2, y + height / 2));
+          pm.spawn("pop", { x: pt.x, y: pt.y });
+        }
+      }
       const t = Math.min(1, (Date.now() - this._deathStartTime) / DEATH_FADE_MS);
       this.alpha = 1 - t;
       if (t < 1) {

@@ -1,3 +1,4 @@
+import { Point } from "pixi.js";
 import {
   client_cards,
   stacked_up_children,
@@ -12,6 +13,7 @@ import {
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { spacetime } from "@/spacetime/SpacetimeManager";
 import { Card } from "./Card";
+import { DragManager } from "./DragManager";
 
 export interface CardStackOptions extends LayoutObjectOptions {
   card_id?:         CardId;
@@ -157,7 +159,7 @@ export class CardStack extends LayoutObject {
       return;
     }
 
-    if (client_cards[this._rootCardId]?.dead !== 0) {
+    if (client_cards[this._rootCardId]?.dead === 2) {
       this._detachBranchChildren(this._rootCardId, stacked_up_children);
       this._detachBranchChildren(this._rootCardId, stacked_down_children);
       const dying_id     = this._rootCardId;
@@ -271,7 +273,7 @@ export class CardStack extends LayoutObject {
       const next = children.values().next().value!;
       if (seen.has(next)) break;
       const card = client_cards[next];
-      if (!card || card.dead >= 1) break;
+      if (!card || card.dead >= 2) break;
       if (!this._ignoreDragState && (card.dragging || card.animating)) break;
       seen.add(next);
       chain.push(next);
@@ -281,21 +283,30 @@ export class CardStack extends LayoutObject {
     return chain;
   }
 
-  /** Move a card to the soul's inventory at (0,0); its stacked children follow. */
+  /** Move a card to the soul's inventory; its stacked children follow. Tweens visually if DragManager is available. */
   private _returnToInventory(card_id: CardId): void {
     if (!client_cards[card_id]) return;
     const root  = client_cards[this._rootCardId];
     const micro = (root?.surface === SURFACE_PANEL && root.panel_card_id === soul_id)
       ? root.micro_location
-      : packMicroPixel(0, 0);
+      : DragManager.getInstance()?.randomInventoryMicro() ?? packMicroPixel(0, 0);
     moveClientCard(card_id, packMacroPanel(soul_id, 1), micro);
     spacetime.notifyCardListeners(card_id);
+
+    const dm = DragManager.getInstance();
+    if (dm) {
+      const center = this.toGlobal(new Point(
+        this.innerRect.x + this.innerRect.width  / 2,
+        this.innerRect.y + this.innerRect.height / 2,
+      ));
+      dm.beginReturnTween(card_id, center.x, center.y);
+    }
   }
 
   /** For each dead===2 card in a previous chain, send its children to inventory then finalize. */
   private _spliceBranchDeaths(chain: CardId[], index: Map<CardId, Set<CardId>>): void {
     for (const id of chain) {
-      if (client_cards[id]?.dead === 0) continue;
+      if (client_cards[id]?.dead !== 2) continue;
       for (const child of (index.get(id) ?? [])) this._returnToInventory(child);
       spacetime.finalizeCardRemoval(id);
     }

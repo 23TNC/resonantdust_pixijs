@@ -76,7 +76,8 @@ interface Entry {
    * committed card.  null for invalid drops (default cleanup is sufficient).
    */
   destination:  LayoutObject | null;
-  source:       SourceCache;
+  /** null for programmatic return tweens (no drag source to poke). */
+  source:       SourceCache | null;
 }
 
 interface AddEntryArgs {
@@ -116,6 +117,9 @@ export interface DragManagerOptions extends LayoutObjectOptions {
  * invalidateLayout() on the cached source chain.
  */
 export class DragManager extends LayoutObject {
+  private static _instance: DragManager | null = null;
+  static getInstance(): DragManager | null { return DragManager._instance; }
+
   private readonly _input:         InputManager;
   private readonly _titleHeight:   number;
   private readonly _cardHeight:    number;
@@ -124,6 +128,8 @@ export class DragManager extends LayoutObject {
   private readonly _returnLerp:    number;
   private readonly _gapMinimum:    number;
   private readonly _gapShrinkRate: number;
+
+  private _inventory: Inventory | null = null;
 
   private readonly _entries = new Map<CardId, Entry>();
 
@@ -141,6 +147,7 @@ export class DragManager extends LayoutObject {
 
   constructor(options: DragManagerOptions) {
     super(options);
+    DragManager._instance = this;
     this._input         = options.input;
     this._titleHeight   = options.titleHeight   ?? DEFAULT_TITLE_H;
     this._cardHeight    = options.cardHeight    ?? DEFAULT_CARD_H;
@@ -162,11 +169,62 @@ export class DragManager extends LayoutObject {
   }
 
   override destroy(options?: Parameters<LayoutObject["destroy"]>[0]): void {
+    if (DragManager._instance === this) DragManager._instance = null;
     this._input.off("left_down",       this._boundDown);
     this._input.off("left_drag_start", this._boundDragStart);
     this._input.off("left_drag_move",  this._boundDragMove);
     this._input.off("left_drag_end",   this._boundDragEnd);
     super.destroy(options);
+  }
+
+  // ─── Public API ──────────────────────────────────────────────────────────
+
+  setInventory(inventory: Inventory): void {
+    this._inventory = inventory;
+  }
+
+  randomInventoryMicro(): MicroLocation | null {
+    return this._inventory?.randomMicro() ?? null;
+  }
+
+  /**
+   * Tween a card from screen position (fromX, fromY) to its committed
+   * inventory pixel_x/pixel_y position.  Call after moveClientCard so the
+   * destination is already encoded in the card's data.  Sets card.animating;
+   * clears it when the tween arrives and invalidates the inventory so it
+   * picks up the card.
+   */
+  beginReturnTween(cardId: CardId, fromX: number, fromY: number): void {
+    const card = client_cards[cardId];
+    if (!card || !this._inventory) return;
+    if (this._entries.has(cardId)) return;
+
+    const inv = this._inventory;
+    const cx  = inv.innerRect.x + inv.innerRect.width  / 2;
+    const cy  = inv.innerRect.y + inv.innerRect.height / 2;
+    const dst = inv.toGlobal(new Point(cx + card.pixel_x, cy + card.pixel_y));
+
+    const stack = new CardStack({
+      titleHeight:     this._titleHeight,
+      titleGap:        this._gapMinimum,
+      ignoreDragState: true,
+    });
+    stack.setCardId(cardId);
+
+    card.animating = true;
+    this._entries.set(cardId, {
+      stack,
+      x:            fromX,
+      y:            fromY,
+      grabOffsetX:  0,
+      grabOffsetY:  0,
+      returnOrigin: { x: fromX, y: fromY },
+      returnTarget: { x: dst.x, y: dst.y },
+      destination:  inv,
+      source:       null,
+    });
+    this.addLayoutChild(stack);
+    this.invalidateLayout();
   }
 
   // ─── Hit test ────────────────────────────────────────────────────────────
@@ -571,7 +629,8 @@ export class DragManager extends LayoutObject {
     if (!entry.stack.destroyed) entry.stack.destroy({ children: true });
   }
 
-  private _invalidateSource(src: SourceCache): void {
+  private _invalidateSource(src: SourceCache | null): void {
+    if (!src) return;
     if (!src.hitCard.destroyed)                          src.hitCard.invalidateLayout();
     if (!src.hitStack.destroyed)                         src.hitStack.invalidateLayout();
     if (src.hitContainer && !src.hitContainer.destroyed) src.hitContainer.invalidateLayout();

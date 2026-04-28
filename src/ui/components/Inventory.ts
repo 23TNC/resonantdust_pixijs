@@ -6,6 +6,7 @@ import {
   packMacroPanel,
   packMicroPixel,
   type CardId,
+  type MicroLocation,
 } from "@/spacetime/Data";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { type InputManager, type InputKeyData } from "@/ui/input/InputManager";
@@ -150,6 +151,18 @@ export class Inventory extends LayoutObject {
 
   getViewedId(): CardId { return this._viewedId; }
   getObserverId(): CardId { return this._observerId; }
+
+  /** Return a random grid-aligned MicroLocation within the current inventory bounds. Falls back to (0,0). */
+  randomMicro(): MicroLocation {
+    if (this.innerRect.width <= 0 || this.innerRect.height <= 0) return packMicroPixel(0, 0);
+    const cellW = this._gridCellWidth;
+    const cellH = this._gridCellHeight;
+    const cols  = Math.max(1, Math.floor(this.innerRect.width  / 2 / cellW));
+    const rows  = Math.max(1, Math.floor(this.innerRect.height / 2 / cellH));
+    const rx    = (Math.floor(Math.random() * (cols * 2 + 1)) - cols) * cellW;
+    const ry    = (Math.floor(Math.random() * (rows * 2 + 1)) - rows) * cellH;
+    return packMicroPixel(rx, ry);
+  }
 
   // ─── Layout ──────────────────────────────────────────────────────────────
 
@@ -351,20 +364,6 @@ export class Inventory extends LayoutObject {
       }
       return false;
     };
-
-    if (!occupied(preferredX, preferredY) || (preferredX !== 0 || preferredY !== 0)) {
-      return { x: preferredX, y: preferredY };
-    }
-
-    if (this.innerRect.width > 0 && this.innerRect.height > 0) {
-      const cols = Math.max(1, Math.floor(this.innerRect.width  / 2 / cellW));
-      const rows = Math.max(1, Math.floor(this.innerRect.height / 2 / cellH));
-      for (let i = 0; i < N; i++) {
-        const rx = (Math.floor(Math.random() * (cols * 2 + 1)) - cols) * cellW;
-        const ry = (Math.floor(Math.random() * (rows * 2 + 1)) - rows) * cellH;
-        if (!occupied(rx, ry)) return { x: rx, y: ry };
-      }
-    }
 
     return { x: preferredX, y: preferredY };
   }

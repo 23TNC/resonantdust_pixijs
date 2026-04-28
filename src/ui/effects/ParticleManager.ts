@@ -1,5 +1,5 @@
-import { Assets, Container, Texture } from "pixi.js";
-import { Emitter, upgradeConfig } from "@pixi/particle-emitter";
+import { Assets, ParticleContainer, Texture } from "pixi.js";
+import { Emitter, upgradeConfig } from "@spd789562/particle-emitter";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 
 // Eagerly load all effect JSON configs from the effects folder.
@@ -64,7 +64,7 @@ export interface ParticleManagerOptions extends LayoutObjectOptions {
 
 interface ActiveEntry {
   emitter:   Emitter;
-  container: Container;
+  container: ParticleContainer;
   /** maxParticles declared by the effect's JSON config. */
   desired:   number;
 }
@@ -85,6 +85,9 @@ interface ActiveEntry {
  *   handle.destroy() // removes immediately
  */
 export class ParticleManager extends LayoutObject {
+  private static _instance: ParticleManager | null = null;
+  static getInstance(): ParticleManager | null { return ParticleManager._instance; }
+
   private _maxParticles:   number;
   private _active:         ActiveEntry[] = [];
   private _defaultTexture: Texture | null = null;
@@ -92,7 +95,18 @@ export class ParticleManager extends LayoutObject {
 
   constructor(options: ParticleManagerOptions = {}) {
     super(options);
+    ParticleManager._instance = this;
     this._maxParticles = options.maxParticles ?? 500;
+  }
+
+  override destroy(options?: Parameters<LayoutObject["destroy"]>[0]): void {
+    if (ParticleManager._instance === this) ParticleManager._instance = null;
+    for (const entry of this._active) {
+      entry.emitter.destroy();
+      entry.container.destroy({ children: true });
+    }
+    this._active = [];
+    super.destroy(options);
   }
 
   /**
@@ -134,11 +148,12 @@ export class ParticleManager extends LayoutObject {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const v3config = upgradeConfig(rawConfig as any, textures);
 
-    const container = new Container();
+    const container = new ParticleContainer();
     container.position.set(opts.x ?? 0, opts.y ?? 0);
     this.addChild(container);
 
-    const emitter = new Emitter(container, v3config);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const emitter = new Emitter(container as any, v3config);
     if (opts.lifetime !== undefined) {
       emitter.emitterLifetime = opts.lifetime;
     }

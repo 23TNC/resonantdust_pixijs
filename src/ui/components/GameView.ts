@@ -4,12 +4,14 @@ import { LayoutLayers } from "@/ui/layout/LayoutLayers";
 import { LayoutObject } from "@/ui/layout/LayoutObject";
 import { LayoutHorizontal, LayoutVertical } from "@/ui/layout/LayoutLinear";
 import { InputManager } from "@/ui/input/InputManager";
+import { getApp } from "@/app";
 import { Panel } from "./Panel";
 import { World } from "./World";
 import { ViewTitle } from "./ViewTitle";
 import { FrameRate } from "./FrameRate";
 import { Inventory } from "./Inventory";
 import { DragManager } from "./DragManager";
+import { ParticleManager } from "@/ui/effects/ParticleManager";
 
 /**
  * Top-level game view for a single soul card.
@@ -46,7 +48,9 @@ export class GameView extends LayoutRoot {
   private readonly _world:       World;
   private readonly _viewTitle:   ViewTitle;
   private readonly _inventory:   Inventory;
-  private readonly _dragManager: DragManager;
+  private readonly _dragManager:        DragManager;
+  private readonly _particleManager:    ParticleManager;
+  private readonly _boundParticleTick:  (ticker: { deltaMS: number }) => void;
 
   constructor() {
     super();
@@ -134,9 +138,17 @@ export class GameView extends LayoutRoot {
       titleHeight: TITLE_H,
     });
     this._layers.add(this._dragManager, "overlay");
+    this._dragManager.setInventory(this._inventory);
+
+    this._particleManager   = new ParticleManager();
+    this._boundParticleTick = e => this._particleManager.tick(e.deltaMS);
+    void this._particleManager.init();
+    this._layers.add(this._particleManager, "overlay");
+    getApp().ticker.add(this._boundParticleTick, this);
   }
 
   override destroy(options?: Parameters<LayoutRoot["destroy"]>[0]): void {
+    getApp().ticker.remove(this._boundParticleTick, this);
     this._input.destroy();
     super.destroy(options);
   }
