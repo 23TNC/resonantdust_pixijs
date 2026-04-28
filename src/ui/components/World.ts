@@ -58,7 +58,7 @@ export interface WorldOptions extends LayoutViewportOptions {
  * Card overlay:
  *   World maintains one CardStack child per qualifying client_card. A card
  *   qualifies when its zone is one of the managed zones, surface === SURFACE_WORLD,
- *   and it is not dragging, returning, hidden, or stacked. The stack is
+ *   and it is not dragging, animating, hidden, or stacked. The stack is
  *   centered on world hex (world_q, world_r) = (zone_q*8 + local_q, zone_r*8 + local_r).
  *   Reconciliation runs in updateLayoutChildren so any invalidateLayout() keeps
  *   the displayed set consistent.
@@ -380,7 +380,7 @@ export class World extends LayoutViewport {
         if (!card)                                continue;
         if (card.surface !== SURFACE_WORLD)       continue;
         if (card.dragging)                        continue;
-        if (card.returning)                       continue;
+        if (card.animating)                       continue;
         if (card.hidden)                          continue;
         if (card.stacked_up || card.stacked_down) continue;
         if (card.card_type === CARD_TYPE_TILE)    continue;

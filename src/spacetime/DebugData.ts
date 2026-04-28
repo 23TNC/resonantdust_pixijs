@@ -124,8 +124,8 @@ export function bootstrap(): void {
     { card_id: 12, macro_location: panel_macro, micro_location: packMicroStacked(5),     owner_id: 1, flags: SD, packed_definition: packDefinition(1, 0, 1), data: 0n },
     { card_id: 13, macro_location: panel_macro, micro_location: packMicroStacked(9),     owner_id: 1, flags: SD, packed_definition: packDefinition(2, 0, 1), data: 0n },
 
-    // Inventory: soul reference card (type 9)
-    { card_id: 11, macro_location: panel_macro, micro_location: packMicroPixel(   0, 0), owner_id: 1, flags: 0,  packed_definition: packDefinition(9, 0, 0), data: 0n },
+    // Inventory: Revery Soul Reference (type 4 / category 0 / def 1) — card_target points at soul_card_id
+    { card_id: 11, macro_location: panel_macro, micro_location: packMicroPixel(   0, 0), owner_id: 1, flags: CARD_FLAG_STACKABLE,  packed_definition: packDefinition(4, 0, 1), data: BigInt(soul_card_id) },
   ];
 
   // ─── Players ───────────────────────────────────────────────────────────────

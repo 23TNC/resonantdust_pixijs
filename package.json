@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@pixi/particle-emitter": "^5.0.10",
     "pixi.js": "8.9.1",
     "spacetimedb": "^2.1.0"
   },

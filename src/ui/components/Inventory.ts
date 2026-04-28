@@ -60,13 +60,13 @@ const GRID_FADE_THRESHOLD = 0.005;
  * Only cards that pass all of these filters are shown:
  *   • macro_location === packMacroPanel(viewed_id, z)
  *   • dragging === false
- *   • returning === false
+ *   • animating === false
  *   • not stacked (stacked_up === false && stacked_down === false)
  *   • card_type is in the provided card_types set
  *
  * Reconciliation (add/remove stacks) happens in updateLayoutChildren so that
  * any invalidateLayout() — including those triggered by flag mutations like
- * dragging/returning — automatically keeps the displayed set consistent.
+ * dragging/animating — automatically keeps the displayed set consistent.
  */
 export class Inventory extends LayoutObject {
   private readonly _observerId:  CardId;
@@ -155,7 +155,7 @@ export class Inventory extends LayoutObject {
 
   /**
    * Reconcile stacks with current client_cards state, then clamp and place.
-   * Runs on every layout pass so flag mutations (dragging, returning) are
+   * Runs on every layout pass so flag mutations (dragging, animating) are
    * picked up automatically without external sync calls.
    */
   protected override updateLayoutChildren(): void {
@@ -347,7 +347,7 @@ export class Inventory extends LayoutObject {
       const card = client_cards[card_id];
       if (!card)                                continue;
       if (card.dragging)                        continue;
-      if (card.returning)                       continue;
+      if (card.animating)                       continue;
       if (card.stacked_up || card.stacked_down) continue;
       if (!this._cardTypeSet.has(card.card_type)) continue;
       roots.add(card_id);

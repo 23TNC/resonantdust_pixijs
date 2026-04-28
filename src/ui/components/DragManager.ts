@@ -67,10 +67,15 @@ interface Entry {
   /** Cursor → root-centre offset captured on pickup. */
   grabOffsetX:  number;
   grabOffsetY:  number;
-  /** Where the entry started — return-to-origin tween destination. */
+  /** Pickup-time origin — used as returnTarget for invalid drops. */
   returnOrigin: { x: number; y: number };
-  /** null while following the cursor; set to a point while returning. */
+  /** null while following the cursor; set to a point while animating. */
   returnTarget: { x: number; y: number } | null;
+  /**
+   * View to invalidate when the tween completes so it picks up the now-
+   * committed card.  null for invalid drops (default cleanup is sufficient).
+   */
+  destination:  LayoutObject | null;
   source:       SourceCache;
 }
 
@@ -89,7 +94,7 @@ export interface DragManagerOptions extends LayoutObjectOptions {
   stackWidth?:  number;
   /** Lerp factor while following the cursor. Default: 0.18. */
   lerpFactor?:  number;
-  /** Lerp factor while returning to origin. Default: 0.25. */
+  /** Lerp factor while animating toward returnTarget. Default: 0.25. */
   returnLerp?:  number;
   /** Minimum titleGap an overlay stack shrinks toward while dragging. Default: 0. */
   gapMinimum?:    number;
@@ -101,10 +106,10 @@ export interface DragManagerOptions extends LayoutObjectOptions {
 
 /**
  * Overlay component that visualises every card whose `dragging` or
- * `returning` flag is set in client_cards.
+ * `animating` flag is set in client_cards.
  *
  * Pickup mutates only `client_cards[id].dragging`.  A successful drop calls
- * Data.ts mutation helpers; an invalid drop sets `returning = true` and
+ * Data.ts mutation helpers; an invalid drop sets `animating = true` and
  * tweens the card back to its origin before clearing the flag.  Source
  * views (Inventory, World, CardStack) update by reading the flags out of
  * client_cards on their next layout pass — DragManager pokes them via
@@ -174,7 +179,7 @@ export class DragManager extends LayoutObject {
   protected override updateLayoutChildren(): void {
     for (const [rootId, entry] of this._entries) {
       const card = client_cards[rootId];
-      if (!card?.dragging && !card?.returning) {
+      if (!card?.dragging && !card?.animating) {
         this._removeEntry(rootId, entry);
         continue;
       }
@@ -229,7 +234,7 @@ export class DragManager extends LayoutObject {
       moved = true;
     }
 
-    for (const rootId of completed) this._finishReturn(rootId);
+    for (const rootId of completed) this._finishAnim(rootId);
     if (moved) this.invalidateLayout();
   }
 
@@ -296,6 +301,8 @@ export class DragManager extends LayoutObject {
 
       const card = client_cards[rootId];
       if (!card) {
+        // This should be done in updateLayoutChildren
+        // but can exist here because !card
         this._removeEntry(rootId, entry);
         any = true;
         continue;
@@ -306,7 +313,8 @@ export class DragManager extends LayoutObject {
       const invalidate = this._performDrop(card, rootId, entry, target);
       if (invalidate !== null) {
         card.dragging = false;
-        this._removeEntry(rootId, entry);
+        // Incorrect this should be done in updateLayoutChildren
+        // this._removeEntry(rootId, entry);
         this._invalidateSource(entry.source);
         if (!invalidate.destroyed) invalidate.invalidateLayout();
       }
@@ -345,8 +353,25 @@ export class DragManager extends LayoutObject {
       return null;
     }
 
+    // Commit the move now; the animating flag keeps both source and
+    // destination views from rendering the card until the tween reaches
+    // the tile centre, at which point _finishAnim invalidates the tile so
+    // World picks the card up at its new location.
     moveClientCard(rootId, macro, packMicroHex(local_q, local_r));
-    return tile;
+
+    const centre = tile.toGlobal(new Point(
+      tile.outerRect.width  / 2,
+      tile.outerRect.height / 2,
+    ));
+
+    card.dragging      = false;
+    card.animating     = true;
+    entry.returnTarget = { x: centre.x, y: centre.y };
+    entry.destination  = tile;
+
+    // Returning null tells the dispatcher to skip the success teardown —
+    // the redraw tween owns this entry's lifecycle until _finishAnim.
+    return null;
   }
 
   private _dropOnInventory(card: ClientCard, rootId: CardId, entry: Entry, inventory: Inventory): LayoutObject | null {
@@ -406,21 +431,28 @@ export class DragManager extends LayoutObject {
 
   private _dropInvalid(rootId: CardId, entry: Entry): void {
     const card = client_cards[rootId];
+    // This should be done in updateLayoutChildren
+    // but can exist here because !card
     if (!card) { this._removeEntry(rootId, entry); return; }
     card.dragging      = false;
-    card.returning     = true;
+    card.animating     = true;
     entry.returnTarget = { x: entry.returnOrigin.x, y: entry.returnOrigin.y };
+    // No destination — _finishAnim's default cleanup is the desired behavior.
   }
 
-  // ─── Return completion ───────────────────────────────────────────────────
+  // ─── Tween completion ────────────────────────────────────────────────────
 
-  private _finishReturn(rootId: CardId): void {
+  private _finishAnim(rootId: CardId): void {
     const entry = this._entries.get(rootId);
     if (!entry) return;
     const card = client_cards[rootId];
-    if (card) card.returning = false;
-    this._removeEntry(rootId, entry);
+    if (card) card.animating = false;
+    // Incorrect this should be done in updateLayoutChildren
+    // this._removeEntry(rootId, entry);
     this._invalidateSource(entry.source);
+    if (entry.destination && !entry.destination.destroyed) {
+      entry.destination.invalidateLayout();
+    }
   }
 
   // ─── Drop-target helpers ─────────────────────────────────────────────────
@@ -526,6 +558,7 @@ export class DragManager extends LayoutObject {
       grabOffsetY:  args.grabOffsetY,
       returnOrigin: { x: args.x, y: args.y },
       returnTarget: null,
+      destination:  null,
       source:       args.source,
     });
     this.addLayoutChild(stack);
@@ -593,7 +626,7 @@ export class DragManager extends LayoutObject {
 
   /**
    * True if any non-passable card occupies (local_q, local_r) at this macro.
-   * Skips: ignoreId, dragging/returning cards, stacked cards, hidden cards,
+   * Skips: ignoreId, dragging/animating cards, stacked cards, hidden cards,
    * and tile-type cards (they are the floor, not occupants).
    */
   private _isHexBlocked(macro: MacroLocation, local_q: number, local_r: number, ignoreId: CardId): boolean {
@@ -603,7 +636,7 @@ export class DragManager extends LayoutObject {
       if (cid === ignoreId) continue;
       const c = client_cards[cid];
       if (!c) continue;
-      if (c.dragging || c.returning)      continue;
+      if (c.dragging || c.animating)      continue;
       if (c.stacked_up || c.stacked_down) continue;
       if (c.hidden)                       continue;
       if (c.local_q !== local_q || c.local_r !== local_r) continue;

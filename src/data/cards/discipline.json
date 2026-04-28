@@ -10,14 +10,14 @@
     },
     {
       "name": "Work",
-      "title_on_bottom": false,
+      "title_on_bottom": true,
       "style": {
         "color": [ "#97e3a7", "#ecd6aa", "#0b1426" ]
       }
     },
     {
       "name": "Study",
-      "title_on_bottom": false,
+      "title_on_bottom": true,
       "style": {
         "color": [ "#7D96E3", "#ecd6aa", "#0b1426" ]
       }

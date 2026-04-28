@@ -7,7 +7,7 @@ export interface CardStackOptions extends LayoutObjectOptions {
   titleHeight?:     number;
   /** Pixels of body showing between adjacent stacked-card titles. Default: 2. */
   titleGap?:        number;
-  /** When true, dragging/returning cards are included in branches. Default: false. */
+  /** When true, dragging/animating cards are included in branches. Default: false. */
   ignoreDragState?: boolean;
 }
 
@@ -222,7 +222,7 @@ export class CardStack extends LayoutObject {
   /**
    * Walk one branch index from the root, returning the ordered chain of
    * child card IDs (root not included).  Stops at cycles, missing cards,
-   * dragging/returning cards (unless ignoreDragState), or MAX_STACK_DEPTH.
+   * dragging/animating cards (unless ignoreDragState), or MAX_STACK_DEPTH.
    */
   private _walkBranch(index: Map<CardId, Set<CardId>>): CardId[] {
     const chain: CardId[] = [];
@@ -235,7 +235,7 @@ export class CardStack extends LayoutObject {
       const next = children.values().next().value!;
       if (seen.has(next)) break;
       const card = client_cards[next];
-      if (!this._ignoreDragState && (card?.dragging || card?.returning)) break;
+      if (!this._ignoreDragState && (card?.dragging || card?.animating)) break;
       seen.add(next);
       chain.push(next);
       current = next;
@@ -286,7 +286,7 @@ export class CardStack extends LayoutObject {
   // ─── Static leaf walks ───────────────────────────────────────────────────
   // Pure data walks for callers (e.g. drag-and-drop merges) that need the
   // attachment point of an existing stack.  Unlike _walkBranch, these ignore
-  // dragging/returning state — the goal is the true data leaf, not where a
+  // dragging/animating state — the goal is the true data leaf, not where a
   // visual chain happens to stop.
 
   /** Walk stacked_up_children from rootId; return the up-branch leaf (or rootId if empty). */

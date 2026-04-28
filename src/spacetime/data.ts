@@ -117,7 +117,11 @@ export interface ClientCard extends ServerCard {
   // Local UI state — not server-authoritative
   selected:  boolean;
   dragging:  boolean;
-  returning: boolean;
+  /** True while DragManager is animating the card's overlay toward its
+   *  drop target (or back to its origin on invalid drop).  Source and
+   *  destination views skip cards with this flag set so only the overlay
+   *  renders the card during the tween. */
+  animating: boolean;
   hidden:    boolean;
   stale:     boolean;
   dirty:     boolean;
@@ -417,7 +421,7 @@ export function buildClientCard(server: ServerCard, previous?: ClientCard): Clie
     stacked_on_id, ...micro, world_q, world_r,
     selected:  previous?.selected  ?? false,
     dragging:  previous?.dragging  ?? false,
-    returning: previous?.returning ?? false,
+    animating: previous?.animating ?? false,
     hidden:    previous?.hidden    ?? false,
     stale: false,
     dirty: true,

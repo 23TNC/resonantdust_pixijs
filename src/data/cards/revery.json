@@ -1,1 +1,13 @@
-{}
+{
+  "card_type": 4,
+  "cards": [
+    {
+      "name": "Soul Reference",
+      "title_on_bottom": false,
+      "abilities": [ "card_target" ],
+      "style": {
+        "color": [ "#a8e0e6", "#ecd6aa", "#0b1426" ]
+      }
+    }
+  ]
+}

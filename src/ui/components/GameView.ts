@@ -60,7 +60,7 @@ export class GameView extends LayoutRoot {
     this._input = new InputManager(this);
 
     const TILE_R  = 96;
-    const CARD_W  = 70;
+    const CARD_W  = 72;
     const CARD_H  = Math.round(CARD_W * 4 / 3);
     const TITLE_H = 24;
 
@@ -120,7 +120,7 @@ export class GameView extends LayoutRoot {
 
     // ── Outer column ──────────────────────────────────────────────────────
     const outerCol = new LayoutVertical();
-    outerCol.addItem(new LayoutObject(), { weight: 1 });
+    outerCol.addItem(topPanel, { weight: 1 });
     outerCol.addItem(mainRow,  { weight: 19 });
 
     this._layers.add(this._world, "world");
