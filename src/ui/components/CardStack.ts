@@ -5,6 +5,8 @@ import { Card } from "./Card";
 export interface CardStackOptions extends LayoutObjectOptions {
   card_id?:         CardId;
   titleHeight?:     number;
+  /** Pixels of body showing between adjacent stacked-card titles. Default: 2. */
+  titleGap?:        number;
   /** When true, dragging/returning cards are included in branches. Default: false. */
   ignoreDragState?: boolean;
 }
@@ -41,6 +43,7 @@ const MAX_STACK_DEPTH = 64;
 export class CardStack extends LayoutObject {
   private _rootCardId:               CardId;
   private readonly _titleHeight:     number;
+  private readonly _titleGap:        number;
   private readonly _ignoreDragState: boolean;
 
   // Single-card height supplied by the parent via setLayout.
@@ -61,6 +64,7 @@ export class CardStack extends LayoutObject {
     super(options);
     this._rootCardId      = options.card_id         ?? 0;
     this._titleHeight     = options.titleHeight     ?? 24;
+    this._titleGap        = options.titleGap        ?? 2;
     this._ignoreDragState = options.ignoreDragState ?? false;
     this.invalidateLayout();
   }
@@ -74,6 +78,9 @@ export class CardStack extends LayoutObject {
   }
 
   getCardId(): CardId { return this._rootCardId; }
+
+  /** The Card display object for the root, or null when rootCardId is 0. */
+  getRootCard(): Card | null { return this._rootCard; }
 
   // ─── Layout ──────────────────────────────────────────────────────────────
 
@@ -109,8 +116,9 @@ export class CardStack extends LayoutObject {
 
     const upCount   = this._upCards.length;
     const downCount = this._downCards.length;
-    const upExtra   = upCount   * this._titleHeight;
-    const downExtra = downCount * this._titleHeight;
+    const step      = this._titleHeight + this._titleGap;
+    const upExtra   = upCount   * step;
+    const downExtra = downCount * step;
 
     // ── Grow rect without calling setOrigin (avoids layout cycle) ─────────
     this.outerRect.y      = -upExtra;
@@ -126,12 +134,12 @@ export class CardStack extends LayoutObject {
 
     for (let i = 0; i < upCount; i++) {
       this._upCards[i].setCardId(this._upChain[i]);
-      this._upCards[i].setLayout(x, -(i + 1) * this._titleHeight, width, this._cardHeight);
+      this._upCards[i].setLayout(x, -(i + 1) * step, width, this._cardHeight);
     }
 
     for (let i = 0; i < downCount; i++) {
       this._downCards[i].setCardId(this._downChain[i]);
-      this._downCards[i].setLayout(x, (i + 1) * this._titleHeight, width, this._cardHeight);
+      this._downCards[i].setLayout(x, (i + 1) * step, width, this._cardHeight);
     }
 
     // ── Depth: root on top; each branch recedes behind the previous card ──

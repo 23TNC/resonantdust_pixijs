@@ -37,9 +37,9 @@ function parseColor(value: string | undefined): number | null {
  * All colors fall back to defaults when absent.
  */
 export class Card extends LayoutObject {
-  private _card_id:      CardId;
-  private _titleHeight:  number;
-  private _radius:       number;
+  private _card_id:       CardId;
+  private _titleHeight:   number;
+  private _radius:        number;
   private _titleOnBottom: boolean;
 
   private readonly _bg     = new Graphics();
@@ -49,9 +49,9 @@ export class Card extends LayoutObject {
   constructor(options: CardOptions = {}) {
     super({ hitSelf: true, ...options });
 
-    this._card_id      = options.card_id      ?? 0;
-    this._titleHeight  = options.titleHeight  ?? 24;
-    this._radius       = options.radius       ?? 8;
+    this._card_id       = options.card_id       ?? 0;
+    this._titleHeight   = options.titleHeight   ?? 24;
+    this._radius        = options.radius        ?? 8;
     this._titleOnBottom = options.titleOnBottom ?? false;
 
     this._sprite.anchor.set(0.5);

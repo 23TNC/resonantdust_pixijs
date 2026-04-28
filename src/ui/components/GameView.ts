@@ -57,13 +57,15 @@ export class GameView extends LayoutRoot {
     const TILE_R  = 96;
     const CARD_W  = 70;
     const CARD_H  = Math.round(CARD_W * 4 / 3);
+    const TITLE_H = 24;
 
     const soul = client_cards[viewed_id];
     this._world = new World({
-      z:          soul?.layer ?? 1,
-      tileRadius: TILE_R,
-      stackWidth: CARD_W,
-      cardHeight: CARD_H,
+      z:           soul?.layer ?? 1,
+      tileRadius:  TILE_R,
+      stackWidth:  CARD_W,
+      cardHeight:  CARD_H,
+      titleHeight: TITLE_H,
     });
     this._world.syncZones();
 
@@ -80,7 +82,13 @@ export class GameView extends LayoutRoot {
     centerCol.addItem(new Panel({ padding: PAD }), { weight: 1 });
 
     // ── Right column ───────────────────────────────────────────────────────
-    this._inventory = new Inventory({ observer_id, viewed_id, card_types: [1, 2, 3, 4], stackWidth: CARD_W, cardHeight: CARD_H });
+    this._inventory = new Inventory({
+      observer_id, viewed_id,
+      card_types:  [1, 2, 3, 4],
+      stackWidth:  CARD_W,
+      cardHeight:  CARD_H,
+      titleHeight: TITLE_H,
+    });
     const inventoryPanel = new Panel({ padding: PAD });
     inventoryPanel.addLayoutChild(this._inventory);
 
@@ -117,9 +125,10 @@ export class GameView extends LayoutRoot {
     this._world.setInput(this._input);
 
     this._dragManager = new DragManager({
-      input:      this._input,
-      stackWidth: CARD_W,
-      cardHeight: CARD_H,
+      input:       this._input,
+      stackWidth:  CARD_W,
+      cardHeight:  CARD_H,
+      titleHeight: TITLE_H,
     });
     this._layers.add(this._dragManager, "overlay");
   }

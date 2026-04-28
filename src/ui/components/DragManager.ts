@@ -2,6 +2,8 @@ import { Point } from "pixi.js";
 import {
   client_cards,
   macro_location_cards,
+  stacked_up_children,
+  stacked_down_children,
   moveClientCard,
   stackClientCardUp,
   stackClientCardDown,
@@ -33,7 +35,6 @@ const DEFAULT_STACK_W     = 80;
 const DEFAULT_LERP        = 0.18;
 const DEFAULT_RETURN_LERP = 0.25;
 const ARRIVE_THRESHOLD    = 0.5;
-const MAX_CYCLE_DEPTH     = 64;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -334,24 +335,59 @@ export class DragManager extends LayoutObject {
 
     const destId = dropCard.getCardId();
     if (destId === 0 || destId === rootId)         { this._dropInvalid(rootId, entry); return; }
-    if (this._isCycle(rootId, destId))             { this._dropInvalid(rootId, entry); return; }
 
     const destRoot = this._findRoot(destId);
     if (destRoot === 0)                            { this._dropInvalid(rootId, entry); return; }
 
-    // Direction rule: down if either source root or destination root is a
-    // bottom-titled type. Otherwise up.
+    // Reject any drop onto the same stack the dragged card is already in —
+    // covers self, descendants, ancestors, and the source root alike.
     const sourceRoot = this._findRoot(rootId);
-    const sourceDef  = this._defOf(sourceRoot);
-    const destDef    = this._defOf(destRoot);
-    const useDown    = (sourceDef?.title_on_bottom ?? false) || (destDef?.title_on_bottom ?? false);
+    if (sourceRoot === destRoot)                   { this._dropInvalid(rootId, entry); return; }
+
+    // Direction rule:
+    //   • Dragged card displays title-on-bottom → bottom leaf, always.
+    //   • Dragged card displays title-on-top    → top leaf, except:
+    //     when the destination has BOTH branches and its root displays
+    //     title-on-top, the cursor's vertical position relative to the
+    //     destination root's centre picks the side (below → bottom).
+    let useDown: boolean;
+    if (this._effectiveTitleOnBottom(rootId)) {
+      useDown = true;
+    } else {
+      useDown = false;
+      if (!this._effectiveTitleOnBottom(destRoot)) {
+        const hasUp   = (stacked_up_children.get(destRoot)?.size   ?? 0) > 0;
+        const hasDown = (stacked_down_children.get(destRoot)?.size ?? 0) > 0;
+        if (hasUp && hasDown) {
+          const destStack = dropCard.getParentLayout();
+          if (destStack instanceof CardStack) {
+            const destRootCard = destStack.getRootCard();
+            if (destRootCard) {
+              const centre = destRootCard.toGlobal(new Point(
+                destRootCard.outerRect.width  / 2,
+                destRootCard.outerRect.height / 2,
+              ));
+              if (this._cursorY > centre.y) useDown = true;
+            }
+          }
+        }
+      }
+    }
 
     const leafId = useDown
       ? CardStack.findDownLeaf(destRoot)
       : CardStack.findUpLeaf(destRoot);
 
-    if (useDown) stackClientCardDown(rootId, leafId);
-    else         stackClientCardUp(rootId, leafId);
+    if (useDown) {
+      stackClientCardDown(rootId, leafId);
+      // Source root is now on a down-branch; any pre-existing up-branch
+      // descendants would orphan because CardStack walks a single direction
+      // per branch. Flip them to the matching direction.
+      this._flipDescendants(rootId, true);
+    } else {
+      stackClientCardUp(rootId, leafId);
+      this._flipDescendants(rootId, false);
+    }
 
     card.dragging = false;
     this._removeEntry(rootId, entry);
@@ -431,26 +467,47 @@ export class DragManager extends LayoutObject {
     return 0;
   }
 
-  private _defOf(cardId: CardId) {
-    const c = client_cards[cardId];
-    return c ? getDefinitionByPacked(c.packed_definition) : undefined;
+  /**
+   * Walk every descendant of cardId on the OPPOSITE branch direction and
+   * re-stack it onto its existing parent in the target direction.  Without
+   * this, a pre-existing chain on one branch is orphaned when the drop puts
+   * its root on the other branch — CardStack._walkBranch is direction-locked.
+   *
+   * Each flip mutates the index we're iterating, so the children set is
+   * snapshotted before the loop.
+   */
+  private _flipDescendants(cardId: CardId, toDown: boolean): void {
+    const oppositeIndex = toDown ? stacked_up_children : stacked_down_children;
+    const flipFn        = toDown ? stackClientCardDown : stackClientCardUp;
+
+    const queue: CardId[] = [cardId];
+    const seen  = new Set<CardId>([cardId]);
+
+    while (queue.length > 0) {
+      const current  = queue.shift()!;
+      const children = oppositeIndex.get(current);
+      if (!children || children.size === 0) continue;
+
+      const childIds = [...children];
+      for (const childId of childIds) {
+        if (seen.has(childId)) continue;
+        seen.add(childId);
+        flipFn(childId, current);
+        queue.push(childId);
+      }
+    }
   }
 
-  /** True if rootId already appears in destId's ancestor chain. */
-  private _isCycle(rootId: CardId, destId: CardId): boolean {
-    const seen = new Set<CardId>();
-    let current = destId;
-    let steps = 0;
-    while (current !== 0 && steps < MAX_CYCLE_DEPTH) {
-      if (current === rootId) return true;
-      if (seen.has(current))  return false;
-      seen.add(current);
-      const c = client_cards[current];
-      if (!c || c.stacked_on_id === 0) return false;
-      current = c.stacked_on_id;
-      steps++;
-    }
-    return false;
+  /**
+   * Mirrors Card.redraw's title-position logic: stacked_down forces bottom,
+   * stacked_up forces top, otherwise the definition's title_on_bottom flag.
+   */
+  private _effectiveTitleOnBottom(cardId: CardId): boolean {
+    const c = client_cards[cardId];
+    if (!c) return false;
+    if (c.stacked_down) return true;
+    if (c.stacked_up)   return false;
+    return getDefinitionByPacked(c.packed_definition)?.title_on_bottom ?? false;
   }
 
   /**
