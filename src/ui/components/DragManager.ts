@@ -311,6 +311,7 @@ export class DragManager extends LayoutObject {
     const dragId = hitCard.getCardId();
     const card   = client_cards[dragId];
     if (!card)                                      return;
+    if (card.dead)                                  return;
     if (!isDraggableCardType(card.card_type))       return;
     if (card.position_locked || card.position_hold) return;
 

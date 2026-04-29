@@ -129,7 +129,7 @@ export function bootstrap(): void {
     { card_id: 11, macro_location: panel_macro, micro_location: packMicroPixel(   0, 0), owner_id: 1, flags: CARD_FLAG_STACKABLE,  packed_definition: packDefinition(4, 0, 1), data: BigInt(soul_card_id), data2: 0n },
 
     // Inventory: Vitality (Faculty / def 5) — fleeting: start=now, end=now+20s
-    { card_id: 14, macro_location: panel_macro, micro_location: packMicroPixel( 270, 0), owner_id: 1, flags: S, packed_definition: packDefinition(2, 0, 5), data: BigInt(now_s) | (BigInt(now_s + 20) << 32n), data2: 0n },
+    { card_id: 14, macro_location: panel_macro, micro_location: packMicroPixel( 270, 0), owner_id: 1, flags: S, packed_definition: packDefinition(2, 0, 5), data: BigInt(now_s) | (BigInt(now_s + 5) << 32n), data2: 0n },
   ];
 
   // ─── Players ───────────────────────────────────────────────────────────────

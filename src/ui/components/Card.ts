@@ -1,8 +1,8 @@
-import { Graphics, Point, Sprite, Text, Texture } from "pixi.js";
+import { Container, Graphics, ParticleContainer, Sprite, Text, Texture } from "pixi.js";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
-import { client_cards, type CardId } from "@/spacetime/Data";
+import { client_cards, type CardId, type ClientCard } from "@/spacetime/Data";
 import { spacetime } from "@/spacetime/SpacetimeManager";
-import { ParticleManager } from "@/ui/effects/ParticleManager";
+import { type ParticleHandle, ParticleManager } from "@/ui/effects/ParticleManager";
 import {
   getDefinitionByPacked,
   getEffectiveTitleOnBottom,
@@ -68,9 +68,20 @@ export class Card extends LayoutObject {
   private _deathStartTime: number | null = null;
   private _unlisten:       (() => void) | null = null;
 
-  private readonly _bg     = new Graphics();
-  private readonly _sprite = new Sprite({ texture: Texture.EMPTY });
-  private readonly _label  = new Text({ text: "" });
+  private readonly _content           = new Container();
+  private readonly _bg                = new Graphics();
+  private readonly _sprite            = new Sprite({ texture: Texture.EMPTY });
+  private readonly _label             = new Text({ text: "" });
+  private readonly _clipMask          = new Graphics();
+  private readonly _particleContainer = new ParticleContainer({
+    dynamicProperties: {
+      position: true,
+      rotation: true,
+      scale: true,
+      color: true
+    }
+  });
+  private          _particleHandle:     ParticleHandle | null = null;
 
   constructor(options: CardOptions = {}) {
     super({ hitSelf: true, ...options });
@@ -86,16 +97,20 @@ export class Card extends LayoutObject {
     this._sprite.visible = false;
     this._label.anchor.set(0.5);
 
-    // z-order: background → sprite → label
-    this.addDisplay(this._bg);
-    this.addDisplay(this._sprite);
-    this.addDisplay(this._label);
+    // _content holds all card visuals; _clipMask is a sibling so it isn't
+    // clipped by itself when used as _content's mask.
+    this._content.addChild(this._bg, this._sprite, this._label);
+    this.addDisplay(this._content);
+    this.addDisplay(this._clipMask);
+    this.addDisplay(this._particleContainer);
 
     if (this._card_id) this._registerListener();
     this.invalidateRender();
   }
 
   override destroy(options?: Parameters<InstanceType<typeof LayoutObject>["destroy"]>[0]): void {
+    this._particleHandle?.destroy();
+    this._particleHandle = null;
     this._unlisten?.();
     this._unlisten = null;
     super.destroy(options);
@@ -104,9 +119,11 @@ export class Card extends LayoutObject {
   setCardId(card_id: CardId): void {
     if (this._card_id === card_id) return;
     this._unlisten?.();
-    this._unlisten      = null;
-    this._card_id       = card_id;
-    this._deathStartTime = null;
+    this._unlisten       = null;
+    this._card_id        = card_id;
+    this._particleHandle?.destroy();
+    this._particleHandle  = null;
+    this._deathStartTime  = null;
     if (card_id) this._registerListener();
     this.invalidateRender();
   }
@@ -159,28 +176,13 @@ export class Card extends LayoutObject {
     }
 
     if (card.dead === 1) {
-      if (this._deathStartTime === null) {
-        this._deathStartTime = Date.now();
-        const pm = ParticleManager.getInstance();
-        if (pm) {
-          const { x, y, width, height } = this.innerRect;
-          const pt = this.toGlobal(new Point(x + width / 2, y + height / 2));
-          pm.spawn("pop", { x: pt.x, y: pt.y });
-        }
-      }
-      const t = Math.min(1, (Date.now() - this._deathStartTime) / DEATH_FADE_MS);
-      this.alpha = 1 - t;
-      if (t < 1) {
-        this.invalidateRender();
-      } else {
-        card.dead = 2;
-        spacetime.notifyCardListeners(this._card_id);
-      }
+      this._redrawDeath(card);
       return;
     }
 
-    this.visible = true;
-    this.alpha   = 1;
+    this.visible       = true;
+    this.alpha         = 1;
+    this._content.mask = null;
 
     const definition = getDefinitionByPacked(card.packed_definition);
     const colors     = definition?.style?.color ?? [];
@@ -261,6 +263,42 @@ export class Card extends LayoutObject {
       this._sprite.scale.set(scale);
       this._sprite.x = x + width / 2;
       this._sprite.y = bodyY + bodyH / 2;
+    }
+  }
+
+  // ─── Death animation ─────────────────────────────────────────────────────
+
+  private _redrawDeath(card: ClientCard): void {
+    if (this._deathStartTime === null) {
+      this._deathStartTime = Date.now();
+      const pm = ParticleManager.getInstance();
+      if (pm) {
+        const def        = getDefinitionByPacked(card.packed_definition);
+        const bodyColor  = parseColor(def?.style?.color?.[0]) ?? DEFAULT_BODY_COLOR;
+        const startColor = bodyColor.toString(16).padStart(6, "0");
+        this._particleHandle = pm.createEmitter(this._particleContainer, "burn_up", { startColor });
+      }
+    }
+
+    const t = Math.min(2, (Date.now() - this._deathStartTime) / DEATH_FADE_MS);
+    this._animateDeath(t);
+
+    if (t < 2) {
+      this.invalidateRender();
+    } else {
+      card.dead = 2;
+      spacetime.notifyCardListeners(this._card_id);
+    }
+  }
+
+  private _animateDeath(t: number): void {
+    if (t <= 1) {
+      const { x, y, width, height } = this.innerRect;
+      this._particleContainer.position.set(x + width / 2, y + height * (1 - t));
+      this._clipMask.clear().rect(x, y - 5, width, (5 + height) * (1 - t)).fill(0xffffff);
+      this._content.mask = this._clipMask;
+    } else {
+      this._particleHandle?.stop();
     }
   }
 

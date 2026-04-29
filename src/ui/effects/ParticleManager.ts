@@ -1,5 +1,5 @@
 import { Assets, ParticleContainer, Texture } from "pixi.js";
-import { Emitter, upgradeConfig } from "@spd789562/particle-emitter";
+import { type EmitterConfigV3, Emitter, upgradeConfig } from "@spd789562/particle-emitter";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 
 // Eagerly load all effect JSON configs from the effects folder.
@@ -24,7 +24,7 @@ const DEFAULT_TEXTURE_URL = new URL(
 // ─── Public types ─────────────────────────────────────────────────────────────
 
 export interface SpawnOptions {
-  /** Position in the ParticleManager's local coordinate space. */
+  /** Position in the ParticleManager's local coordinate space (spawn() only). */
   x?: number;
   y?: number;
   /**
@@ -37,6 +37,10 @@ export interface SpawnOptions {
    * (loaded by init()) or Texture.WHITE if init() hasn't resolved yet.
    */
   textures?: Texture[];
+  /** Override the start color of the color behavior (6-digit hex, with or without #). */
+  startColor?: string;
+  /** Override the end color of the color behavior (6-digit hex, with or without #). */
+  endColor?: string;
 }
 
 export interface ParticleHandle {
@@ -63,10 +67,13 @@ export interface ParticleManagerOptions extends LayoutObjectOptions {
 // ─── Internal ─────────────────────────────────────────────────────────────────
 
 interface ActiveEntry {
-  emitter:   Emitter;
-  container: ParticleContainer;
-  /** maxParticles declared by the effect's JSON config. */
-  desired:   number;
+  emitter:       Emitter;
+  container:     ParticleContainer;
+  desired:       number;
+  /** When false the container is owned externally; tick() and destroy() skip destroying it. */
+  ownsContainer: boolean;
+  /** Set by _createHandle so tick/destroy can mark the handle done when they reap the entry. */
+  onReap?:       () => void;
 }
 
 // ─── ParticleManager ──────────────────────────────────────────────────────────
@@ -80,9 +87,11 @@ interface ActiveEntry {
  *   app.ticker.add(e => pm.tick(e.deltaMS));          // wire up the ticker
  *   scene.addLayoutChild(pm);
  *
+ *   // Overlay effect — ParticleManager owns the container:
  *   const handle = pm.spawn("smoke", { x: 200, y: 100 });
- *   handle.stop();   // stops emission; particles drain naturally
- *   handle.destroy() // removes immediately
+ *
+ *   // Card-attached effect — caller owns the container:
+ *   const handle = pm.createEmitter(card.particleContainer, "smoke");
  */
 export class ParticleManager extends LayoutObject {
   private static _instance: ParticleManager | null = null;
@@ -102,8 +111,9 @@ export class ParticleManager extends LayoutObject {
   override destroy(options?: Parameters<LayoutObject["destroy"]>[0]): void {
     if (ParticleManager._instance === this) ParticleManager._instance = null;
     for (const entry of this._active) {
+      entry.onReap?.();
       entry.emitter.destroy();
-      entry.container.destroy({ children: true });
+      if (entry.ownsContainer) entry.container.destroy({ children: true });
     }
     this._active = [];
     super.destroy(options);
@@ -129,42 +139,127 @@ export class ParticleManager extends LayoutObject {
   }
 
   /**
-   * Spawn a named particle effect.
-   *
-   * @param name  File name without path or extension
-   *              (e.g. "smoke" → assets/effects/json/smoke.json)
+   * Spawn a named effect into the ParticleManager's own overlay container.
+   * ParticleManager owns the ParticleContainer and destroys it when done.
    */
   spawn(name: string, opts: SpawnOptions = {}): ParticleHandle {
+    const { v3config, rawConfig } = this._prepareConfig(name, opts);
+    const container = new ParticleContainer();
+    container.position.set(opts.x ?? 0, opts.y ?? 0);
+    this.addChild(container);
+    return this._createHandle(rawConfig, v3config, container, true, opts.lifetime);
+  }
+
+  /**
+   * Create an emitter against an externally-owned ParticleContainer (e.g. one
+   * that is a direct child of a Card).  ParticleManager tracks the emitter for
+   * budget purposes but never destroys the container — the caller is responsible.
+   */
+  createEmitter(
+    container: ParticleContainer,
+    name:      string,
+    opts:      Omit<SpawnOptions, "x" | "y"> = {},
+  ): ParticleHandle {
+    const { v3config, rawConfig } = this._prepareConfig(name, opts);
+    return this._createHandle(rawConfig, v3config, container, false, opts.lifetime);
+  }
+
+  /**
+   * Advance all active emitters and reap finished ones.
+   * Wire up to the application ticker:
+   *   app.ticker.add(elapsed => particleManager.tick(elapsed.deltaMS));
+   */
+  tick(deltaMS: number): void {
+    if (this._active.length === 0) return;
+
+    const deltaS = deltaMS / 1000;
+    let reaped = false;
+
+    for (let i = this._active.length - 1; i >= 0; i--) {
+      const entry = this._active[i];
+      entry.emitter.update(deltaS);
+
+      if (!entry.emitter.emit && entry.emitter.particleCount === 0) {
+        entry.onReap?.();
+        entry.emitter.destroy();
+        if (entry.ownsContainer) entry.container.destroy({ children: true });
+        this._active.splice(i, 1);
+        reaped = true;
+      }
+    }
+
+    if (reaped) this._rebalanceBudget();
+  }
+
+  // ─── Private ─────────────────────────────────────────────────────────────
+
+  private _prepareConfig(
+    name: string,
+    opts: Omit<SpawnOptions, "x" | "y">,
+  ): { v3config: EmitterConfigV3; rawConfig: Record<string, unknown> } {
     const rawConfig = _configByName.get(name);
     if (!rawConfig) {
       throw new Error(
         `ParticleManager: effect "${name}" not found — add ${name}.json to assets/effects/json/`,
       );
     }
-
     const textures = opts.textures
       ?? (this._defaultTexture ? [this._defaultTexture] : [Texture.WHITE]);
-
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const v3config = upgradeConfig(rawConfig as any, textures);
+    this._patchColors(v3config, opts);
+    return { v3config, rawConfig };
+  }
 
-    const container = new ParticleContainer();
-    container.position.set(opts.x ?? 0, opts.y ?? 0);
-    this.addChild(container);
+  private _patchColors(
+    v3config: EmitterConfigV3,
+    opts:     { startColor?: string; endColor?: string },
+  ): void {
+    if (opts.startColor === undefined && opts.endColor === undefined) return;
+    for (const behavior of v3config.behaviors) {
+      if (behavior.type === "color") {
+        const list = (behavior.config.color?.list ?? []) as Array<{ value: string; time: number }>;
+        behavior.config = {
+          ...behavior.config,
+          color: {
+            ...behavior.config.color,
+            list: list.map((step: { value: string; time: number }) => {
+              if (step.time === 0 && opts.startColor !== undefined)
+                return { ...step, value: opts.startColor.replace(/^#/, "") };
+              if (step.time === 1 && opts.endColor !== undefined)
+                return { ...step, value: opts.endColor.replace(/^#/, "") };
+              return step;
+            }),
+          },
+        };
+        return;
+      }
+      if (behavior.type === "colorStatic" && opts.startColor !== undefined) {
+        behavior.config = { ...behavior.config, color: opts.startColor.replace(/^#/, "") };
+        return;
+      }
+    }
+  }
 
+  private _createHandle(
+    rawConfig:     Record<string, unknown>,
+    v3config:      EmitterConfigV3,
+    container:     ParticleContainer,
+    ownsContainer: boolean,
+    lifetime?:     number,
+  ): ParticleHandle {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const emitter = new Emitter(container as any, v3config);
-    if (opts.lifetime !== undefined) {
-      emitter.emitterLifetime = opts.lifetime;
-    }
+    if (lifetime !== undefined) emitter.emitterLifetime = lifetime;
     emitter.emit = true;
 
     const desired = (rawConfig.maxParticles as number | undefined) ?? 100;
-    const entry: ActiveEntry = { emitter, container, desired };
+    const entry: ActiveEntry = { emitter, container, desired, ownsContainer };
     this._active.push(entry);
     this._rebalanceBudget();
 
     let destroyed = false;
+    entry.onReap = () => { destroyed = true; };
 
     const cleanup = (): void => {
       const idx = this._active.indexOf(entry);
@@ -187,43 +282,12 @@ export class ParticleManager extends LayoutObject {
         if (destroyed) return;
         destroyed = true;
         emitter.destroy();
-        container.destroy({ children: true });
+        if (ownsContainer) container.destroy({ children: true });
         cleanup();
       },
     };
   }
 
-  /**
-   * Advance all active emitters and reap finished ones.
-   * Wire up to the application ticker:
-   *   app.ticker.add(elapsed => particleManager.tick(elapsed.deltaMS));
-   */
-  tick(deltaMS: number): void {
-    if (this._active.length === 0) return;
-
-    const deltaS = deltaMS / 1000;
-    let reaped = false;
-
-    for (let i = this._active.length - 1; i >= 0; i--) {
-      const entry = this._active[i];
-      entry.emitter.update(deltaS);
-
-      if (!entry.emitter.emit && entry.emitter.particleCount === 0) {
-        entry.emitter.destroy();
-        entry.container.destroy({ children: true });
-        this._active.splice(i, 1);
-        reaped = true;
-      }
-    }
-
-    if (reaped) this._rebalanceBudget();
-  }
-
-  /**
-   * Distribute the global maxParticles budget across all active emitters
-   * proportionally to each emitter's configured desired count.  When total
-   * desired ≤ budget every emitter gets its full allocation unchanged.
-   */
   private _rebalanceBudget(): void {
     if (this._active.length === 0) return;
 
