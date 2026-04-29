@@ -124,7 +124,8 @@ export class CardStack extends LayoutObject {
     // immediately so layout calculations that read outerRect/innerRect
     // (Inventory's clamp / push, debug visualisation) see the correct
     // extent without waiting for the recursive updateLayoutChildren pass.
-    this._growRect();
+    // Use the cached chains — no re-walk needed here.
+    this._growRect(this._upChain, this._downChain);
   }
 
   /**
@@ -195,7 +196,7 @@ export class CardStack extends LayoutObject {
     // Register/unregister listeners for the full current chain.
     this._syncChainListeners(new Set([this._rootCardId, ...upChain, ...downChain]));
 
-    this._growRect();
+    this._growRect(upChain, downChain);
 
     const upCount   = this._upCards.length;
     const downCount = this._downCards.length;
@@ -237,7 +238,7 @@ export class CardStack extends LayoutObject {
    * mutation avoids setOrigin, which would fire invalidateLayout and create
    * a layout cycle with the parent.
    */
-  private _growRect(): void {
+  private _growRect(upChain: CardId[], downChain: CardId[]): void {
     if (this._rootCardId === 0) {
       this.outerRect.y      = 0;
       this.outerRect.height = 0;
@@ -245,8 +246,6 @@ export class CardStack extends LayoutObject {
       this.innerRect.height = 0;
       return;
     }
-    const upChain   = this._walkBranch(stacked_up_children);
-    const downChain = this._walkBranch(stacked_down_children);
     const step      = this._titleHeight + this._titleGap;
     const upExtra   = upChain.length   * step;
     const downExtra = downChain.length * step;

@@ -360,9 +360,6 @@ export class DragManager extends LayoutObject {
 
       const card = client_cards[rootId];
       if (!card) {
-        // This should be done in updateLayoutChildren
-        // but can exist here because !card
-        this._removeEntry(rootId, entry);
         any = true;
         continue;
       }
@@ -372,8 +369,6 @@ export class DragManager extends LayoutObject {
       const invalidate = this._performDrop(card, rootId, entry, target);
       if (invalidate !== null) {
         card.dragging = false;
-        // Incorrect this should be done in updateLayoutChildren
-        // this._removeEntry(rootId, entry);
         this._invalidateSource(entry.source);
         if (!invalidate.destroyed) invalidate.invalidateLayout();
       }
@@ -490,13 +485,10 @@ export class DragManager extends LayoutObject {
 
   private _dropInvalid(rootId: CardId, entry: Entry): void {
     const card = client_cards[rootId];
-    // This should be done in updateLayoutChildren
-    // but can exist here because !card
-    if (!card) { this._removeEntry(rootId, entry); return; }
+    if (!card) return;
     card.dragging      = false;
     card.animating     = true;
     entry.returnTarget = { x: entry.returnOrigin.x, y: entry.returnOrigin.y };
-    // No destination — _finishAnim's default cleanup is the desired behavior.
   }
 
   // ─── Tween completion ────────────────────────────────────────────────────
@@ -506,12 +498,13 @@ export class DragManager extends LayoutObject {
     if (!entry) return;
     const card = client_cards[rootId];
     if (card) card.animating = false;
-    // Incorrect this should be done in updateLayoutChildren
-    // this._removeEntry(rootId, entry);
     this._invalidateSource(entry.source);
     if (entry.destination && !entry.destination.destroyed) {
       entry.destination.invalidateLayout();
     }
+    // Animating flag cleared — schedule a layout pass so updateLayoutChildren
+    // removes the entry promptly rather than waiting for the next unrelated invalidation.
+    this.invalidateLayout();
   }
 
   // ─── Drop-target helpers ─────────────────────────────────────────────────

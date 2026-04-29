@@ -239,6 +239,7 @@ export class ParticleManager extends LayoutObject {
         return;
       }
     }
+    console.warn("ParticleManager._patchColors: no color or colorStatic behavior found — startColor/endColor overrides ignored.");
   }
 
   private _createHandle(
