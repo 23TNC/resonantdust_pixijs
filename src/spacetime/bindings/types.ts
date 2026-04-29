@@ -31,6 +31,7 @@ export const Card = __t.object("Card", {
   flags: __t.u16(),
   packedDefinition: __t.u16(),
   data: __t.u64(),
+  data2: __t.u64(),
 });
 export type Card = __Infer<typeof Card>;
 

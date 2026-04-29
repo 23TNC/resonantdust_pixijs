@@ -5,6 +5,7 @@ import {
   moveClientCard,
   packMacroPanel,
   packMicroPixel,
+  viewed_id,
   type CardId,
   type MicroLocation,
 } from "@/spacetime/Data";
@@ -14,7 +15,6 @@ import { CardStack } from "./CardStack";
 
 export interface InventoryOptions extends LayoutObjectOptions {
   observer_id:   CardId;
-  viewed_id:     CardId;
   card_types:    number[];
   /** z layer that identifies this surface type. 1 = inventory (default). */
   z?:            number;
@@ -71,7 +71,6 @@ const GRID_FADE_THRESHOLD = 0.005;
  */
 export class Inventory extends LayoutObject {
   private readonly _observerId:  CardId;
-  private          _viewedId:    CardId;
   private readonly _cardTypeSet: Set<number>;
   private readonly _z:           number;
   private readonly _titleHeight: number;
@@ -103,7 +102,6 @@ export class Inventory extends LayoutObject {
   constructor(options: InventoryOptions) {
     super({ hitSelf: true, ...options });
     this._observerId  = options.observer_id;
-    this._viewedId    = options.viewed_id;
     this._cardTypeSet = new Set(options.card_types);
     this._z           = options.z           ?? DEFAULT_Z;
     this._titleHeight = options.titleHeight ?? DEFAULT_TITLE_H;
@@ -143,13 +141,7 @@ export class Inventory extends LayoutObject {
 
   // ─── Public API ──────────────────────────────────────────────────────────
 
-  setViewedId(viewedId: CardId): void {
-    if (this._viewedId === viewedId) return;
-    this._viewedId = viewedId;
-    this.invalidateLayout();
-  }
-
-  getViewedId(): CardId { return this._viewedId; }
+  getViewedId(): CardId { return viewed_id; }
   getObserverId(): CardId { return this._observerId; }
 
   /** Return a random grid-aligned MicroLocation within the current inventory bounds. Falls back to (0,0). */
@@ -350,7 +342,7 @@ export class Inventory extends LayoutObject {
 
   private _findRoots(): Set<CardId> {
     const roots = new Set<CardId>();
-    const ids   = macro_location_cards.get(packMacroPanel(this._viewedId, this._z));
+    const ids   = macro_location_cards.get(packMacroPanel(viewed_id, this._z));
     if (!ids) return roots;
 
     for (const card_id of ids) {
@@ -434,7 +426,7 @@ export class Inventory extends LayoutObject {
 
   /** Round float positions to integers and write pixel_x/pixel_y back into client_cards. */
   private _writeBack(): void {
-    const macro = packMacroPanel(this._viewedId, this._z);
+    const macro = packMacroPanel(viewed_id, this._z);
     for (const [id, pos] of this._floatPos) {
       const card = client_cards[id];
       if (!card) continue;

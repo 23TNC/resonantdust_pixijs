@@ -12,6 +12,7 @@ import {
   type CardId,
   type MacroLocation,
 } from "@/spacetime/Data";
+import { spacetime } from "@/spacetime/SpacetimeManager";
 import { LayoutObject } from "@/ui/layout/LayoutObject";
 import { LayoutViewport, type LayoutViewportOptions } from "@/ui/layout/LayoutViewport";
 import {
@@ -91,8 +92,12 @@ export class World extends LayoutViewport {
   private readonly _cardHeight:  number;
   private readonly _stackWidth:  number;
 
-  private readonly _zones  = new Map<MacroLocation, Zone>();
-  private readonly _stacks = new Map<CardId, CardStack>();
+  private readonly _zones           = new Map<MacroLocation, Zone>();
+  private readonly _stacks          = new Map<CardId, CardStack>();
+  private readonly _subscribedZones = new Set<MacroLocation>();
+  private readonly _unlistenZones:  () => void;
+  private          _zonesDirty     = true;
+  private          _radiusDirty    = false;
 
   // ─── Overlay index ───────────────────────────────────────────────────────
   // Non-zone layout children (players, moving cards …) registered by the world
@@ -135,15 +140,20 @@ export class World extends LayoutViewport {
       this._input.on("left_drag_move",  this._boundPanMove);
       this._input.on("left_drag_end",   this._boundPanEnd);
     }
+
+    this._unlistenZones = spacetime.registerZoneListener(() => { this._zonesDirty = true; });
   }
 
   override destroy(options?: Parameters<LayoutObject["destroy"]>[0]): void {
+    this._unlistenZones();
     if (this._input) {
       this._input.off("left_down",       this._boundPanDown);
       this._input.off("left_drag_start", this._boundPanStart);
       this._input.off("left_drag_move",  this._boundPanMove);
       this._input.off("left_drag_end",   this._boundPanEnd);
     }
+    for (const macro of this._subscribedZones) spacetime.releaseZone(this, macro);
+    this._subscribedZones.clear();
     super.destroy(options);
   }
 
@@ -168,7 +178,9 @@ export class World extends LayoutViewport {
   setZ(z: number): void {
     if (this._z === z) return;
     this._z = z;
-    this.syncZones();
+    this._zonesDirty = true;
+    this._subscribeVisibleZones();
+    this.invalidateLayout();
   }
 
   getZ(): number { return this._z; }
@@ -176,6 +188,7 @@ export class World extends LayoutViewport {
   setTileRadius(R: number): void {
     if (this._tileRadius === R) return;
     this._tileRadius = R;
+    this._radiusDirty = true;
     this.invalidateLayout();
   }
 
@@ -183,33 +196,7 @@ export class World extends LayoutViewport {
 
   // ─── Zone management ─────────────────────────────────────────────────────
 
-  /**
-   * Synchronise Zone children with client_zones for the current z layer.
-   * Call after any zone is added, removed, or if the z layer changes.
-   */
   syncZones(): void {
-    const active = new Set<MacroLocation>();
-
-    for (const [macro, data] of client_zones) {
-      if (data.layer !== this._z) continue;
-
-      active.add(macro);
-
-      if (!this._zones.has(macro)) {
-        const zone = new Zone({ zone_id: macro });
-        this._zones.set(macro, zone);
-        this.addLayoutChild(zone);
-      }
-    }
-
-    // Remove zones absent from client_zones or on a different z layer.
-    for (const [macro, zone] of this._zones) {
-      if (!active.has(macro)) {
-        this.removeLayoutChild(zone);
-        this._zones.delete(macro);
-      }
-    }
-
     this.invalidateLayout();
   }
 
@@ -265,6 +252,52 @@ export class World extends LayoutViewport {
     const cx = world_q * SQRT3 * R + ((world_r & 1) !== 0 ? SQRT3 / 2 * R : 0);
     const cy = world_r * 1.5 * R;
     this.centerOn(cx, cy);
+    this._subscribeVisibleZones();
+  }
+
+  // ─── Private ─────────────────────────────────────────────────────────────
+
+  /**
+   * Subscribe to every zone whose pixel bounds overlap the current viewport.
+   * Uses a ±1 zone margin so zones partially off-screen are still fetched.
+   * Already-subscribed zones are skipped. Holds are released in destroy().
+   */
+  private _subscribeVisibleZones(): void {
+    const R    = this._tileRadius;
+    const hexW = SQRT3 * R;
+    if (R <= 0 || this.innerRect.width === 0) return;
+
+    const cam = this.getCamera();
+    const vw  = this.innerRect.width;
+    const vh  = this.innerRect.height;
+
+    // Zone (zq, zr) pixel bounds (from updateLayoutChildren):
+    //   x: [(zq*8 - 0.5)*hexW,  (zq*8 + 8)*hexW]
+    //   y: [(zr*12 - 1)*R,      (zr*12 + 11.5)*R]
+    const zone_q_min = Math.floor( cam.x            / (8 * hexW)) - 1;
+    const zone_q_max = Math.floor((cam.x + vw)      / (8 * hexW)) + 1;
+    const zone_r_min = Math.floor( cam.y            / (12 * R))   - 1;
+    const zone_r_max = Math.floor((cam.y + vh)      / (12 * R))   + 1;
+
+    for (let zq = zone_q_min; zq <= zone_q_max; zq++) {
+      for (let zr = zone_r_min; zr <= zone_r_max; zr++) {
+        const macro = packMacroWorld(zq, zr, this._z);
+        if (this._subscribedZones.has(macro)) continue;
+        this._subscribedZones.add(macro);
+        spacetime.subscribeZone(this, macro);
+      }
+    }
+  }
+
+  private _placeZone(macro: MacroLocation, zone: Zone, R: number, hexW: number): void {
+    const zone_q = zoneQFromMacro(macro);
+    const zone_r = zoneRFromMacro(macro);
+    zone.setLayout(
+      (zone_q * ZONE_SIZE - 0.5) * hexW,
+      (zone_r * ZONE_SIZE * 1.5 - 1) * R,
+      8.5 * hexW,
+      12.5 * R,
+    );
   }
 
   // ─── Layout ──────────────────────────────────────────────────────────────
@@ -274,12 +307,30 @@ export class World extends LayoutViewport {
     const hexW = SQRT3 * R;
 
     // ── Zones ────────────────────────────────────────────────────────────
-    for (const [macro, zone] of this._zones) {
-      const zone_q = zoneQFromMacro(macro);
-      const zone_r = zoneRFromMacro(macro);
-      const px = (zone_q * ZONE_SIZE - 0.5)       * hexW;
-      const py = (zone_r * ZONE_SIZE * 1.5 - 1)   * R;
-      zone.setLayout(px, py, 8.5 * hexW, 12.5 * R);
+    if (this._zonesDirty) {
+      this._zonesDirty = false;
+      const active = new Set<MacroLocation>();
+      for (const [macro, data] of client_zones) {
+        if (data.layer !== this._z) continue;
+        active.add(macro);
+        if (!this._zones.has(macro)) {
+          const zone = new Zone({ zone_id: macro });
+          this._zones.set(macro, zone);
+          this.addLayoutChild(zone);
+          this._placeZone(macro, zone, R, hexW);
+        }
+      }
+      for (const [macro, zone] of this._zones) {
+        if (!active.has(macro)) {
+          this.removeLayoutChild(zone);
+          this._zones.delete(macro);
+        }
+      }
+    }
+
+    if (this._radiusDirty) {
+      this._radiusDirty = false;
+      for (const [macro, zone] of this._zones) this._placeZone(macro, zone, R, hexW);
     }
 
     // ── Card stacks ──────────────────────────────────────────────────────
@@ -491,5 +542,6 @@ export class World extends LayoutViewport {
 
   private _onPanEnd(_data: InputActionData): void {
     this._panning = false;
+    this._subscribeVisibleZones();
   }
 }

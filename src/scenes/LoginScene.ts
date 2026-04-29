@@ -1,25 +1,23 @@
 import { LayoutRoot } from "@/ui/layout/LayoutRoot";
-import { setPlayerId, setPlayerName } from "@/spacetime/Data";
-import { bootstrap } from "@/spacetime/DebugData";
+import { spacetime } from "@/spacetime/SpacetimeManager";
+import { type ServerPlayer, setPlayerId, type PlayerId } from "@/spacetime/Data";
 import { SceneManager } from "./SceneManager";
 import { GameScene } from "./GameScene";
 
-/**
- * Stub login scene. Sets player credentials, loads the debug data snapshot,
- * then hands off to GameScene before the first frame is painted.
- *
- * queueMicrotask defers the scene switch until after this scene is fully
- * registered with SceneManager, avoiding a setScene-within-setScene call.
- * The transition happens before any rendering, so LoginScene is never visible.
- */
+const SPACETIME_URI    = "ws://localhost:3000";
+const SPACETIME_MODULE = "resonantdust-dev";
+
 export class LoginScene extends LayoutRoot {
   constructor(sceneManager: SceneManager) {
     super();
 
-    setPlayerName("player1");
-    setPlayerId(1);
-    bootstrap();
+    const unwatch = spacetime.registerPlayerListener("player1", (player: ServerPlayer) => {
+      unwatch();
+      setPlayerId(player.player_id as PlayerId);
+      sceneManager.setScene(new GameScene(player));
+    });
 
-    queueMicrotask(() => sceneManager.setScene(new GameScene()));
+    spacetime.onConnected(() => spacetime.subscribePlayer(this, "player1"));
+    spacetime.connect(SPACETIME_URI, SPACETIME_MODULE);
   }
 }

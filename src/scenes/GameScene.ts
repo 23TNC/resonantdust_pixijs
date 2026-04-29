@@ -1,20 +1,25 @@
 import { GameView } from "@/ui/components/GameView";
+import {
+  type ServerPlayer,
+  setSoulId, setObserverId,
+  type CardId,
+  ZONE_SIZE,
+  zoneQFromMacro, zoneRFromMacro,
+  localQFromMicro, localRFromMicro,
+} from "@/spacetime/Data";
+import { spacetime } from "@/spacetime/SpacetimeManager";
 
-/**
- * Main game scene. Extends GameView so it IS the layout root — SceneManager
- * adds it directly to the stage and ticks it each frame.
- *
- * The constructor forces one layout pass before centring the camera so that
- * World.innerRect has valid dimensions when centerOnHex computes the initial
- * pan offset.
- *
- * SpacetimeDB subscriptions will be established here once the connection
- * layer exists.  For now, bootstrap() in LoginScene populates client tables.
- */
 export class GameScene extends GameView {
-  constructor() {
+  constructor(player: ServerPlayer) {
     super();
+    setSoulId(player.soul_id as CardId);
+    setObserverId(player.soul_id as CardId);
+    spacetime.setViewedSoul(this, player.soul_id as CardId);
+
+    const world_q = zoneQFromMacro(player.macro_location) * ZONE_SIZE + localQFromMicro(player.micro_location);
+    const world_r = zoneRFromMacro(player.macro_location) * ZONE_SIZE + localRFromMicro(player.micro_location);
+
     this.tick();
-    this.centerCameraOnViewedSoul();
+    this.getWorld().centerOnHex(world_q, world_r);
   }
 }

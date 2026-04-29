@@ -93,7 +93,7 @@ export class GameView extends LayoutRoot {
 
     // ── Right column ───────────────────────────────────────────────────────
     this._inventory = new Inventory({
-      observer_id, viewed_id,
+      observer_id,
       card_types:  [1, 2, 3, 4],
       stackWidth:  CARD_W,
       cardHeight:  CARD_H,

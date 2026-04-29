@@ -56,6 +56,7 @@ import StackCardUpReducer from "./stack_card_up_reducer";
 import StartActionReducer from "./start_action_reducer";
 import UnstackCardReducer from "./unstack_card_reducer";
 import UpdateCardDataReducer from "./update_card_data_reducer";
+import UpdateCardData2Reducer from "./update_card_data_2_reducer";
 import UpdateCardFlagsReducer from "./update_card_flags_reducer";
 import UpdateCardLocationReducer from "./update_card_location_reducer";
 import UpdateCardMicroLocationReducer from "./update_card_micro_location_reducer";
@@ -173,6 +174,7 @@ const reducersSchema = __reducers(
   __reducerSchema("start_action", StartActionReducer),
   __reducerSchema("unstack_card", UnstackCardReducer),
   __reducerSchema("update_card_data", UpdateCardDataReducer),
+  __reducerSchema("update_card_data_2", UpdateCardData2Reducer),
   __reducerSchema("update_card_flags", UpdateCardFlagsReducer),
   __reducerSchema("update_card_location", UpdateCardLocationReducer),
   __reducerSchema("update_card_micro_location", UpdateCardMicroLocationReducer),
