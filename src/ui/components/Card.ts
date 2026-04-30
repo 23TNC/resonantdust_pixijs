@@ -2,7 +2,7 @@ import { Container, Graphics, ParticleContainer, Sprite, Text, Texture } from "p
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import {
   client_cards, client_actions,
-  getActionProgress, ACTION_FLAG_STARTED, ACTION_FLAG_COMPLETED,
+  getActionProgress, isActionRunning,
   type CardId, type ClientCard,
 } from "@/spacetime/Data";
 import { spacetime } from "@/spacetime/SpacetimeManager";
@@ -10,8 +10,8 @@ import { type ParticleHandle, ParticleManager } from "@/ui/effects/ParticleManag
 import {
   getDefinitionByPacked,
   getEffectiveTitleOnBottom,
-  type CardStyle,
 } from "@/definitions/CardDefinitions";
+import { getRecipeByIndex } from "@/definitions/RecipeDefinitions";
 
 export interface CardOptions extends LayoutObjectOptions {
   card_id?:       CardId;
@@ -35,6 +35,13 @@ function parseColor(value: string | undefined): number | null {
   if (!value) return null;
   const hex = value.trim().replace(/^#/, "");
   return /^[0-9a-fA-F]{6}$/.test(hex) ? parseInt(hex, 16) : null;
+}
+
+interface BarInfo {
+  progress:   number;
+  dir:        "ltr" | "rtl";
+  leftColor:  number;
+  rightColor: number;
 }
 
 /**
@@ -198,7 +205,6 @@ export class Card extends LayoutObject {
     const { x, y, width, height } = this.innerRect;
     const titleH = Math.min(this._titleHeight, height);
     const bodyH  = height - titleH;
-    const r      = this._radius;
 
     // Shared rule (see CardDefinitions.getEffectiveTitleOnBottom): stacked_down
     // forces bottom, stacked_up forces top, otherwise definition.title_on_bottom.
@@ -207,38 +213,67 @@ export class Card extends LayoutObject {
       ? getEffectiveTitleOnBottom(this._card_id)
       : this._titleOnBottom;
 
-    // titleY = top of the title strip; bodyY = top of the body area.
-    const titleY = titleOnBottom ? y + bodyH : y;
-    const bodyY  = titleOnBottom ? y : y + titleH;
+    const bodyY = titleOnBottom ? y : y + titleH;
 
     const now_seconds = Date.now() / 1000;
-    const activeAction = Object.values(client_actions).find(a =>
-      a.card_id === this._card_id &&
-      (a.flags & ACTION_FLAG_STARTED)   !== 0 &&
-      (a.flags & ACTION_FLAG_COMPLETED) === 0,
+    const active = Object.values(client_actions).filter(a =>
+      a.card_id === this._card_id && isActionRunning(a),
     );
-    const effectiveProgress = activeAction
-      ? getActionProgress(activeAction, now_seconds)
-      : this._progress;
 
-    if (activeAction) this.invalidateRender();
+    if (active.length > 0) this.invalidateRender();
+
+    let primary:   BarInfo | null = null;
+    let secondary: BarInfo | null = null;
+
+    if (active.length > 0) {
+      console.log()
+      const s0 = getRecipeByIndex(active[0].recipe)?.style;
+      primary = {
+        progress:   getActionProgress(active[0], now_seconds),
+        dir:        s0?.direction ?? "ltr",
+        leftColor:  (!s0?.leftColor  || s0.leftColor  === "default") ? titleColor : (parseColor(s0.leftColor)  ?? titleColor),
+        rightColor: (!s0?.rightColor || s0.rightColor === "default") ? titleColor : (parseColor(s0.rightColor) ?? titleColor),
+      };
+
+      console.log(primary.progress)
+
+      if (active.length >= 2) {
+        const s1 = getRecipeByIndex(active[1].recipe)?.style;
+        secondary = {
+          progress:   getActionProgress(active[1], now_seconds),
+          dir:        s1?.direction ?? "ltr",
+          leftColor:  (!s1?.leftColor  || s1.leftColor  === "default") ? titleColor : (parseColor(s1.leftColor)  ?? titleColor),
+          rightColor: (!s1?.rightColor || s1.rightColor === "default") ? titleColor : (parseColor(s1.rightColor) ?? titleColor),
+        };
+      }
+    } else if (this._progress !== null) {
+      primary = { progress: this._progress, dir: "ltr", leftColor: titleColor, rightColor: bodyColor };
+    }
+    
+    // Compute secondary bar height for label centering (mirrors _drawCard logic).
+    const clampedR   = Math.min(this._radius, width / 2, height / 2, titleH);
+    const secondaryH = secondary !== null
+      ? Math.min(Math.round(titleH / 3), Math.max(0, titleH - Math.ceil(clampedR) - 1))
+      : 0;
+    const primaryH    = titleH - secondaryH;
+    const primaryBarY = titleOnBottom ? y + height - primaryH : y;
 
     // ── Background ────────────────────────────────────────────────────────────
     this._bg.clear();
 
     this._drawCard(
-      x, y, width, height, titleH, r,
+      x, y, width, height, titleH, this._radius,
       [bodyColor, titleColor],
-      effectiveProgress,
       titleOnBottom,
-      definition?.style,
+      primary,
+      secondary,
     );
 
     // ── Title text ────────────────────────────────────────────────────────────
     this._label.text    = definition?.display_name ?? "";
     this._label.visible = titleH > 0;
     this._label.x       = x + width / 2;
-    this._label.y       = titleY + titleH / 2;
+    this._label.y       = primaryBarY + primaryH / 2;
     this._label.style   = {
       fill:       textColor,
       fontFamily: "Segoe UI",
@@ -310,9 +345,9 @@ export class Card extends LayoutObject {
     titleHeight:   number,
     radius:        number,
     colors:        number[],
-    progress:      number | null,
     titleOnBottom: boolean,
-    style:         CardStyle | undefined,
+    primary:       BarInfo | null,
+    secondary:     BarInfo | null,
   ): void {
     const bodyColor  = colors[0] ?? DEFAULT_BODY_COLOR;
     const titleColor = colors[1] ?? DEFAULT_TITLE_COLOR;
@@ -321,17 +356,19 @@ export class Card extends LayoutObject {
     this._bg.roundRect(x, y, width, height, r).fill({ color: bodyColor });
 
     if (titleHeight > 0) {
-      this._drawTitleBar(
-        x,
-        titleOnBottom ? y + height - titleHeight : y,
-        width,
-        titleHeight,
-        r,
-        titleColor,
-        progress,
-        titleOnBottom,
-        style,
-      );
+      const secondaryH = secondary !== null
+        ? Math.min(Math.round(titleHeight / 3), Math.max(0, titleHeight - Math.ceil(r) - 1))
+        : 0;
+      const primaryH = titleHeight - secondaryH;
+
+      const primaryY   = titleOnBottom ? y + height - primaryH   : y;
+      const secondaryY = titleOnBottom ? y + height - titleHeight : y + primaryH;
+
+      this._drawTitleBar(x, primaryY, width, primaryH, r, titleColor, primary, titleOnBottom);
+
+      if (secondary !== null && secondaryH > 0) {
+        this._drawSecondaryBar(x, secondaryY, width, secondaryH, secondary);
+      }
     }
 
     if (this._outlineWidth > 0) {
@@ -348,30 +385,35 @@ export class Card extends LayoutObject {
     height:        number,
     radius:        number,
     titleColor:    number,
-    progress:      number | null,
+    bar:           BarInfo | null,
     titleOnBottom: boolean,
-    style:         CardStyle | undefined,
   ): void {
-    if (progress === null) {
+    if (bar === null) {
       this._drawTitleSlice(x, y, width, height, radius, 0, width, titleColor, titleOnBottom);
       return;
     }
 
-    const colors    = style?.color ?? [];
-    const direction = style?.progress_direction ?? "ltr";
-    const swap      = style?.progress_swap      ?? false;
-
-    const colorA     = parseColor(colors[3]) ?? titleColor;
-    const colorB     = parseColor(colors[4]) ?? titleColor;
-    const leftColor  = swap ? colorB : colorA;
-    const rightColor = swap ? colorA : colorB;
-
-    const clamped   = Math.max(0, Math.min(1, progress));
-    const splitFrac = direction === "ltr" ? clamped : 1 - clamped;
+    const clamped   = Math.max(0, Math.min(1, bar.progress));
+    const splitFrac = bar.dir === "ltr" ? clamped : 1 - clamped;
     const splitX    = width * splitFrac;
 
-    this._drawTitleSlice(x, y, width, height, radius, 0, splitX, leftColor, titleOnBottom);
-    this._drawTitleSlice(x, y, width, height, radius, splitX, width, rightColor, titleOnBottom);
+    this._drawTitleSlice(x, y, width, height, radius, 0, splitX, bar.leftColor, titleOnBottom);
+    this._drawTitleSlice(x, y, width, height, radius, splitX, width, bar.rightColor, titleOnBottom);
+  }
+
+  private _drawSecondaryBar(
+    x:      number,
+    y:      number,
+    width:  number,
+    height: number,
+    bar:    BarInfo,
+  ): void {
+    const clamped   = Math.max(0, Math.min(1, bar.progress));
+    const splitFrac = bar.dir === "ltr" ? clamped : 1 - clamped;
+    const splitX    = width * splitFrac;
+
+    if (splitX > 0)     this._bg.rect(x,           y, splitX,         height).fill({ color: bar.leftColor });
+    if (splitX < width) this._bg.rect(x + splitX,  y, width - splitX, height).fill({ color: bar.rightColor });
   }
 
   private _drawTitleSlice(

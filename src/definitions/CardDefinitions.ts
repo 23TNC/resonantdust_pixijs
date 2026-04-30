@@ -54,6 +54,8 @@ export interface CardDefinition {
   abilities?:       AbilityName[];
   /** Aspect tags with additive values 1–3 indicating strength of association. */
   aspects?:         Record<string, number>;
+  /** Recipe id to queue automatically when a card of this definition is created. */
+  recipe?:          string;
   title_on_bottom?: boolean;
 }
 

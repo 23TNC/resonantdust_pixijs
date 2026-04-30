@@ -102,34 +102,34 @@ export function bootstrap(): void {
 
   const cards: ServerCard[] = [
     // Soul card (type 5, category 0, def 1) — world hex (0,0)
-    { card_id: 1,  macro_location: world_macro, micro_location: packMicroHex(0, 0),      owner_id: 1, flags: S,  packed_definition: packDefinition(5, 0, 1), data: 0n, data2: 0n },
+    { card_id: 1,  macro_location: world_macro, micro_location: packMicroHex(0, 0),      owner_id: 1, flags: S,  packed_definition: packDefinition(5, 0, 1), data: 0n, action_id: 0 },
 
     // Inventory: standalone cards
-    { card_id: 2,  macro_location: panel_macro, micro_location: packMicroPixel(-180, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(1, 0, 1), data: 0n, data2: 0n },
-    { card_id: 3,  macro_location: panel_macro, micro_location: packMicroPixel( -90, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(1, 0, 2), data: 0n, data2: 0n },
-    { card_id: 4,  macro_location: panel_macro, micro_location: packMicroPixel(   0, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(1, 0, 3), data: 0n, data2: 0n },
+    { card_id: 2,  macro_location: panel_macro, micro_location: packMicroPixel(-180, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(1, 0, 1), data: 0n, action_id: 0 },
+    { card_id: 3,  macro_location: panel_macro, micro_location: packMicroPixel( -90, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(1, 0, 2), data: 0n, action_id: 0 },
+    { card_id: 4,  macro_location: panel_macro, micro_location: packMicroPixel(   0, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(1, 0, 3), data: 0n, action_id: 0 },
 
     // Inventory: stack (card 5 parent, card 6 child)
-    { card_id: 5,  macro_location: panel_macro, micro_location: packMicroPixel(  90, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(2, 0, 1), data: 0n, data2: 0n },
-    { card_id: 6,  macro_location: panel_macro, micro_location: packMicroStacked(5),     owner_id: 1, flags: ST, packed_definition: packDefinition(2, 0, 2), data: 0n, data2: 0n },
+    { card_id: 5,  macro_location: panel_macro, micro_location: packMicroPixel(  90, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(2, 0, 1), data: 0n, action_id: 0 },
+    { card_id: 6,  macro_location: panel_macro, micro_location: packMicroStacked(5),     owner_id: 1, flags: ST, packed_definition: packDefinition(2, 0, 2), data: 0n, action_id: 0 },
 
     // World: item card and tile card
-    { card_id: 7,  macro_location: world_macro, micro_location: packMicroHex(1, 0),      owner_id: 1, flags: S,  packed_definition: packDefinition(1, 0, 1), data: 0n, data2: 0n },
-    { card_id: 8,  macro_location: world_macro, micro_location: packMicroHex(2, 1),      owner_id: 1, flags: 0,  packed_definition: packDefinition(6, 0, 2), data: 0n, data2: 0n },
+    { card_id: 7,  macro_location: world_macro, micro_location: packMicroHex(1, 0),      owner_id: 1, flags: S,  packed_definition: packDefinition(1, 0, 1), data: 0n, action_id: 0 },
+    { card_id: 8,  macro_location: world_macro, micro_location: packMicroHex(2, 1),      owner_id: 1, flags: 0,  packed_definition: packDefinition(6, 0, 2), data: 0n, action_id: 0 },
 
     // Inventory: stack (card 9 parent, card 10 child)
-    { card_id: 9,  macro_location: panel_macro, micro_location: packMicroPixel( 180, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(2, 0, 4), data: 0n, data2: 0n },
-    { card_id: 10, macro_location: panel_macro, micro_location: packMicroStacked(9),     owner_id: 1, flags: ST, packed_definition: packDefinition(2, 0, 3), data: 0n, data2: 0n },
+    { card_id: 9,  macro_location: panel_macro, micro_location: packMicroPixel( 180, 0), owner_id: 1, flags: S,  packed_definition: packDefinition(2, 0, 4), data: 0n, action_id: 0 },
+    { card_id: 10, macro_location: panel_macro, micro_location: packMicroStacked(9),     owner_id: 1, flags: ST, packed_definition: packDefinition(2, 0, 3), data: 0n, action_id: 0 },
 
     // Inventory: down-branch children — Discipline (title_on_bottom) on stack 5, Faculty (title_on_top) on stack 9
-    { card_id: 12, macro_location: panel_macro, micro_location: packMicroStacked(5),     owner_id: 1, flags: SD, packed_definition: packDefinition(1, 0, 1), data: 0n, data2: 0n },
-    { card_id: 13, macro_location: panel_macro, micro_location: packMicroStacked(9),     owner_id: 1, flags: SD, packed_definition: packDefinition(2, 0, 1), data: 0n, data2: 0n },
+    { card_id: 12, macro_location: panel_macro, micro_location: packMicroStacked(5),     owner_id: 1, flags: SD, packed_definition: packDefinition(1, 0, 1), data: 0n, action_id: 0 },
+    { card_id: 13, macro_location: panel_macro, micro_location: packMicroStacked(9),     owner_id: 1, flags: SD, packed_definition: packDefinition(2, 0, 1), data: 0n, action_id: 0 },
 
     // Inventory: Revery Soul Reference (type 4 / category 0 / def 1) — card_target points at soul_card_id
-    { card_id: 11, macro_location: panel_macro, micro_location: packMicroPixel(   0, 0), owner_id: 1, flags: CARD_FLAG_STACKABLE,  packed_definition: packDefinition(4, 0, 1), data: BigInt(soul_card_id), data2: 0n },
+    { card_id: 11, macro_location: panel_macro, micro_location: packMicroPixel(   0, 0), owner_id: 1, flags: CARD_FLAG_STACKABLE,  packed_definition: packDefinition(4, 0, 1), data: BigInt(soul_card_id), action_id: 0 },
 
     // Inventory: Vitality (Faculty / def 5) — fleeting: start=now, end=now+20s
-    { card_id: 14, macro_location: panel_macro, micro_location: packMicroPixel( 270, 0), owner_id: 1, flags: S, packed_definition: packDefinition(2, 0, 5), data: BigInt(now_s) | (BigInt(now_s + 5) << 32n), data2: 0n },
+    { card_id: 14, macro_location: panel_macro, micro_location: packMicroPixel( 270, 0), owner_id: 1, flags: S, packed_definition: packDefinition(2, 0, 5), data: BigInt(now_s) | (BigInt(now_s + 5) << 32n), action_id: 0 },
   ];
 
   // ─── Players ───────────────────────────────────────────────────────────────
@@ -139,7 +139,7 @@ export function bootstrap(): void {
 
   // ─── Actions ───────────────────────────────────────────────────────────────
   const actions: ServerAction[] = [
-    { action_id: 1, card_id: 7, recipe: 1, start: 0, end: 0, flags: 0, owner_id: 1, macro_location: world_macro, micro_location: packMicroHex(1, 0) },
+    // { action_id: 1, card_id: 7, recipe: 1, start: 0, end: 0, flags: 0, owner_id: 1, macro_location: world_macro, micro_location: packMicroHex(1, 0) },
   ];
 
   // ─── Zones ─────────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 import { Application } from "pixi.js";
 import { initApp } from "./app";
 import { LoginScene, SceneManager } from "./scenes";
-import { bootstrapCardDefinitions } from "@/definitions";
+import { bootstrapCardDefinitions, bootstrapRecipeDefinitions } from "@/definitions";
 
 async function startApp(): Promise<void> {
   const root = document.getElementById("app");
@@ -32,6 +32,7 @@ async function startApp(): Promise<void> {
   app.canvas.style.display = "block";
 
   bootstrapCardDefinitions();
+  bootstrapRecipeDefinitions();
 
   const sceneManager = new SceneManager();
   sceneManager.setScene(new LoginScene(sceneManager));

@@ -19,10 +19,6 @@ export const CARD_FLAG_STACKABLE       = 1 << 2;
 export const CARD_FLAG_POSITION_LOCKED = 1 << 3;
 export const CARD_FLAG_POSITION_HOLD   = 1 << 4;
 
-// action flags — bits within ServerAction.flags
-export const ACTION_FLAG_STARTED   = 1 << 0;
-export const ACTION_FLAG_COMPLETED = 1 << 1;
-
 // card_type values (high nibble of packed_definition)
 export const CARD_TYPE_DISCIPLINE     = 1;
 export const CARD_TYPE_FACULTY        = 2;
@@ -55,8 +51,8 @@ export interface ServerCard {
   owner_id:          CardId;
   flags:             number;           // u16
   packed_definition: number;           // u16: [card_type:u4][category:u4][definition_id:u8]
-  data:              bigint;           // u64, type-specific payload (abilities slot 0…)
-  data2:             bigint;           // u64, type-specific payload (abilities slot 1…)
+  data:              bigint;           // u64, type-specific payload
+  action_id:         number;           // u32, queued/running action on this card
 }
 
 export interface ServerPlayer {
@@ -71,9 +67,7 @@ export interface ServerAction {
   action_id:      ActionId;
   card_id:        CardId;
   recipe:         number;              // u16
-  start:          number;              // u32
-  end:            number;              // u32
-  flags:          number;              // u8
+  end:            number;              // u32 — completion time in seconds since Unix epoch (0 = queued)
   owner_id:       CardId;
   macro_location: MacroLocation;
   micro_location: MicroLocation;
@@ -158,6 +152,7 @@ export interface ClientAction extends ServerAction {
   pixel_y:       number;       // surface=2: pixel [y:i16]
   world_q:       number;
   world_r:       number;
+  local_start:   number;
   stale: boolean;
   dirty: boolean;
 }
@@ -268,15 +263,13 @@ export function isActionVisibleToSoul(action: ServerAction, soul_id: CardId): bo
 }
 
 export function isActionRunning(action: ServerAction): boolean {
-  return (action.flags & ACTION_FLAG_STARTED)   !== 0
-      && (action.flags & ACTION_FLAG_COMPLETED) === 0;
+  return action.end !== 0;
 }
 
-export function getActionProgress(action: ServerAction, now_seconds: number): number {
-  if ((action.flags & ACTION_FLAG_STARTED)   === 0) return 0;
-  if ((action.flags & ACTION_FLAG_COMPLETED) !== 0) return 1;
-  const duration = Math.max(1, action.end - action.start);
-  return Math.min(1, Math.max(0, (now_seconds - action.start) / duration));
+export function getActionProgress(action: ClientAction, now_seconds: number): number {
+  if (!isActionRunning(action)) return 0;
+  const duration = Math.max(1, action.end - action.local_start);
+  return Math.min(1, Math.max(0, (now_seconds - action.local_start) / duration));
 }
 
 // ─── Server tables ────────────────────────────────────────────────────────────
@@ -440,12 +433,12 @@ export function buildClientPlayer(server: ServerPlayer): ClientPlayer {
   return { ...server, ...macro, ...micro, world_q, world_r, stale: false, dirty: true };
 }
 
-export function buildClientAction(server: ServerAction): ClientAction {
+export function buildClientAction(server: ServerAction, local_start?: number): ClientAction {
   const macro  = unpackMacro(server.macro_location);
   const micro  = unpackMicro(server.micro_location, macro.surface);
   const world_q = macro.surface === SURFACE_WORLD ? macro.zone_q * ZONE_SIZE + micro.local_q : 0;
   const world_r = macro.surface === SURFACE_WORLD ? macro.zone_r * ZONE_SIZE + micro.local_r : 0;
-  return { ...server, ...macro, ...micro, world_q, world_r, stale: false, dirty: true };
+  return { ...server, ...macro, ...micro, world_q, world_r, local_start: local_start ?? Date.now() / 1000, stale: false, dirty: true };
 }
 
 function decodeZoneRow(row: bigint): number[] {
@@ -521,7 +514,7 @@ export function upsertClientAction(server: ServerAction): void {
   if (previous && previous.macro_location !== server.macro_location) {
     removeFromMacroIndex(macro_location_actions, previous.macro_location, server.action_id);
   }
-  const next = buildClientAction(server);
+  const next = buildClientAction(server, previous?.local_start);
   client_actions[next.action_id] = next;
   addToMacroIndex(macro_location_actions, next.macro_location, next.action_id);
 }

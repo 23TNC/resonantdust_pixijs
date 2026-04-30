@@ -14,14 +14,19 @@ export const Action = __t.object("Action", {
   actionId: __t.u32(),
   cardId: __t.u32(),
   recipe: __t.u16(),
-  start: __t.u32(),
   end: __t.u32(),
-  flags: __t.u8(),
   ownerId: __t.u32(),
   macroLocation: __t.u64(),
   microLocation: __t.u32(),
 });
 export type Action = __Infer<typeof Action>;
+
+export const ActionScheduler = __t.object("ActionScheduler", {
+  id: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+  actionId: __t.u32(),
+});
+export type ActionScheduler = __Infer<typeof ActionScheduler>;
 
 export const Card = __t.object("Card", {
   cardId: __t.u32(),
@@ -31,7 +36,7 @@ export const Card = __t.object("Card", {
   flags: __t.u16(),
   packedDefinition: __t.u16(),
   data: __t.u64(),
-  data2: __t.u64(),
+  actionId: __t.u64(),
 });
 export type Card = __Infer<typeof Card>;
 

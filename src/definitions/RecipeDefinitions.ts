@@ -5,19 +5,18 @@ import { getDefinitionByPacked } from "@/definitions/CardDefinitions";
 
 type RawEntity = any[];
 
-interface RawProductGroup {
-  target?: "owner" | "root";
-  entity:  RawEntity;
-}
-
 interface RawRecipe {
-  id:          string;
-  stack_craft: boolean;
-  tile?:       RawEntity;
-  catalysts?:  RawEntity;
-  reagents?:   RawEntity;
-  products?:   RawProductGroup[];
-  duration:    number;
+  id:        string;
+  type?:     string;
+  tile?:     RawEntity;
+  catalysts?: RawEntity;
+  reagents?:  RawEntity;
+  /** Object keyed by target ("owner" | "root"), each value a raw entity. */
+  products?:  Partial<Record<"owner" | "root", RawEntity>>;
+  /** [direction, leftColor, rightColor] — colors are hex strings or "default". */
+  style?:     [string, string, string];
+  /** Fixed seconds, or [[seconds, entity?], ...] conditional list (first match wins; no entity = catch-all). */
+  duration:   number | [number, RawEntity?][];
 }
 
 // ── Parsed entity tree ────────────────────────────────────────────────────────
@@ -46,11 +45,21 @@ export interface EntityEmpty { kind: "empty"; }
 
 export type RecipeEntity = EntityLeaf | EntityAnd | EntityOr | EntityEmpty;
 
+export interface DurationCondition {
+  duration:   number;
+  /** Undefined means this entry always matches (catch-all). */
+  condition?: RecipeEntity;
+}
+
+/** Fixed duration in seconds, or a prioritised condition list (first match wins). */
+export type RecipeDuration = number | DurationCondition[];
+
 export interface Recipe {
   id:          string;
   /** 0-based position across all recipe files (the wire format sent to spacetime). */
   index:       number;
-  stack_craft: boolean;
+  /** Recipe type string matching the server enum: "top_stack", "bottom_stack", "both_stack", "on_create", "explicit". */
+  recipeType:  string;
   /** If present, the stack must be on a matching tile. */
   tile?:       RecipeEntity;
   /** Required cards that are NOT consumed when the recipe fires. */
@@ -59,13 +68,22 @@ export interface Recipe {
   reagents?:   RecipeEntity;
   /** Cards produced by the recipe. Each group is produced independently; OR nodes use weights for random selection. */
   products?:   ProductGroup[];
-  duration:    number;
+  style?:      RecipeStyle;
+  duration:    RecipeDuration;
 }
 
 export interface ProductGroup {
   /** Where produced cards are placed: "owner" = owner_id panel, "root" = card_id panel. */
   target: "owner" | "root";
   entity: RecipeEntity;
+}
+
+export interface RecipeStyle {
+  direction:  "ltr" | "rtl";
+  /** Hex color string or "default" (use the card's title bar color). */
+  leftColor:  string;
+  /** Hex color string or "default" (use the card's title bar color). */
+  rightColor: string;
 }
 
 // ── Registry ──────────────────────────────────────────────────────────────────
@@ -110,12 +128,39 @@ function parseEntity(raw: any): RecipeEntity {
   };
 }
 
+function parseDuration(raw: number | [number, RawEntity?][]): RecipeDuration {
+  if (typeof raw === "number") return raw;
+  return raw.map(entry => {
+    const [duration, condRaw] = entry;
+    const condition = condRaw != null && (Array.isArray(condRaw) && condRaw.length > 0)
+      ? parseEntity(condRaw)
+      : undefined;
+    return { duration, condition };
+  });
+}
+
 function parseRecipe(raw: RawRecipe, index: number): Recipe {
-  const r: Recipe = { id: raw.id, index, stack_craft: raw.stack_craft, duration: raw.duration };
+  const r: Recipe = {
+    id:         raw.id,
+    index,
+    recipeType: raw.type ?? "on_create",
+    duration:   parseDuration(raw.duration),
+  };
   if (raw.tile)      r.tile      = parseEntity(raw.tile);
   if (raw.catalysts) r.catalysts = parseEntity(raw.catalysts);
   if (raw.reagents)  r.reagents  = parseEntity(raw.reagents);
-  if (raw.products)  r.products  = raw.products.map(g => ({ target: g.target ?? "owner", entity: parseEntity(g.entity) }));
+  if (raw.products) {
+    r.products = (Object.entries(raw.products) as ["owner" | "root", RawEntity][])
+      .map(([target, entity]) => ({ target, entity: parseEntity(entity) }));
+  }
+  if (raw.style) {
+    const [dir, left, right] = raw.style;
+    r.style = {
+      direction:  dir === "rtl" ? "rtl" : "ltr",
+      leftColor:  left  ?? "default",
+      rightColor: right ?? "default",
+    };
+  }
   return r;
 }
 

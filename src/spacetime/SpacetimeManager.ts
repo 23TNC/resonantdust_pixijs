@@ -95,7 +95,6 @@ class SpacetimeManager {
       .onConnect((conn: DbConnection, identity: Identity, _token: string) => {
         this._conn = conn;
         this._registerTableCallbacks(conn);
-        console.log(`SpacetimeDB connected as ${identity.toHexString()}`);
         this._connectListeners.forEach(fn => fn());
         this._connectListeners.clear();
       })
@@ -421,7 +420,7 @@ class SpacetimeManager {
       this.notifyCardListeners(server.card_id);
     });
     conn.db.actions.onDelete((_ctx, row) => {
-      const aid = row.actionId as ActionId;
+      const aid = Number(row.actionId) as ActionId;
       const card_id = server_actions[aid]?.card_id;
       delete server_actions[aid];
       removeClientAction(aid);
@@ -485,7 +484,7 @@ function adaptCard(row: BoundCard): ServerCard {
     flags:             row.flags,
     packed_definition: row.packedDefinition,
     data:              row.data,
-    data2:             row.data2,
+    action_id:         Number(row.actionId),
   };
 }
 
@@ -504,9 +503,7 @@ function adaptAction(row: BoundAction): ServerAction {
     action_id:      row.actionId,
     card_id:        row.cardId,
     recipe:         row.recipe,
-    start:          row.start,
     end:            row.end,
-    flags:          row.flags,
     owner_id:       row.ownerId,
     macro_location: row.macroLocation,
     micro_location: row.microLocation,

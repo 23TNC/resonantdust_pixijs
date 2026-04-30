@@ -18,5 +18,5 @@ export default __t.row({
   flags: __t.u16(),
   packedDefinition: __t.u16().name("packed_definition"),
   data: __t.u64(),
-  data2: __t.u64().name("data_2"),
+  actionId: __t.u64().name("action_id"),
 });

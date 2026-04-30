@@ -35,8 +35,7 @@ import {
 
 // Import all reducer arg schemas
 import BootstrapReducer from "./bootstrap_reducer";
-import CompleteActionReducer from "./complete_action_reducer";
-import DebugSpawnVigorReducer from "./debug_spawn_vigor_reducer";
+import DebugSpawnReducer from "./debug_spawn_reducer";
 import DeleteActionReducer from "./delete_action_reducer";
 import DeleteCardReducer from "./delete_card_reducer";
 import DeletePlayerReducer from "./delete_player_reducer";
@@ -56,8 +55,8 @@ import StackCardDownReducer from "./stack_card_down_reducer";
 import StackCardUpReducer from "./stack_card_up_reducer";
 import StartActionReducer from "./start_action_reducer";
 import UnstackCardReducer from "./unstack_card_reducer";
+import UpdateCardActionIdReducer from "./update_card_action_id_reducer";
 import UpdateCardDataReducer from "./update_card_data_reducer";
-import UpdateCardData2Reducer from "./update_card_data_2_reducer";
 import UpdateCardFlagsReducer from "./update_card_flags_reducer";
 import UpdateCardLocationReducer from "./update_card_location_reducer";
 import UpdateCardMicroLocationReducer from "./update_card_micro_location_reducer";
@@ -154,8 +153,7 @@ const tablesSchema = __schema({
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
   __reducerSchema("bootstrap", BootstrapReducer),
-  __reducerSchema("complete_action", CompleteActionReducer),
-  __reducerSchema("debug_spawn_vigor", DebugSpawnVigorReducer),
+  __reducerSchema("debug_spawn", DebugSpawnReducer),
   __reducerSchema("delete_action", DeleteActionReducer),
   __reducerSchema("delete_card", DeleteCardReducer),
   __reducerSchema("delete_player", DeletePlayerReducer),
@@ -175,8 +173,8 @@ const reducersSchema = __reducers(
   __reducerSchema("stack_card_up", StackCardUpReducer),
   __reducerSchema("start_action", StartActionReducer),
   __reducerSchema("unstack_card", UnstackCardReducer),
+  __reducerSchema("update_card_action_id", UpdateCardActionIdReducer),
   __reducerSchema("update_card_data", UpdateCardDataReducer),
-  __reducerSchema("update_card_data_2", UpdateCardData2Reducer),
   __reducerSchema("update_card_flags", UpdateCardFlagsReducer),
   __reducerSchema("update_card_location", UpdateCardLocationReducer),
   __reducerSchema("update_card_micro_location", UpdateCardMicroLocationReducer),
