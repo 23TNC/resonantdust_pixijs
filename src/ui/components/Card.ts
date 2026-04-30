@@ -11,7 +11,7 @@ import {
   getDefinitionByPacked,
   getEffectiveTitleOnBottom,
   type CardStyle,
-} from "@/data/definitions/CardDefinitions";
+} from "@/definitions/CardDefinitions";
 
 export interface CardOptions extends LayoutObjectOptions {
   card_id?:       CardId;

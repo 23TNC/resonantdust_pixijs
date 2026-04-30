@@ -77,7 +77,7 @@ function pack(card_type: number, definition_id: number): number {
 export function bootstrapCardDefinitions(): void {
   if (registry.size > 0) return;
 
-  const files = import.meta.glob<CardDefinitionFile>("../cards/*.json", {
+  const files = import.meta.glob<CardDefinitionFile>("../data/cards/*.json", {
     eager: true,
     import: "default",
   });

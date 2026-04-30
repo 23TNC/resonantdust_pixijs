@@ -1,5 +1,5 @@
 import { client_cards, type CardId } from "@/spacetime/Data";
-import { getDefinitionByPacked } from "@/data/definitions/CardDefinitions";
+import { getDefinitionByPacked } from "@/definitions/CardDefinitions";
 
 // ── Raw JSON shapes ───────────────────────────────────────────────────────────
 
@@ -129,7 +129,7 @@ function parseRecipe(raw: RawRecipe, index: number): Recipe {
 export function bootstrapRecipeDefinitions(): void {
   if (byId.size > 0) return;
 
-  const files = import.meta.glob<RawRecipe[]>("../recipes/*.json", {
+  const files = import.meta.glob<RawRecipe[]>("../data/recipes/*.json", {
     eager:  true,
     import: "default",
   });

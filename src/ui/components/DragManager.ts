@@ -23,7 +23,7 @@ import {
 import {
   isBottomTitleByDef,
   getEffectiveTitleOnBottom,
-} from "@/data/definitions/CardDefinitions";
+} from "@/definitions/CardDefinitions";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import {
   type InputManager,

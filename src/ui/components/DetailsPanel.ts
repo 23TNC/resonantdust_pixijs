@@ -18,7 +18,7 @@ import {
 import {
   getDefinitionByPacked,
   type CardDefinition,
-} from "@/data/definitions/CardDefinitions";
+} from "@/definitions/CardDefinitions";
 import { LayoutLabel, type LayoutLabelOptions } from "@/ui/layout/LayoutLabel";
 
 export interface DetailsPanelOptions extends LayoutLabelOptions {

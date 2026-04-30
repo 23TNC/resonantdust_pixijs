@@ -1,7 +1,7 @@
 import { Graphics, Text, TextStyle } from "pixi.js";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { client_cards, type CardId } from "@/spacetime/Data";
-import { getDefinitionByPacked } from "@/data/definitions/CardDefinitions";
+import { getDefinitionByPacked } from "@/definitions/CardDefinitions";
 
 export interface TileOptions extends LayoutObjectOptions {
   /** Dynamic tile — definition is read from client_cards[card_id] each redraw. */
