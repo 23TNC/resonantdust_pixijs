@@ -411,18 +411,22 @@ class SpacetimeManager {
       server_actions[server.action_id] = server;
       upsertClientAction(server);
       this._invalidateTable('actions');
+      this.notifyCardListeners(server.card_id);
     });
     conn.db.actions.onUpdate((_ctx, _old, newRow) => {
       const server = adaptAction(newRow);
       server_actions[server.action_id] = server;
       upsertClientAction(server);
       this._invalidateTable('actions');
+      this.notifyCardListeners(server.card_id);
     });
     conn.db.actions.onDelete((_ctx, row) => {
       const aid = row.actionId as ActionId;
+      const card_id = server_actions[aid]?.card_id;
       delete server_actions[aid];
       removeClientAction(aid);
       this._invalidateTable('actions');
+      if (card_id !== undefined) this.notifyCardListeners(card_id);
     });
 
     // ── Zones ──────────────────────────────────────────────────────────────

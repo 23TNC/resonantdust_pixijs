@@ -2,7 +2,8 @@
   "card_type": 6,
   "cards": [
     {
-      "name": "Plains",
+      "id": "plains",
+      "display_name": "Plains",
       "title_on_bottom": false,
       "style": {
         "color": [ "#799E50", "#0b1426", "#0b1426" ]
@@ -12,10 +13,16 @@
       },
       "flags": [
         [ "food", false, true, false ]
-      ]
+      ],
+      "aspects": {
+        "earth": 2,
+        "food":  2,
+        "labor": 1
+      }
     },
     {
-      "name": "Forest",
+      "id": "forest",
+      "display_name": "Forest",
       "title_on_bottom": false,
       "style": {
         "color": [ "#395C39", "#7fb377", "#0b1426" ]
@@ -28,7 +35,13 @@
       "flags": [
         [ "trees", true,  true, false ],
         [ "food",  false, true, false ]
-      ]
+      ],
+      "aspects": {
+        "wood":  3,
+        "earth": 2,
+        "food":  1,
+        "fuel":  1
+      }
     }
   ]
 }

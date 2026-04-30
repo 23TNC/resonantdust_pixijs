@@ -1,6 +1,10 @@
 import { Container, Graphics, ParticleContainer, Sprite, Text, Texture } from "pixi.js";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
-import { client_cards, type CardId, type ClientCard } from "@/spacetime/Data";
+import {
+  client_cards, client_actions,
+  getActionProgress, ACTION_FLAG_STARTED, ACTION_FLAG_COMPLETED,
+  type CardId, type ClientCard,
+} from "@/spacetime/Data";
 import { spacetime } from "@/spacetime/SpacetimeManager";
 import { type ParticleHandle, ParticleManager } from "@/ui/effects/ParticleManager";
 import {
@@ -207,23 +211,17 @@ export class Card extends LayoutObject {
     const titleY = titleOnBottom ? y + bodyH : y;
     const bodyY  = titleOnBottom ? y : y + titleH;
 
-    // ── Effective progress ────────────────────────────────────────────────────
-    // Fleeting cards compute progress from their two u32 timestamps in data.
-    // Other cards use the externally-set _progress value (null = no bar).
-    let effectiveProgress = this._progress;
-    if (definition?.abilities?.includes("fleeting")) {
-      const start_s  = Number(card.data & 0xFFFF_FFFFn);
-      const end_s    = Number((card.data >> 32n) & 0xFFFF_FFFFn);
-      const duration = end_s - start_s;
-      const now_s    = Date.now() / 1000;
-      effectiveProgress = duration > 0
-        ? Math.max(0, Math.min(1, (end_s - now_s) / duration))
-        : 0;
-      // Re-render every frame to animate the bar; on expiry, delete the card row
-      // (the following redraw will find card missing and hide this widget).
-      this.invalidateRender();
-      if (now_s >= end_s) spacetime.deleteCard(this._card_id);
-    }
+    const now_seconds = Date.now() / 1000;
+    const activeAction = Object.values(client_actions).find(a =>
+      a.card_id === this._card_id &&
+      (a.flags & ACTION_FLAG_STARTED)   !== 0 &&
+      (a.flags & ACTION_FLAG_COMPLETED) === 0,
+    );
+    const effectiveProgress = activeAction
+      ? getActionProgress(activeAction, now_seconds)
+      : this._progress;
+
+    if (activeAction) this.invalidateRender();
 
     // ── Background ────────────────────────────────────────────────────────────
     this._bg.clear();
@@ -237,7 +235,7 @@ export class Card extends LayoutObject {
     );
 
     // ── Title text ────────────────────────────────────────────────────────────
-    this._label.text    = definition?.name ?? "";
+    this._label.text    = definition?.display_name ?? "";
     this._label.visible = titleH > 0;
     this._label.x       = x + width / 2;
     this._label.y       = titleY + titleH / 2;

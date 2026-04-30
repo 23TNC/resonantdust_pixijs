@@ -43,7 +43,8 @@ const ABILITY_SPECS: Readonly<Record<AbilityName, AbilitySpec>> = {
 };
 
 export interface CardDefinition {
-  name:            string;
+  id:              string;
+  display_name:    string;
   style?:          CardStyle;
   vars?:           Record<string, string | number | boolean | null>;
   flags?:          CardFlag[];
@@ -51,6 +52,8 @@ export interface CardDefinition {
    *  allocated in declaration order: the first ability occupies the
    *  low-order bits, the next claims the bits above it, and so on. */
   abilities?:       AbilityName[];
+  /** Aspect tags with additive values 1–3 indicating strength of association. */
+  aspects?:         Record<string, number>;
   title_on_bottom?: boolean;
 }
 

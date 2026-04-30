@@ -2,6 +2,7 @@ import { Application } from "pixi.js";
 import { initApp } from "./app";
 import { LoginScene, SceneManager } from "./scenes";
 import { bootstrapCardDefinitions } from "@/data/definitions";
+import { simulation } from "@/spacetime/Simulation";
 
 async function startApp(): Promise<void> {
   const root = document.getElementById("app");

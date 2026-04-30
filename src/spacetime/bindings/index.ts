@@ -36,6 +36,7 @@ import {
 // Import all reducer arg schemas
 import BootstrapReducer from "./bootstrap_reducer";
 import CompleteActionReducer from "./complete_action_reducer";
+import DebugSpawnVigorReducer from "./debug_spawn_vigor_reducer";
 import DeleteActionReducer from "./delete_action_reducer";
 import DeleteCardReducer from "./delete_card_reducer";
 import DeletePlayerReducer from "./delete_player_reducer";
@@ -154,6 +155,7 @@ const tablesSchema = __schema({
 const reducersSchema = __reducers(
   __reducerSchema("bootstrap", BootstrapReducer),
   __reducerSchema("complete_action", CompleteActionReducer),
+  __reducerSchema("debug_spawn_vigor", DebugSpawnVigorReducer),
   __reducerSchema("delete_action", DeleteActionReducer),
   __reducerSchema("delete_card", DeleteCardReducer),
   __reducerSchema("delete_player", DeletePlayerReducer),

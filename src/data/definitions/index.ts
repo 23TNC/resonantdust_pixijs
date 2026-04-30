@@ -6,3 +6,13 @@ export {
 } from "./CardDefinitions";
 
 export type { CardDefinition, CardFlag, CardStyle } from "./CardDefinitions";
+
+export {
+  bootstrapRecipeDefinitions,
+  getRecipeById,
+  getRecipeByIndex,
+  getAllRecipes,
+  matchesInputs,
+} from "./RecipeDefinitions";
+
+export type { Recipe, RecipeEntity, EntityLeaf, EntityAnd, EntityOr, EntityEmpty } from "./RecipeDefinitions";

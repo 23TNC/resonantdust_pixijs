@@ -131,7 +131,7 @@ export class Tile extends LayoutObject {
     const blockH    = nameSize + LINE_GAP + coordSize;
     const blockTop  = cy - blockH / 2;
 
-    const name = definition?.name ?? "";
+    const name = definition?.display_name ?? "";
     this._label.visible = name.length > 0;
     this._label.text    = name;
     this._label.x       = cx;

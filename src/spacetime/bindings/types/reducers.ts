@@ -8,6 +8,7 @@ import { type Infer as __Infer } from "spacetimedb";
 // Import all reducer arg schemas
 import BootstrapReducer from "../bootstrap_reducer";
 import CompleteActionReducer from "../complete_action_reducer";
+import DebugSpawnVigorReducer from "../debug_spawn_vigor_reducer";
 import DeleteActionReducer from "../delete_action_reducer";
 import DeleteCardReducer from "../delete_card_reducer";
 import DeletePlayerReducer from "../delete_player_reducer";
@@ -41,6 +42,7 @@ import UpsertZoneAtReducer from "../upsert_zone_at_reducer";
 
 export type BootstrapParams = __Infer<typeof BootstrapReducer>;
 export type CompleteActionParams = __Infer<typeof CompleteActionReducer>;
+export type DebugSpawnVigorParams = __Infer<typeof DebugSpawnVigorReducer>;
 export type DeleteActionParams = __Infer<typeof DeleteActionReducer>;
 export type DeleteCardParams = __Infer<typeof DeleteCardReducer>;
 export type DeletePlayerParams = __Infer<typeof DeletePlayerReducer>;
