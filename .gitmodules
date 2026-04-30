@@ -1,3 +1,0 @@
-[submodule "src/data"]
-	path = src/data
-	url = git@github.com:23TNC/resonantdust_data.git
