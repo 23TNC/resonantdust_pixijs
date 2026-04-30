@@ -56,3 +56,7 @@ Thumbs.db
 
 # npm
 node_modules/*
+
+# data
+src/data/*
+src/data
