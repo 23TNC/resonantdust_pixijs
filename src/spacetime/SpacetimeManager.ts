@@ -317,6 +317,32 @@ class SpacetimeManager {
 
   // ─── Card reducers ──────────────────────────────────────────────────────────
 
+  setCardPositions(
+    cardIds:        CardId[],
+    macroLocations: bigint[],
+    microLocations: number[],
+    flags:          number[],
+  ): void {
+    if (this._mode === "connected") {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (this._conn?.reducers as any)?.setCardPositions({ cardIds, macroLocations, microLocations, flags });
+    }
+  }
+
+  startActionNow(cardId: CardId, ownerId: CardId, recipe: number, q: number, r: number, layer: number): void {
+    if (this._mode === "connected") {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (this._conn?.reducers as any)?.startActionNow({ cardId, ownerId, recipe, q, r, layer });
+    }
+  }
+
+  cancelAction(actionId: ActionId): void {
+    if (this._mode === "connected") {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (this._conn?.reducers as any)?.cancelAction({ actionId });
+    }
+  }
+
   /**
    * Delete a card row.
    *

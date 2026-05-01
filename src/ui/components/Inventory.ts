@@ -5,6 +5,7 @@ import {
   moveClientCard,
   packMacroPanel,
   packMicroPixel,
+  orphaned_roots,
   viewed_id,
   type CardId,
   type MicroLocation,
@@ -184,7 +185,9 @@ export class Inventory extends LayoutObject {
         stack.setCardId(rootId);
         this._stacks.set(rootId, stack);
         this._floatPos.set(rootId, { x: card?.pixel_x ?? 0, y: card?.pixel_y ?? 0 });
-        this.addLayoutChild(stack);
+        const depth = orphaned_roots.has(rootId) ? -1 : 0;
+        orphaned_roots.delete(rootId);
+        this.addLayoutChild(stack, depth);
       }
     }
 

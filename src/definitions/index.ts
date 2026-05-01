@@ -13,6 +13,8 @@ export {
   getRecipeByIndex,
   getAllRecipes,
   matchesInputs,
+  validateRecipe,
+  findMatchingRecipes,
 } from "./RecipeDefinitions";
 
 export type { Recipe, RecipeDuration, DurationCondition, RecipeEntity, EntityLeaf, EntityAnd, EntityOr, EntityEmpty } from "./RecipeDefinitions";

@@ -35,6 +35,7 @@ import {
 
 // Import all reducer arg schemas
 import BootstrapReducer from "./bootstrap_reducer";
+import CancelActionReducer from "./cancel_action_reducer";
 import DebugSpawnReducer from "./debug_spawn_reducer";
 import DeleteActionReducer from "./delete_action_reducer";
 import DeleteCardReducer from "./delete_card_reducer";
@@ -45,6 +46,8 @@ import FillZoneReducer from "./fill_zone_reducer";
 import FillZoneAtReducer from "./fill_zone_at_reducer";
 import QueueActionReducer from "./queue_action_reducer";
 import ResetAndBootstrapReducer from "./reset_and_bootstrap_reducer";
+import SetCardPositionReducer from "./set_card_position_reducer";
+import SetCardPositionsReducer from "./set_card_positions_reducer";
 import SetZoneDefinitionReducer from "./set_zone_definition_reducer";
 import SetZoneDefinitionAtReducer from "./set_zone_definition_at_reducer";
 import SetZoneRowReducer from "./set_zone_row_reducer";
@@ -54,6 +57,7 @@ import SetZoneTileAtReducer from "./set_zone_tile_at_reducer";
 import StackCardDownReducer from "./stack_card_down_reducer";
 import StackCardUpReducer from "./stack_card_up_reducer";
 import StartActionReducer from "./start_action_reducer";
+import StartActionNowReducer from "./start_action_now_reducer";
 import UnstackCardReducer from "./unstack_card_reducer";
 import UpdateCardActionIdReducer from "./update_card_action_id_reducer";
 import UpdateCardDataReducer from "./update_card_data_reducer";
@@ -153,6 +157,7 @@ const tablesSchema = __schema({
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
   __reducerSchema("bootstrap", BootstrapReducer),
+  __reducerSchema("cancel_action", CancelActionReducer),
   __reducerSchema("debug_spawn", DebugSpawnReducer),
   __reducerSchema("delete_action", DeleteActionReducer),
   __reducerSchema("delete_card", DeleteCardReducer),
@@ -163,6 +168,8 @@ const reducersSchema = __reducers(
   __reducerSchema("fill_zone_at", FillZoneAtReducer),
   __reducerSchema("queue_action", QueueActionReducer),
   __reducerSchema("reset_and_bootstrap", ResetAndBootstrapReducer),
+  __reducerSchema("set_card_position", SetCardPositionReducer),
+  __reducerSchema("set_card_positions", SetCardPositionsReducer),
   __reducerSchema("set_zone_definition", SetZoneDefinitionReducer),
   __reducerSchema("set_zone_definition_at", SetZoneDefinitionAtReducer),
   __reducerSchema("set_zone_row", SetZoneRowReducer),
@@ -172,6 +179,7 @@ const reducersSchema = __reducers(
   __reducerSchema("stack_card_down", StackCardDownReducer),
   __reducerSchema("stack_card_up", StackCardUpReducer),
   __reducerSchema("start_action", StartActionReducer),
+  __reducerSchema("start_action_now", StartActionNowReducer),
   __reducerSchema("unstack_card", UnstackCardReducer),
   __reducerSchema("update_card_action_id", UpdateCardActionIdReducer),
   __reducerSchema("update_card_data", UpdateCardDataReducer),

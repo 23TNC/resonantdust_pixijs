@@ -4,14 +4,21 @@ import {
   stacked_up_children,
   stacked_down_children,
   moveClientCard,
+  stackClientCardUp,
+  stackClientCardDown,
   packMacroPanel,
   packMicroPixel,
+  packMicroStacked,
+  orphaned_roots,
   soul_id,
   SURFACE_PANEL,
+  CARD_FLAG_STACKED_UP,
+  CARD_FLAG_STACKED_DOWN,
   type CardId,
 } from "@/spacetime/Data";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { spacetime } from "@/spacetime/SpacetimeManager";
+import { syncStackActions } from "@/definitions/ActionCache";
 import { Card } from "./Card";
 import { DragManager } from "./DragManager";
 
@@ -161,8 +168,8 @@ export class CardStack extends LayoutObject {
     }
 
     if (client_cards[this._rootCardId]?.dead === 2) {
-      this._detachBranchChildren(this._rootCardId, stacked_up_children);
-      this._detachBranchChildren(this._rootCardId, stacked_down_children);
+      this._detachBranchChildren(this._rootCardId, stacked_up_children,   true);
+      this._detachBranchChildren(this._rootCardId, stacked_down_children, false);
       const dying_id     = this._rootCardId;
       this._rootCardId   = 0;
       this._clearAll();
@@ -171,8 +178,8 @@ export class CardStack extends LayoutObject {
     }
 
     // Splice out any dead===2 branch cards before re-walking the chains.
-    this._spliceBranchDeaths(this._upChain,   stacked_up_children);
-    this._spliceBranchDeaths(this._downChain, stacked_down_children);
+    this._spliceBranchDeaths(this._upChain,   stacked_up_children,   true);
+    this._spliceBranchDeaths(this._downChain, stacked_down_children, false);
 
     // ── Ensure root card exists ───────────────────────────────────────────
     if (!this._rootCard) {
@@ -184,6 +191,9 @@ export class CardStack extends LayoutObject {
     const upChain   = this._walkBranch(stacked_up_children);
     const downChain = this._walkBranch(stacked_down_children);
 
+    const chainChanged = !this._arraysEqual(this._upChain, upChain)
+                      || !this._arraysEqual(this._downChain, downChain);
+
     if (!this._arraysEqual(this._upChain, upChain)) {
       this._syncBranch(upChain.length, this._upCards);
       this._upChain = upChain;
@@ -191,6 +201,15 @@ export class CardStack extends LayoutObject {
     if (!this._arraysEqual(this._downChain, downChain)) {
       this._syncBranch(downChain.length, this._downCards);
       this._downChain = downChain;
+    }
+
+    if (chainChanged && !this._ignoreDragState) {
+      syncStackActions(
+        this._rootCardId,
+        [this._rootCardId, ...upChain],
+        [this._rootCardId, ...downChain],
+        soul_id,
+      );
     }
 
     // Register/unregister listeners for the full current chain.
@@ -283,12 +302,17 @@ export class CardStack extends LayoutObject {
   }
 
   /** Move a card to the soul's inventory; its stacked children follow. Tweens visually if DragManager is available. */
-  private _returnToInventory(card_id: CardId): void {
+  private _returnToInventory(card_id: CardId, depthFromRoot = 0, upChain = false): void {
     if (!client_cards[card_id]) return;
-    const root  = client_cards[this._rootCardId];
-    const micro = (root?.surface === SURFACE_PANEL && root.panel_card_id === soul_id)
-      ? root.micro_location
-      : DragManager.getInstance()?.randomInventoryMicro() ?? packMicroPixel(0, 0);
+    const root = client_cards[this._rootCardId];
+    let micro: number;
+    if (root?.surface === SURFACE_PANEL && root.panel_card_id === soul_id) {
+      const dy = depthFromRoot * this._titleHeight * (upChain ? -1 : 1);
+      micro = packMicroPixel(root.pixel_x, root.pixel_y + dy);
+    } else {
+      micro = DragManager.getInstance()?.randomInventoryMicro() ?? packMicroPixel(0, 0);
+    }
+    orphaned_roots.add(card_id);
     moveClientCard(card_id, packMacroPanel(soul_id, 1), micro);
     spacetime.notifyCardListeners(card_id);
 
@@ -302,18 +326,42 @@ export class CardStack extends LayoutObject {
     }
   }
 
-  /** For each dead===2 card in a previous chain, send its children to inventory then finalize. */
-  private _spliceBranchDeaths(chain: CardId[], index: Map<CardId, Set<CardId>>): void {
-    for (const id of chain) {
+  /** For each dead===2 card in a previous chain, splice its children onto the predecessor then finalize. */
+  private _spliceBranchDeaths(chain: CardId[], index: Map<CardId, Set<CardId>>, upChain: boolean): void {
+    for (let i = 0; i < chain.length; i++) {
+      const id = chain[i];
       if (client_cards[id]?.dead !== 2) continue;
-      for (const child of (index.get(id) ?? [])) this._returnToInventory(child);
+      const predecessorId = i === 0 ? this._rootCardId : chain[i - 1];
+      for (const child of (index.get(id) ?? [])) this._spliceChild(child, predecessorId, upChain);
       spacetime.finalizeCardRemoval(id);
     }
   }
 
+  /** Re-parent a child onto a new parent after its old parent dies, syncing to the server. */
+  private _spliceChild(childId: CardId, newParentId: CardId, upChain: boolean): void {
+    const child     = client_cards[childId];
+    const newParent = client_cards[newParentId];
+    if (!child || !newParent) {
+      this._returnToInventory(childId, 0, upChain);
+      return;
+    }
+
+    if (upChain) stackClientCardUp(childId, newParentId);
+    else         stackClientCardDown(childId, newParentId);
+
+    const flag     = upChain ? CARD_FLAG_STACKED_UP : CARD_FLAG_STACKED_DOWN;
+    const newFlags = (child.flags & ~(CARD_FLAG_STACKED_UP | CARD_FLAG_STACKED_DOWN)) | flag;
+    spacetime.setCardPositions(
+      [childId],
+      [newParent.macro_location],
+      [packMicroStacked(newParentId)],
+      [newFlags],
+    );
+  }
+
   /** When the root dies, send its direct branch children back to inventory. */
-  private _detachBranchChildren(rootId: CardId, index: Map<CardId, Set<CardId>>): void {
-    for (const child of (index.get(rootId) ?? [])) this._returnToInventory(child);
+  private _detachBranchChildren(rootId: CardId, index: Map<CardId, Set<CardId>>, upChain: boolean): void {
+    for (const child of (index.get(rootId) ?? [])) this._returnToInventory(child, 1, upChain);
   }
 
   /** Keep _chainUnlistens in sync with the set of active chain card IDs. */

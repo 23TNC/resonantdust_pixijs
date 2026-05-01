@@ -226,7 +226,6 @@ export class Card extends LayoutObject {
     let secondary: BarInfo | null = null;
 
     if (active.length > 0) {
-      console.log()
       const s0 = getRecipeByIndex(active[0].recipe)?.style;
       primary = {
         progress:   getActionProgress(active[0], now_seconds),
@@ -234,9 +233,6 @@ export class Card extends LayoutObject {
         leftColor:  (!s0?.leftColor  || s0.leftColor  === "default") ? titleColor : (parseColor(s0.leftColor)  ?? titleColor),
         rightColor: (!s0?.rightColor || s0.rightColor === "default") ? titleColor : (parseColor(s0.rightColor) ?? titleColor),
       };
-
-      console.log(primary.progress)
-
       if (active.length >= 2) {
         const s1 = getRecipeByIndex(active[1].recipe)?.style;
         secondary = {

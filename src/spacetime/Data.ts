@@ -299,6 +299,9 @@ export const macro_location_actions: Map<MacroLocation, Set<ActionId>> = new Map
 export const stacked_up_children:   Map<CardId, Set<CardId>> = new Map();
 export const stacked_down_children: Map<CardId, Set<CardId>> = new Map();
 
+// Cards that should render behind existing inventory stacks when first added.
+export const orphaned_roots: Set<CardId> = new Set();
+
 // ─── Session state ────────────────────────────────────────────────────────────
 
 export let player_id   = 0 as PlayerId;

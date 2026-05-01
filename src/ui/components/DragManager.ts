@@ -15,15 +15,19 @@ import {
   SURFACE_WORLD,
   isDraggableCardType,
   isPassableCardType,
+  soul_id,
   type CardId,
   type ClientCard,
   type MacroLocation,
   type MicroLocation,
 } from "@/spacetime/Data";
+import { spacetime } from "@/spacetime/SpacetimeManager";
 import {
   isBottomTitleByDef,
   getEffectiveTitleOnBottom,
 } from "@/definitions/CardDefinitions";
+import { syncStackActions } from "@/definitions/ActionCache";
+import { collectUpChain, collectDownChain } from "@/definitions/RecipeDefinitions";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import {
   type InputManager,
@@ -35,6 +39,23 @@ import { Card } from "./Card";
 import { CardStack } from "./CardStack";
 import { Inventory } from "./Inventory";
 import { Tile } from "./Tile";
+
+function collectFullStack(rootId: CardId): CardId[] {
+  const ids: CardId[] = [];
+  const seen = new Set<CardId>();
+  const queue: CardId[] = [rootId];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    ids.push(current);
+    const up = stacked_up_children.get(current);
+    if (up) for (const child of up) queue.push(child);
+    const down = stacked_down_children.get(current);
+    if (down) for (const child of down) queue.push(child);
+  }
+  return ids;
+}
 
 const DEFAULT_TITLE_H        = 24;
 const DEFAULT_CARD_H         = 120;
@@ -479,6 +500,22 @@ export class DragManager extends LayoutObject {
       stackClientCardUp(rootId, leafId);
       this._flipDescendants(rootId, false);
     }
+
+    const stackIds = collectFullStack(destRoot);
+    const cardIds:        CardId[] = [];
+    const macroLocations: bigint[] = [];
+    const microLocations: number[] = [];
+    const flags:          number[] = [];
+    for (const id of stackIds) {
+      const c = client_cards[id];
+      if (!c) continue;
+      cardIds.push(c.card_id);
+      macroLocations.push(c.macro_location);
+      microLocations.push(c.micro_location);
+      flags.push(c.flags);
+    }
+    spacetime.setCardPositions(cardIds, macroLocations, microLocations, flags);
+    syncStackActions(destRoot, collectUpChain(destRoot), collectDownChain(destRoot), soul_id);
 
     return dropCard;
   }

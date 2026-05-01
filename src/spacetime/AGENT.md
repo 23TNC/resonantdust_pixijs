@@ -1,58 +1,82 @@
 # AGENT.md — spacetime/
 
 ## Purpose
-Client-side SpacetimeDB-facing state layer: server/client record schemas, pack/unpack helpers, secondary indexes, and debug bootstrap data.
+Client-side SpacetimeDB state layer: server/client record schemas, pack/unpack helpers, secondary indexes, and local mutation helpers.
 
 ## Important files
-- `Data.ts`: canonical record shapes, pack/unpack helpers, global state tables, client-only mutation helpers.
+- `Data.ts`: canonical record shapes, pack/unpack helpers, global state tables, upsert/remove helpers, local mutation helpers.
+- `SpacetimeManager.ts`: subscription callbacks — writes to `server_*` tables and calls `upsert*` / `remove*` helpers.
 - `DebugData.ts`: local bootstrap data for offline testing.
 - `bindings/`: **DO NOT EDIT** — auto-generated SpacetimeDB TypeScript bindings.
 
 ## Data.ts overview
 
-### ID types (aliases over `number`)
-`CardId`, `PlayerId`, `ZoneId`, `PackedPosition`
+### ID types (aliases over `number` or `bigint`)
+`CardId`, `PlayerId`, `ActionId` → `number` (u32)
+`MacroLocation`, `MicroLocation` → `bigint` (u64) and `number` (u32)
 
 ### Server record shapes (mirrors DB schema)
 `ServerCard`, `ServerPlayer`, `ServerAction`, `ServerZone`
 
-### Client record shapes (extends server + derived + local state)
+### Client record shapes (extends server + decoded fields + local UI state)
+
 `ClientCard` adds:
-- Unpacked from zone: `zone_q`, `zone_r`, `z`
-- Unpacked from position: `local_q`, `local_r`, `world_flag`, `linked_flag`
-- Derived: `world_q`, `world_r`, `card_type`, `definition_id`
-- Local UI state (not server-authoritative): `selected`, `dragging`, `returning`, `hidden`, `stale`, `dirty`
+- From `packed_definition`: `card_type`, `category`, `definition_id`
+- From `flags`: `stacked_up`, `stacked_down`, `stackable`, `position_locked`, `position_hold`
+- From `macro_location`: `surface`, `layer`, `zone_q`, `zone_r`, `panel_card_id`
+- From `micro_location` (mode depends on surface + stacked): `stacked_on_id`, `local_q`, `local_r`, `pixel_x`, `pixel_y`
+- Derived: `world_q`, `world_r`
+- Local UI state (not server-authoritative): `selected`, `dragging`, `animating`, `hidden`, `stale`, `dirty`, `dead`
 
-### Bit packing schemes
-| Field | Bit layout |
+`ClientAction` adds:
+- All location fields (same as ClientCard)
+- `local_start: number` — `Date.now()/1000` stamped at first receipt; preserved across server updates so progress bars always animate from 0%
+
+### Bit packing
+
+| Location | Encoding |
 |---|---|
-| ZoneId | `[31:20]=zone_q (i12)  [19:8]=zone_r (i12)  [7:0]=z (u8)` |
-| PackedPosition | `[7]=linked_flag  [6]=world_flag  [5:3]=local_q  [2:0]=local_r` |
-| Card definition | `[15:12]=card_type (u4)  [11:0]=definition_id (u12)` |
-| Zone definition | `[7:4]=card_type (u4)  [3:0]=category (u4)` |
-
-### Card flags (`ServerCard.flags`)
-    CARD_FLAG_POSITION_LOCKED = 1 << 0   // card cannot be moved by player
-    CARD_FLAG_POSITION_HOLD   = 1 << 1   // position temporarily held (mid-server-action)
-
-Use `parseCardFlags(flags)` → `{ position_locked, position_hold }`.
+| `macro_location` surface=1 | `[zone_q:i16][zone_r:i16][reserved:u16][layer:u8][1:u8]` |
+| `macro_location` surface=2 | `[card_id:u32][reserved:u16][layer:u8][2:u8]` |
+| `micro_location` stacked | full u32 = `stacked_on_id` |
+| `micro_location` surface=1 | `[local_q:u4][local_r:u4][reserved:u24]` |
+| `micro_location` surface=2 | `[pixel_x:i16][pixel_y:i16]` |
+| `packed_definition` | `[card_type:u4][category:u4][definition_id:u8]` |
+| `flags` | `STACKED_UP=1 STACKED_DOWN=2 STACKABLE=4 POSITION_LOCKED=8 POSITION_HOLD=16` |
 
 ### Global tables
-    server_cards, server_players, server_actions, server_zones   // written by subscription callbacks
-    client_cards, client_zones                                    // derived; also carries local state
-    client_cards_by_zone                                          // secondary index; kept in sync automatically
+    server_cards, server_players, server_actions, server_zones   // written by subscription callbacks only
+    client_cards, client_players, client_actions, client_zones   // derived + local state
+
+### Secondary indexes (auto-maintained by upsert/remove helpers)
+    macro_location_cards   Map<MacroLocation, Set<CardId>>
+    macro_location_players Map<MacroLocation, Set<PlayerId>>
+    macro_location_actions Map<MacroLocation, Set<ActionId>>
+    stacked_up_children    Map<CardId, Set<CardId>>   // parent → children above it
+    stacked_down_children  Map<CardId, Set<CardId>>   // parent → children below it
 
 ### Key mutation helpers
-- `upsertClientCard(server)` / `removeClientCard(id)` — write-through with zone index maintenance
-- `updateClientCardLocation(id, zone, position)` — local move not yet published to server
-- `buildClientCard(server, previous?)` — preserves local-only state (dragging, returning, etc.) across server updates
+- `upsertClientCard(server)` / `removeClientCard(id)` — write-through with index maintenance
+- `upsertClientAction(server)` / `removeClientAction(id)` — preserves `local_start` on updates
+- `moveClientCard(id, macro, micro)` — local move without server publish
+- `stackClientCardUp(childId, parentId)` / `stackClientCardDown(childId, parentId)` — optimistic stack
+- `buildClientCard(server, previous?)` — preserves local-only fields across server updates
+
+### Action helpers
+- `isActionRunning(action)`: `action.end !== 0` (end=0 means queued/not started)
+- `getActionProgress(action, now_seconds)`: `(now - local_start) / (end - local_start)`, clamped [0,1]
 
 ## Conventions
-- Keep pack/unpack helpers deterministic and symmetric with the Rust server (`packing.rs`).
+- Keep pack/unpack helpers symmetric with the Rust server (`packing.rs`).
 - Treat `server_*` tables as read-only outside subscription callbacks.
-- `client_*` tables may carry local-only state; be careful not to clobber it on server update (see `buildClientCard` — it copies previous local state).
+- `client_*` tables carry local UI state — never clobber it on server update (see `buildClientCard` — it copies previous local state).
 - Coordinate packing uses fixed bit widths; changing masks/shifts is high-risk.
 
 ## Ownership boundaries
-- Owns data representation and transform utilities.
+- Owns data representation and transform utilities only.
 - Does not own Pixi scene/layout rendering code.
+
+## Pitfalls
+- `local_start` is stamped at first receipt (insert), not on updates — `upsertClientAction` passes `previous?.local_start` to preserve it.
+- `stacked_on_id` is only valid when `stacked_up || stacked_down`; it is 0 otherwise.
+- `surface`, `layer`, etc. on `ClientCard` are decoded from `macro_location` at build time — don't read them from the raw server row.

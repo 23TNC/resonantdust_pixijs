@@ -130,7 +130,7 @@ export class DetailsPanel extends LayoutLabel {
   // ─── Section helpers ─────────────────────────────────────────────────────
 
   private _header(card: ClientCard, def: CardDefinition | undefined): string[] {
-    const name = def?.name ?? `card #${card.card_id}`;
+    const name = def?.display_name ?? `card #${card.card_id}`;
     return [
       name,
       `${this._typeLabel(card.card_type)} #${card.card_id}`,
