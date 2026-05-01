@@ -8,11 +8,9 @@ import {
   CARD_TYPE_REQUISITES,
   CARD_TYPE_REVERY,
   CARD_TYPE_SOUL,
-  CARD_TYPE_TILE,
+  CARD_TYPE_FLOOR,
   CARD_TYPE_TILE_OBJECT,
   CARD_TYPE_TILE_DECORATOR,
-  SURFACE_WORLD,
-  SURFACE_PANEL,
   type ClientCard,
 } from "@/spacetime/Data";
 import {
@@ -84,7 +82,7 @@ export class DetailsPanel extends LayoutLabel {
   private _formatCard(card: ClientCard, def: CardDefinition | undefined): string[] {
     switch (card.card_type) {
       case CARD_TYPE_SOUL: return this._formatSoul(card, def);
-      case CARD_TYPE_TILE:
+      case CARD_TYPE_FLOOR:
       case CARD_TYPE_TILE_OBJECT:
       case CARD_TYPE_TILE_DECORATOR:
         return this._formatTile(card, def);
@@ -139,18 +137,20 @@ export class DetailsPanel extends LayoutLabel {
   }
 
   private _location(card: ClientCard): string[] {
-    if (card.surface === SURFACE_WORLD) {
-      return [`World: q=${card.world_q}  r=${card.world_r}  z=${card.layer}`];
+    if (card.is_world) {
+      return [`World: q=${card.world_q}  r=${card.world_r}  layer=${card.layer}`];
     }
-    if (card.surface === SURFACE_PANEL) {
-      return [`Panel: x=${card.pixel_x}  y=${card.pixel_y}  layer=${card.layer}`];
+    if (card.is_panel) {
+      return [`Panel: x=${card.pixel_x}  y=${card.pixel_y}  layer=${card.layer}  soul=#${card.panel_card_id}`];
     }
     return [];
   }
 
   private _stackingInfo(card: ClientCard): string[] {
-    if (card.stacked_up)   return [`Stacked up on #${card.stacked_on_id}`];
-    if (card.stacked_down) return [`Stacked down on #${card.stacked_on_id}`];
+    if (card.stacked_up)        return [`Stacked up on #${card.stacked_on_id}`];
+    if (card.stacked_down)      return [`Stacked down on #${card.stacked_on_id}`];
+    if (card.attached_to_floor) return [`Attached to floor at hex (${card.local_q}, ${card.local_r})`];
+    if (card.attached)          return [`Attached to hex card #${card.attached_to_id}`];
     return [];
   }
 
@@ -181,7 +181,7 @@ export class DetailsPanel extends LayoutLabel {
       case CARD_TYPE_REQUISITES:     return "Requisites";
       case CARD_TYPE_REVERY:         return "Revery";
       case CARD_TYPE_SOUL:           return "Soul";
-      case CARD_TYPE_TILE:           return "Tile";
+      case CARD_TYPE_FLOOR:          return "Floor";
       case CARD_TYPE_TILE_OBJECT:    return "Tile Object";
       case CARD_TYPE_TILE_DECORATOR: return "Tile Decorator";
       default:                       return `Type ${t}`;

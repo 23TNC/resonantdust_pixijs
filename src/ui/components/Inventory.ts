@@ -1,15 +1,17 @@
 import { Graphics } from "pixi.js";
 import {
   client_cards,
-  macro_location_cards,
   moveClientCard,
   packMacroPanel,
   packMicroPixel,
-  orphaned_roots,
+  soul_id,
   viewed_id,
   type CardId,
   type MicroLocation,
 } from "@/spacetime/Data";
+import { consumeOrphaned } from "@/model/CardModel";
+import { getRoots } from "@/model/RootProjection";
+import { observe as observeStack, unobserve as unobserveStack } from "@/coordinators/ActionCoordinator";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { type InputManager, type InputKeyData } from "@/ui/input/InputManager";
 import { CardStack } from "./CardStack";
@@ -60,10 +62,10 @@ const GRID_FADE_THRESHOLD = 0.005;
  * Displays and manages CardStack objects for cards at a soul's panel.
  *
  * Only cards that pass all of these filters are shown:
- *   • macro_location === packMacroPanel(viewed_id, z)
+ *   • macro_zone === packMacroPanel(viewed_id), layer === this._z
  *   • dragging === false
  *   • animating === false
- *   • not stacked (stacked_up === false && stacked_down === false)
+ *   • not stacked (stack_state == LOOSE)
  *   • card_type is in the provided card_types set
  *
  * Reconciliation (add/remove stacks) happens in updateLayoutChildren so that
@@ -172,6 +174,7 @@ export class Inventory extends LayoutObject {
       if (!roots.has(rootId)) {
         this._stacks.delete(rootId);
         this._floatPos.delete(rootId);
+        unobserveStack(rootId);
         this.removeLayoutChild(stack);
         stack.destroy({ children: true });
       }
@@ -185,9 +188,9 @@ export class Inventory extends LayoutObject {
         stack.setCardId(rootId);
         this._stacks.set(rootId, stack);
         this._floatPos.set(rootId, { x: card?.pixel_x ?? 0, y: card?.pixel_y ?? 0 });
-        const depth = orphaned_roots.has(rootId) ? -1 : 0;
-        orphaned_roots.delete(rootId);
+        const depth = consumeOrphaned(rootId) ? -1 : 0;
         this.addLayoutChild(stack, depth);
+        observeStack(rootId, soul_id);
       }
     }
 
@@ -344,21 +347,13 @@ export class Inventory extends LayoutObject {
   // ─── Private ─────────────────────────────────────────────────────────────
 
   private _findRoots(): Set<CardId> {
-    const roots = new Set<CardId>();
-    const ids   = macro_location_cards.get(packMacroPanel(viewed_id, this._z));
-    if (!ids) return roots;
-
-    for (const card_id of ids) {
-      const card = client_cards[card_id];
-      if (!card)                                continue;
-      if (card.dragging)                        continue;
-      if (card.animating)                       continue;
-      if (card.stacked_up || card.stacked_down) continue;
-      if (!this._cardTypeSet.has(card.card_type)) continue;
-      roots.add(card_id);
-    }
-
-    return roots;
+    return getRoots({
+      macro_zone: packMacroPanel(viewed_id),
+      layer:      this._z,
+      panelOnly:  true,
+      cardTypes:  this._cardTypeSet,
+      // excludeStacked + excludeDragState default to true.
+    });
   }
 
   /**
@@ -429,14 +424,14 @@ export class Inventory extends LayoutObject {
 
   /** Round float positions to integers and write pixel_x/pixel_y back into client_cards. */
   private _writeBack(): void {
-    const macro = packMacroPanel(viewed_id, this._z);
+    const macro_zone = packMacroPanel(viewed_id);
     for (const [id, pos] of this._floatPos) {
       const card = client_cards[id];
       if (!card) continue;
       const newX = Math.round(pos.x);
       const newY = Math.round(pos.y);
       if (newX === card.pixel_x && newY === card.pixel_y) continue;
-      moveClientCard(id, macro, packMicroPixel(newX, newY));
+      moveClientCard(id, this._z, macro_zone, 0, packMicroPixel(newX, newY));
     }
   }
 }

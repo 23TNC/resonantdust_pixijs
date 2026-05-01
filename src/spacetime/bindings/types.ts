@@ -16,8 +16,10 @@ export const Action = __t.object("Action", {
   recipe: __t.u16(),
   end: __t.u32(),
   ownerId: __t.u32(),
-  macroLocation: __t.u64(),
-  microLocation: __t.u32(),
+  layer: __t.u8(),
+  macroZone: __t.u32(),
+  microZone: __t.u8(),
+  participants: __t.u8(),
 });
 export type Action = __Infer<typeof Action>;
 
@@ -30,7 +32,9 @@ export type ActionScheduler = __Infer<typeof ActionScheduler>;
 
 export const Card = __t.object("Card", {
   cardId: __t.u32(),
-  macroLocation: __t.u64(),
+  layer: __t.u8(),
+  macroZone: __t.u32(),
+  microZone: __t.u8(),
   microLocation: __t.u32(),
   ownerId: __t.u32(),
   flags: __t.u16(),
@@ -44,13 +48,15 @@ export const Player = __t.object("Player", {
   playerId: __t.u32(),
   name: __t.string(),
   soulId: __t.u32(),
-  macroLocation: __t.u64(),
-  microLocation: __t.u32(),
+  layer: __t.u8(),
+  macroZone: __t.u32(),
+  microZone: __t.u8(),
 });
 export type Player = __Infer<typeof Player>;
 
 export const Zone = __t.object("Zone", {
-  macroLocation: __t.u64(),
+  layer: __t.u8(),
+  macroZone: __t.u32(),
   definition: __t.u8(),
   t0: __t.u64(),
   t1: __t.u64(),

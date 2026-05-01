@@ -16,6 +16,8 @@ export default __t.row({
   recipe: __t.u16(),
   end: __t.u32(),
   ownerId: __t.u32().name("owner_id"),
-  macroLocation: __t.u64().name("macro_location"),
-  microLocation: __t.u32().name("micro_location"),
+  layer: __t.u8(),
+  macroZone: __t.u32().name("macro_zone"),
+  microZone: __t.u8().name("micro_zone"),
+  participants: __t.u8(),
 });

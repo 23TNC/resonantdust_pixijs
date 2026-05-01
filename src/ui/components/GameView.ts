@@ -1,4 +1,10 @@
-import { client_cards, observer_id, viewed_id } from "@/spacetime/Data";
+import { client_cards, observer_id, viewed_id, WORLD_LAYER_GROUND } from "@/spacetime/Data";
+import {
+  CARD_TYPE_REQUISITES,
+  CARD_TYPE_REVERY,
+  CARD_TYPE_DISCIPLINE,
+  CARD_TYPE_FACULTY,
+} from "@/definitions/CardTypes";
 import { LayoutRoot } from "@/ui/layout/LayoutRoot";
 import { LayoutLayers } from "@/ui/layout/LayoutLayers";
 import { LayoutObject } from "@/ui/layout/LayoutObject";
@@ -10,7 +16,8 @@ import { World } from "./World";
 import { ViewTitle } from "./ViewTitle";
 import { FrameRate } from "./FrameRate";
 import { Inventory } from "./Inventory";
-import { DragManager } from "./DragManager";
+import { DragOverlay } from "./DragOverlay";
+import { DragController } from "@/coordinators/DragController";
 import { ParticleManager } from "@/ui/effects/ParticleManager";
 
 /**
@@ -48,7 +55,8 @@ export class GameView extends LayoutRoot {
   private readonly _world:       World;
   private readonly _viewTitle:   ViewTitle;
   private readonly _inventory:   Inventory;
-  private readonly _dragManager:        DragManager;
+  private readonly _dragOverlay:        DragOverlay;
+  private readonly _dragController:     DragController;
   private readonly _particleManager:    ParticleManager;
   private readonly _boundParticleTick:  (ticker: { deltaMS: number }) => void;
 
@@ -68,9 +76,14 @@ export class GameView extends LayoutRoot {
     const CARD_H  = Math.round(CARD_W * 4 / 3);
     const TITLE_H = 24;
 
+    // Fall back to WORLD_LAYER_GROUND if the soul card hasn't streamed yet —
+    // GameScene's super() runs before setViewedId, so client_cards[viewed_id]
+    // is typically undefined here.  Defaulting to a panel layer (the old
+    // behavior) means the World subscribes to the wrong layer and never
+    // receives any zone rows.
     const soul = client_cards[viewed_id];
     this._world = new World({
-      z:           soul?.layer ?? 1,
+      z:           soul?.layer ?? WORLD_LAYER_GROUND,
       tileRadius:  TILE_R,
       stackWidth:  CARD_W,
       cardHeight:  CARD_H,
@@ -94,7 +107,14 @@ export class GameView extends LayoutRoot {
     // ── Right column ───────────────────────────────────────────────────────
     this._inventory = new Inventory({
       observer_id,
-      card_types:  [1, 2, 3, 4],
+      // The four inventory-resident card types.  Constants are loaded by
+      // bootstrapCardTypes() in main.ts before this constructor runs.
+      card_types:  [
+        CARD_TYPE_REQUISITES,
+        CARD_TYPE_REVERY,
+        CARD_TYPE_DISCIPLINE,
+        CARD_TYPE_FACULTY,
+      ],
       stackWidth:  CARD_W,
       cardHeight:  CARD_H,
       titleHeight: TITLE_H,
@@ -130,15 +150,15 @@ export class GameView extends LayoutRoot {
     this._layers.add(this._world, "world");
     this._layers.add(outerCol, "game");
 
-    // ── Drag overlay ──────────────────────────────────────────────────────
-    this._dragManager = new DragManager({
-      input:       this._input,
+    // ── Drag overlay (view) + controller (input handling) ─────────────────
+    this._dragOverlay = new DragOverlay({
       stackWidth:  CARD_W,
       cardHeight:  CARD_H,
       titleHeight: TITLE_H,
     });
-    this._layers.add(this._dragManager, "overlay");
-    this._dragManager.setInventory(this._inventory);
+    this._layers.add(this._dragOverlay, "overlay");
+    this._dragOverlay.setInventory(this._inventory);
+    this._dragController = new DragController(this._input, this._dragOverlay);
 
     this._particleManager   = new ParticleManager();
     this._boundParticleTick = e => this._particleManager.tick(e.deltaMS);
@@ -149,6 +169,7 @@ export class GameView extends LayoutRoot {
 
   override destroy(options?: Parameters<LayoutRoot["destroy"]>[0]): void {
     getApp().ticker.remove(this._boundParticleTick, this);
+    this._dragController.destroy();
     this._input.destroy();
     super.destroy(options);
   }

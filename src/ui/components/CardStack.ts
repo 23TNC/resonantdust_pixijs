@@ -1,26 +1,19 @@
 import { Point } from "pixi.js";
 import {
   client_cards,
-  stacked_up_children,
-  stacked_down_children,
-  moveClientCard,
-  stackClientCardUp,
-  stackClientCardDown,
   packMacroPanel,
   packMicroPixel,
-  packMicroStacked,
-  orphaned_roots,
+  PANEL_LAYER_INVENTORY,
   soul_id,
-  SURFACE_PANEL,
-  CARD_FLAG_STACKED_UP,
-  CARD_FLAG_STACKED_DOWN,
   type CardId,
 } from "@/spacetime/Data";
+import { Stack } from "@/model/Stack";
+import { deathState, markOrphaned } from "@/model/CardModel";
 import { LayoutObject, type LayoutObjectOptions } from "@/ui/layout/LayoutObject";
 import { spacetime } from "@/spacetime/SpacetimeManager";
-import { syncStackActions } from "@/definitions/ActionCache";
+import { DeathCoordinator } from "@/coordinators/DeathCoordinator";
 import { Card } from "./Card";
-import { DragManager } from "./DragManager";
+import { DragOverlay } from "./DragOverlay";
 
 export interface CardStackOptions extends LayoutObjectOptions {
   card_id?:         CardId;
@@ -31,12 +24,11 @@ export interface CardStackOptions extends LayoutObjectOptions {
   ignoreDragState?: boolean;
 }
 
-const MAX_STACK_DEPTH = 64;
-
 /**
  * Displays a root card with two independent branches of stacked children.
  *
- * The root has neither CARD_FLAG_STACKED_UP nor CARD_FLAG_STACKED_DOWN.
+ * The root has stack_state == LOOSE or ATTACHED (`is_root(flags)`); only
+ * stacked_up/stacked_down children point at the root via micro_location.
  * Cards in stacked_up_children   form the UP   branch — each peeks above the
  * previous card with only its top title bar visible.
  * Cards in stacked_down_children form the DOWN branch — each peeks below the
@@ -167,19 +159,24 @@ export class CardStack extends LayoutObject {
       return;
     }
 
-    if (client_cards[this._rootCardId]?.dead === 2) {
-      this._detachBranchChildren(this._rootCardId, stacked_up_children,   true);
-      this._detachBranchChildren(this._rootCardId, stacked_down_children, false);
+    if (deathState(this._rootCardId) === 2) {
+      const dyingStack = new Stack(this._rootCardId);
+      this._detachBranchChildren(dyingStack, "up");
+      this._detachBranchChildren(dyingStack, "down");
       const dying_id     = this._rootCardId;
       this._rootCardId   = 0;
       this._clearAll();
-      spacetime.finalizeCardRemoval(dying_id);
+      DeathCoordinator.finalize(dying_id);
       return;
     }
 
-    // Splice out any dead===2 branch cards before re-walking the chains.
-    this._spliceBranchDeaths(this._upChain,   stacked_up_children,   true);
-    this._spliceBranchDeaths(this._downChain, stacked_down_children, false);
+    // Finalize any dead===2 branch cards before re-walking the chains.  The
+    // server-side splice in complete_action has already re-parented surviving
+    // children onto a surviving ancestor; the deferred-upsert mechanism in
+    // Data.ts holds those re-parent updates until finalization fires here, so
+    // the chain re-walks cleanly on the next pass.
+    this._spliceBranchDeaths(this._upChain);
+    this._spliceBranchDeaths(this._downChain);
 
     // ── Ensure root card exists ───────────────────────────────────────────
     if (!this._rootCard) {
@@ -187,12 +184,11 @@ export class CardStack extends LayoutObject {
       this.addLayoutChild(this._rootCard);
     }
 
-    // ── Resolve branches (stops at dead>=1 cards) ─────────────────────────
-    const upChain   = this._walkBranch(stacked_up_children);
-    const downChain = this._walkBranch(stacked_down_children);
-
-    const chainChanged = !this._arraysEqual(this._upChain, upChain)
-                      || !this._arraysEqual(this._downChain, downChain);
+    // ── Resolve branches via Stack ────────────────────────────────────────
+    const stack     = new Stack(this._rootCardId);
+    const walkOpts  = { excludeDragState: !this._ignoreDragState };
+    const upChain   = stack.upChain(walkOpts);
+    const downChain = stack.downChain(walkOpts);
 
     if (!this._arraysEqual(this._upChain, upChain)) {
       this._syncBranch(upChain.length, this._upCards);
@@ -203,14 +199,8 @@ export class CardStack extends LayoutObject {
       this._downChain = downChain;
     }
 
-    if (chainChanged && !this._ignoreDragState) {
-      syncStackActions(
-        this._rootCardId,
-        [this._rootCardId, ...upChain],
-        [this._rootCardId, ...downChain],
-        soul_id,
-      );
-    }
+    // Action sync is owned by ActionCoordinator (subscribed via Inventory /
+    // World on stack creation).  CardStack no longer triggers it directly.
 
     // Register/unregister listeners for the full current chain.
     this._syncChainListeners(new Set([this._rootCardId, ...upChain, ...downChain]));
@@ -274,94 +264,48 @@ export class CardStack extends LayoutObject {
     this.innerRect.height = this._cardHeight + upExtra + downExtra;
   }
 
-  /**
-   * Walk one branch index from the root, returning the ordered chain of
-   * child card IDs (root not included).  Stops at cycles, missing cards,
-   * dying/dead cards (dead >= 1), dragging/animating cards (unless
-   * ignoreDragState), or MAX_STACK_DEPTH.
-   */
-  private _walkBranch(index: Map<CardId, Set<CardId>>): CardId[] {
-    const chain: CardId[] = [];
-    const seen  = new Set<CardId>([this._rootCardId]);
-    let current = this._rootCardId;
-
-    while (chain.length < MAX_STACK_DEPTH) {
-      const children = index.get(current);
-      if (!children || children.size === 0) break;
-      const next = children.values().next().value!;
-      if (seen.has(next)) break;
-      const card = client_cards[next];
-      if (!card || card.dead >= 2) break;
-      if (!this._ignoreDragState && (card.dragging || card.animating)) break;
-      seen.add(next);
-      chain.push(next);
-      current = next;
-    }
-
-    return chain;
-  }
-
-  /** Move a card to the soul's inventory; its stacked children follow. Tweens visually if DragManager is available. */
+  /** Move a card to the soul's inventory; its stacked children follow. Tweens visually if DragOverlay is available. */
   private _returnToInventory(card_id: CardId, depthFromRoot = 0, upChain = false): void {
     if (!client_cards[card_id]) return;
     const root = client_cards[this._rootCardId];
+    const overlay = DragOverlay.getInstance();
     let micro: number;
-    if (root?.surface === SURFACE_PANEL && root.panel_card_id === soul_id) {
+    if (root?.is_panel && root.panel_card_id === soul_id) {
       const dy = depthFromRoot * this._titleHeight * (upChain ? -1 : 1);
       micro = packMicroPixel(root.pixel_x, root.pixel_y + dy);
     } else {
-      micro = DragManager.getInstance()?.randomInventoryMicro() ?? packMicroPixel(0, 0);
+      micro = overlay?.randomInventoryMicro() ?? packMicroPixel(0, 0);
     }
-    orphaned_roots.add(card_id);
-    moveClientCard(card_id, packMacroPanel(soul_id, 1), micro);
+    markOrphaned(card_id);
+    Stack.detach(card_id, PANEL_LAYER_INVENTORY, packMacroPanel(soul_id), 0, micro);
     spacetime.notifyCardListeners(card_id);
 
-    const dm = DragManager.getInstance();
-    if (dm) {
+    if (overlay) {
       const center = this.toGlobal(new Point(
         this.innerRect.x + this.innerRect.width  / 2,
         this.innerRect.y + this.innerRect.height / 2,
       ));
-      dm.beginReturnTween(card_id, center.x, center.y);
+      overlay.beginReturnTween(card_id, center.x, center.y);
     }
   }
 
-  /** For each dead===2 card in a previous chain, splice its children onto the predecessor then finalize. */
-  private _spliceBranchDeaths(chain: CardId[], index: Map<CardId, Set<CardId>>, upChain: boolean): void {
-    for (let i = 0; i < chain.length; i++) {
-      const id = chain[i];
-      if (client_cards[id]?.dead !== 2) continue;
-      const predecessorId = i === 0 ? this._rootCardId : chain[i - 1];
-      for (const child of (index.get(id) ?? [])) this._spliceChild(child, predecessorId, upChain);
-      spacetime.finalizeCardRemoval(id);
+  /**
+   * Finalize each dead===2 card in the previous chain.  Re-parenting their
+   * children was already done by the server (in complete_action::splice_chain)
+   * and held by the client's deferred-upsert mechanism; finalization flushes
+   * those held updates so the next layout pass re-walks a clean chain.
+   */
+  private _spliceBranchDeaths(chain: CardId[]): void {
+    for (const id of chain) {
+      if (deathState(id) !== 2) continue;
+      DeathCoordinator.finalize(id);
     }
-  }
-
-  /** Re-parent a child onto a new parent after its old parent dies, syncing to the server. */
-  private _spliceChild(childId: CardId, newParentId: CardId, upChain: boolean): void {
-    const child     = client_cards[childId];
-    const newParent = client_cards[newParentId];
-    if (!child || !newParent) {
-      this._returnToInventory(childId, 0, upChain);
-      return;
-    }
-
-    if (upChain) stackClientCardUp(childId, newParentId);
-    else         stackClientCardDown(childId, newParentId);
-
-    const flag     = upChain ? CARD_FLAG_STACKED_UP : CARD_FLAG_STACKED_DOWN;
-    const newFlags = (child.flags & ~(CARD_FLAG_STACKED_UP | CARD_FLAG_STACKED_DOWN)) | flag;
-    spacetime.setCardPositions(
-      [childId],
-      [newParent.macro_location],
-      [packMicroStacked(newParentId)],
-      [newFlags],
-    );
   }
 
   /** When the root dies, send its direct branch children back to inventory. */
-  private _detachBranchChildren(rootId: CardId, index: Map<CardId, Set<CardId>>, upChain: boolean): void {
-    for (const child of (index.get(rootId) ?? [])) this._returnToInventory(child, 1, upChain);
+  private _detachBranchChildren(stack: Stack, direction: "up" | "down"): void {
+    const upChain = direction === "up";
+    for (const child of stack.directChildren(direction)) this._returnToInventory(child, 1, upChain);
   }
 
   /** Keep _chainUnlistens in sync with the set of active chain card IDs. */
@@ -418,37 +362,4 @@ export class CardStack extends LayoutObject {
     return true;
   }
 
-  // ─── Static leaf walks ───────────────────────────────────────────────────
-  // Pure data walks for callers (e.g. drag-and-drop merges) that need the
-  // attachment point of an existing stack.  Unlike _walkBranch, these ignore
-  // dragging/animating state — the goal is the true data leaf, not where a
-  // visual chain happens to stop.
-
-  /** Walk stacked_up_children from rootId; return the up-branch leaf (or rootId if empty). */
-  static findUpLeaf(rootId: CardId): CardId {
-    return CardStack._walkToLeaf(rootId, stacked_up_children);
-  }
-
-  /** Walk stacked_down_children from rootId; return the down-branch leaf (or rootId if empty). */
-  static findDownLeaf(rootId: CardId): CardId {
-    return CardStack._walkToLeaf(rootId, stacked_down_children);
-  }
-
-  private static _walkToLeaf(rootId: CardId, index: Map<CardId, Set<CardId>>): CardId {
-    const seen  = new Set<CardId>([rootId]);
-    let current = rootId;
-    let steps   = 0;
-
-    while (steps < MAX_STACK_DEPTH) {
-      const children = index.get(current);
-      if (!children || children.size === 0) break;
-      const next = children.values().next().value!;
-      if (seen.has(next)) break;
-      seen.add(next);
-      current = next;
-      steps++;
-    }
-
-    return current;
-  }
 }

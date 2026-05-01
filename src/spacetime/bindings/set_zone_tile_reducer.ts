@@ -11,7 +11,8 @@ import {
 } from "spacetimedb";
 
 export default {
-  macroLocation: __t.u64(),
+  layer: __t.u8(),
+  macroZone: __t.u32(),
   localQ: __t.u8(),
   localR: __t.u8(),
   tileDef: __t.u8(),

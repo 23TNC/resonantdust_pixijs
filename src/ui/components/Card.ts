@@ -6,6 +6,8 @@ import {
   type CardId, type ClientCard,
 } from "@/spacetime/Data";
 import { spacetime } from "@/spacetime/SpacetimeManager";
+import { deathState } from "@/model/CardModel";
+import { DeathCoordinator } from "@/coordinators/DeathCoordinator";
 import { type ParticleHandle, ParticleManager } from "@/ui/effects/ParticleManager";
 import {
   getDefinitionByPacked,
@@ -177,8 +179,9 @@ export class Card extends LayoutObject {
 
   protected override redraw(): void {
     const card = client_cards[this._card_id];
+    const dead = deathState(this._card_id);
 
-    if (!card || card.dead === 2) {
+    if (!card || dead === 2) {
       this.visible = false;
       this._bg.clear();
       this._label.visible  = false;
@@ -186,7 +189,7 @@ export class Card extends LayoutObject {
       return;
     }
 
-    if (card.dead === 1) {
+    if (dead === 1) {
       this._redrawDeath(card);
       return;
     }
@@ -315,8 +318,7 @@ export class Card extends LayoutObject {
     if (t < 2) {
       this.invalidateRender();
     } else {
-      card.dead = 2;
-      spacetime.notifyCardListeners(this._card_id);
+      DeathCoordinator.notifyAnimationComplete(this._card_id);
     }
   }
 

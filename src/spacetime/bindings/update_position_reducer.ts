@@ -11,5 +11,10 @@ import {
 } from "spacetimedb";
 
 export default {
-  actionId: __t.u32(),
+  cardId: __t.u32(),
+  layer: __t.u8(),
+  macroZone: __t.u32(),
+  microZone: __t.u8(),
+  microLocation: __t.u32(),
+  flags: __t.u16(),
 };

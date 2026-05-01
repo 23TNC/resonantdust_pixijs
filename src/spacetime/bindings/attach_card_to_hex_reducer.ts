@@ -11,8 +11,6 @@ import {
 } from "spacetimedb";
 
 export default {
-  cardIds: __t.array(__t.u32()),
-  macroLocations: __t.array(__t.u64()),
-  microLocations: __t.array(__t.u32()),
-  flags: __t.array(__t.u16()),
+  cardId: __t.u32(),
+  hexCardId: __t.u32(),
 };

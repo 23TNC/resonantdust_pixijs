@@ -1,7 +1,11 @@
 import { Application } from "pixi.js";
 import { initApp } from "./app";
 import { LoginScene, SceneManager } from "./scenes";
-import { bootstrapCardDefinitions, bootstrapRecipeDefinitions } from "@/definitions";
+import {
+  bootstrapCardTypes,
+  bootstrapCardDefinitions,
+  bootstrapRecipeDefinitions,
+} from "@/definitions";
 
 async function startApp(): Promise<void> {
   const root = document.getElementById("app");
@@ -31,6 +35,10 @@ async function startApp(): Promise<void> {
   root.appendChild(app.canvas);
   app.canvas.style.display = "block";
 
+  // Order matters: card types resolve numeric ids that the card and recipe
+  // definitions reference (indirectly via packed_definition values that the
+  // matcher decodes).  Types first, then defs, then recipes.
+  bootstrapCardTypes();
   bootstrapCardDefinitions();
   bootstrapRecipeDefinitions();
 

@@ -4,7 +4,7 @@
 `src/` contains the Pixi client runtime: app bootstrapping, scenes, UI/layout, game data transforms, and SpacetimeDB integration.
 
 ## Key entrypoints
-- `main.ts`: creates Pixi app, calls `bootstrapCardDefinitions()` + `bootstrapRecipeDefinitions()`, connects to SpacetimeDB, starts scene loop.
+- `main.ts`: creates Pixi app, calls `bootstrapCardTypes()` → `bootstrapCardDefinitions()` → `bootstrapRecipeDefinitions()` (in that order — card types must be loaded before definitions parse type-id references), connects to SpacetimeDB, starts scene loop.
 - `app/AppContext.ts`: global access to initialized Pixi `Application`.
 - `scenes/`: scene lifecycle and transitions.
 - `ui/`: layout engine (`ui/layout/`), visual components (`ui/components/`), input (`ui/input/`).
@@ -29,4 +29,4 @@
 - Do not edit generated files in `spacetime/bindings/`.
 - Do not call `sync()` on sibling layout components manually.
 - `card.animating` (not `returning`) is the flag used during return tweens and drop animations.
-- Bootstrap functions (`bootstrapCardDefinitions`, `bootstrapRecipeDefinitions`) must both be called before any definition lookups; omitting either causes silent lookup failures.
+- Bootstrap functions (`bootstrapCardTypes`, `bootstrapCardDefinitions`, `bootstrapRecipeDefinitions`) must all be called before any definition lookups; omitting any causes silent lookup failures.  Order matters: types first.

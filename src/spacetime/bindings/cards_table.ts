@@ -12,7 +12,9 @@ import {
 
 export default __t.row({
   cardId: __t.u32().primaryKey().name("card_id"),
-  macroLocation: __t.u64().name("macro_location"),
+  layer: __t.u8(),
+  macroZone: __t.u32().name("macro_zone"),
+  microZone: __t.u8().name("micro_zone"),
   microLocation: __t.u32().name("micro_location"),
   ownerId: __t.u32().name("owner_id"),
   flags: __t.u16(),

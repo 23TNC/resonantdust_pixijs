@@ -11,5 +11,5 @@ import {
 } from "spacetimedb";
 
 export default {
-  macroLocation: __t.u64(),
+  macroZone: __t.u32(),
 };

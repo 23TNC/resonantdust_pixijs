@@ -34,8 +34,9 @@ import {
 } from "spacetimedb";
 
 // Import all reducer arg schemas
+import AttachCardToFloorReducer from "./attach_card_to_floor_reducer";
+import AttachCardToHexReducer from "./attach_card_to_hex_reducer";
 import BootstrapReducer from "./bootstrap_reducer";
-import CancelActionReducer from "./cancel_action_reducer";
 import DebugSpawnReducer from "./debug_spawn_reducer";
 import DeleteActionReducer from "./delete_action_reducer";
 import DeleteCardReducer from "./delete_card_reducer";
@@ -44,10 +45,7 @@ import DeleteZoneReducer from "./delete_zone_reducer";
 import DeleteZoneAtReducer from "./delete_zone_at_reducer";
 import FillZoneReducer from "./fill_zone_reducer";
 import FillZoneAtReducer from "./fill_zone_at_reducer";
-import QueueActionReducer from "./queue_action_reducer";
 import ResetAndBootstrapReducer from "./reset_and_bootstrap_reducer";
-import SetCardPositionReducer from "./set_card_position_reducer";
-import SetCardPositionsReducer from "./set_card_positions_reducer";
 import SetZoneDefinitionReducer from "./set_zone_definition_reducer";
 import SetZoneDefinitionAtReducer from "./set_zone_definition_at_reducer";
 import SetZoneRowReducer from "./set_zone_row_reducer";
@@ -56,8 +54,6 @@ import SetZoneTileReducer from "./set_zone_tile_reducer";
 import SetZoneTileAtReducer from "./set_zone_tile_at_reducer";
 import StackCardDownReducer from "./stack_card_down_reducer";
 import StackCardUpReducer from "./stack_card_up_reducer";
-import StartActionReducer from "./start_action_reducer";
-import StartActionNowReducer from "./start_action_now_reducer";
 import UnstackCardReducer from "./unstack_card_reducer";
 import UpdateCardActionIdReducer from "./update_card_action_id_reducer";
 import UpdateCardDataReducer from "./update_card_data_reducer";
@@ -67,6 +63,8 @@ import UpdateCardMicroLocationReducer from "./update_card_micro_location_reducer
 import UpdateCardOwnerIdReducer from "./update_card_owner_id_reducer";
 import UpdatePlayerLocationReducer from "./update_player_location_reducer";
 import UpdatePlayerSoulIdReducer from "./update_player_soul_id_reducer";
+import UpdatePositionReducer from "./update_position_reducer";
+import UpdatePositionsReducer from "./update_positions_reducer";
 import UpsertPlayerReducer from "./upsert_player_reducer";
 import UpsertZoneReducer from "./upsert_zone_reducer";
 import UpsertZoneAtReducer from "./upsert_zone_at_reducer";
@@ -92,8 +90,8 @@ const tablesSchema = __schema({
       { accessor: 'card_id', name: 'actions_card_id_idx_btree', algorithm: 'btree', columns: [
         'cardId',
       ] },
-      { accessor: 'macro_location', name: 'actions_macro_location_idx_btree', algorithm: 'btree', columns: [
-        'macroLocation',
+      { accessor: 'macro_zone', name: 'actions_macro_zone_idx_btree', algorithm: 'btree', columns: [
+        'macroZone',
       ] },
       { accessor: 'owner_id', name: 'actions_owner_id_idx_btree', algorithm: 'btree', columns: [
         'ownerId',
@@ -109,8 +107,11 @@ const tablesSchema = __schema({
       { accessor: 'card_id', name: 'cards_card_id_idx_btree', algorithm: 'btree', columns: [
         'cardId',
       ] },
-      { accessor: 'macro_location', name: 'cards_macro_location_idx_btree', algorithm: 'btree', columns: [
-        'macroLocation',
+      { accessor: 'layer', name: 'cards_layer_idx_btree', algorithm: 'btree', columns: [
+        'layer',
+      ] },
+      { accessor: 'macro_zone', name: 'cards_macro_zone_idx_btree', algorithm: 'btree', columns: [
+        'macroZone',
       ] },
       { accessor: 'owner_id', name: 'cards_owner_id_idx_btree', algorithm: 'btree', columns: [
         'ownerId',
@@ -123,8 +124,8 @@ const tablesSchema = __schema({
   players: __table({
     name: 'players',
     indexes: [
-      { accessor: 'macro_location', name: 'players_macro_location_idx_btree', algorithm: 'btree', columns: [
-        'macroLocation',
+      { accessor: 'macro_zone', name: 'players_macro_zone_idx_btree', algorithm: 'btree', columns: [
+        'macroZone',
       ] },
       { accessor: 'name', name: 'players_name_idx_btree', algorithm: 'btree', columns: [
         'name',
@@ -144,20 +145,24 @@ const tablesSchema = __schema({
   zones: __table({
     name: 'zones',
     indexes: [
-      { accessor: 'macro_location', name: 'zones_macro_location_idx_btree', algorithm: 'btree', columns: [
-        'macroLocation',
+      { accessor: 'layer', name: 'zones_layer_idx_btree', algorithm: 'btree', columns: [
+        'layer',
+      ] },
+      { accessor: 'macro_zone', name: 'zones_macro_zone_idx_btree', algorithm: 'btree', columns: [
+        'macroZone',
       ] },
     ],
     constraints: [
-      { name: 'zones_macro_location_key', constraint: 'unique', columns: ['macroLocation'] },
+      { name: 'zones_macro_zone_key', constraint: 'unique', columns: ['macroZone'] },
     ],
   }, ZonesRow),
 });
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
+  __reducerSchema("attach_card_to_floor", AttachCardToFloorReducer),
+  __reducerSchema("attach_card_to_hex", AttachCardToHexReducer),
   __reducerSchema("bootstrap", BootstrapReducer),
-  __reducerSchema("cancel_action", CancelActionReducer),
   __reducerSchema("debug_spawn", DebugSpawnReducer),
   __reducerSchema("delete_action", DeleteActionReducer),
   __reducerSchema("delete_card", DeleteCardReducer),
@@ -166,10 +171,7 @@ const reducersSchema = __reducers(
   __reducerSchema("delete_zone_at", DeleteZoneAtReducer),
   __reducerSchema("fill_zone", FillZoneReducer),
   __reducerSchema("fill_zone_at", FillZoneAtReducer),
-  __reducerSchema("queue_action", QueueActionReducer),
   __reducerSchema("reset_and_bootstrap", ResetAndBootstrapReducer),
-  __reducerSchema("set_card_position", SetCardPositionReducer),
-  __reducerSchema("set_card_positions", SetCardPositionsReducer),
   __reducerSchema("set_zone_definition", SetZoneDefinitionReducer),
   __reducerSchema("set_zone_definition_at", SetZoneDefinitionAtReducer),
   __reducerSchema("set_zone_row", SetZoneRowReducer),
@@ -178,8 +180,6 @@ const reducersSchema = __reducers(
   __reducerSchema("set_zone_tile_at", SetZoneTileAtReducer),
   __reducerSchema("stack_card_down", StackCardDownReducer),
   __reducerSchema("stack_card_up", StackCardUpReducer),
-  __reducerSchema("start_action", StartActionReducer),
-  __reducerSchema("start_action_now", StartActionNowReducer),
   __reducerSchema("unstack_card", UnstackCardReducer),
   __reducerSchema("update_card_action_id", UpdateCardActionIdReducer),
   __reducerSchema("update_card_data", UpdateCardDataReducer),
@@ -189,6 +189,8 @@ const reducersSchema = __reducers(
   __reducerSchema("update_card_owner_id", UpdateCardOwnerIdReducer),
   __reducerSchema("update_player_location", UpdatePlayerLocationReducer),
   __reducerSchema("update_player_soul_id", UpdatePlayerSoulIdReducer),
+  __reducerSchema("update_position", UpdatePositionReducer),
+  __reducerSchema("update_positions", UpdatePositionsReducer),
   __reducerSchema("upsert_player", UpsertPlayerReducer),
   __reducerSchema("upsert_zone", UpsertZoneReducer),
   __reducerSchema("upsert_zone_at", UpsertZoneAtReducer),

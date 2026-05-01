@@ -1,17 +1,19 @@
 import { Point } from "pixi.js";
 import {
   client_cards,
-  macro_location_cards,
   client_zones,
   packMacroWorld,
   zoneQFromMacro,
   zoneRFromMacro,
   ZONE_SIZE,
-  SURFACE_WORLD,
-  CARD_TYPE_TILE,
+  CARD_TYPE_FLOOR,
+  WORLD_LAYER_GROUND,
+  soul_id,
   type CardId,
-  type MacroLocation,
+  type MacroZone,
 } from "@/spacetime/Data";
+import { getRoots } from "@/model/RootProjection";
+import { observe as observeStack, unobserve as unobserveStack } from "@/coordinators/ActionCoordinator";
 import { spacetime } from "@/spacetime/SpacetimeManager";
 import { LayoutObject } from "@/ui/layout/LayoutObject";
 import { LayoutViewport, type LayoutViewportOptions } from "@/ui/layout/LayoutViewport";
@@ -23,6 +25,7 @@ import {
 } from "@/ui/input/InputManager";
 import { Zone } from "./Zone";
 import { CardStack } from "./CardStack";
+import { HexCard } from "./HexCard";
 import { Tile } from "./Tile";
 
 const SQRT3 = Math.sqrt(3);
@@ -30,6 +33,16 @@ const SQRT3 = Math.sqrt(3);
 const DEFAULT_TITLE_H = 24;
 const DEFAULT_CARD_H  = 120;
 const DEFAULT_STACK_W = 80;
+
+// Floor cards live in the macro index but are not "roots" in the sense of
+// CardStack-displayable items.  Filtered out at projection.  Built lazily so
+// the CARD_TYPE_FLOOR value (loaded by bootstrapCardTypes) is populated before
+// we capture it; module-load-time `new Set([CARD_TYPE_FLOOR])` would snapshot 0.
+let _world_exclude_types: ReadonlySet<number> | null = null;
+function worldExcludeTypes(): ReadonlySet<number> {
+  if (!_world_exclude_types) _world_exclude_types = new Set([CARD_TYPE_FLOOR]);
+  return _world_exclude_types;
+}
 
 // Pack two 16-bit signed integers into a 32-bit key for Map lookup.
 // Valid for world_q/world_r in [-32768, 32767].
@@ -58,7 +71,7 @@ export interface WorldOptions extends LayoutViewportOptions {
  *
  * Card overlay:
  *   World maintains one CardStack child per qualifying client_card. A card
- *   qualifies when its zone is one of the managed zones, surface === SURFACE_WORLD,
+ *   qualifies when its zone is one of the managed zones, `is_world` is true,
  *   and it is not dragging, animating, hidden, or stacked. The stack is
  *   centered on world hex (world_q, world_r) = (zone_q*8 + local_q, zone_r*8 + local_r).
  *   Reconciliation runs in updateLayoutChildren so any invalidateLayout() keeps
@@ -92,9 +105,10 @@ export class World extends LayoutViewport {
   private readonly _cardHeight:  number;
   private readonly _stackWidth:  number;
 
-  private readonly _zones           = new Map<MacroLocation, Zone>();
+  private readonly _zones           = new Map<MacroZone, Zone>();
   private readonly _stacks          = new Map<CardId, CardStack>();
-  private readonly _subscribedZones = new Set<MacroLocation>();
+  private readonly _hexCards        = new Map<CardId, HexCard>();
+  private readonly _subscribedZones = new Set<MacroZone>();
   private readonly _unlistenZones:  () => void;
   private          _zonesDirty     = true;
   private          _radiusDirty    = false;
@@ -122,7 +136,9 @@ export class World extends LayoutViewport {
 
   constructor(options: WorldOptions = {}) {
     super(options);
-    this._z           = options.z           ?? 1;
+    // Default to the ground world layer (32) so a `new World()` without an
+    // explicit z still subscribes to a world layer, not a panel layer.
+    this._z           = options.z           ?? WORLD_LAYER_GROUND;
     this._tileRadius  = options.tileRadius  ?? 16;
     this._titleHeight = options.titleHeight ?? DEFAULT_TITLE_H;
     this._cardHeight  = options.cardHeight  ?? DEFAULT_CARD_H;
@@ -152,8 +168,13 @@ export class World extends LayoutViewport {
       this._input.off("left_drag_move",  this._boundPanMove);
       this._input.off("left_drag_end",   this._boundPanEnd);
     }
-    for (const macro of this._subscribedZones) spacetime.releaseZone(this, macro);
+    for (const macro of this._subscribedZones) spacetime.releaseZone(this, this._z, macro);
     this._subscribedZones.clear();
+    // Drop coordinator listeners for any active rect stacks before super.destroy
+    // tears down the scene graph.  HexCards have no coordinator hooks today.
+    for (const rootId of this._stacks.keys()) unobserveStack(rootId);
+    this._stacks.clear();
+    this._hexCards.clear();
     super.destroy(options);
   }
 
@@ -200,8 +221,8 @@ export class World extends LayoutViewport {
     this.invalidateLayout();
   }
 
-  /** Return the Zone for a given macro_location, or undefined if not loaded. */
-  getZone(macro: MacroLocation): Zone | undefined {
+  /** Return the Zone for a given macro_zone, or undefined if not loaded. */
+  getZone(macro: MacroZone): Zone | undefined {
     return this._zones.get(macro);
   }
 
@@ -281,15 +302,15 @@ export class World extends LayoutViewport {
 
     for (let zq = zone_q_min; zq <= zone_q_max; zq++) {
       for (let zr = zone_r_min; zr <= zone_r_max; zr++) {
-        const macro = packMacroWorld(zq, zr, this._z);
+        const macro = packMacroWorld(zq, zr);
         if (this._subscribedZones.has(macro)) continue;
         this._subscribedZones.add(macro);
-        spacetime.subscribeZone(this, macro);
+        spacetime.subscribeZone(this, this._z, macro);
       }
     }
   }
 
-  private _placeZone(macro: MacroLocation, zone: Zone, R: number, hexW: number): void {
+  private _placeZone(macro: MacroZone, zone: Zone, R: number, hexW: number): void {
     const zone_q = zoneQFromMacro(macro);
     const zone_r = zoneRFromMacro(macro);
     zone.setLayout(
@@ -309,15 +330,15 @@ export class World extends LayoutViewport {
     // ── Zones ────────────────────────────────────────────────────────────
     if (this._zonesDirty) {
       this._zonesDirty = false;
-      const active = new Set<MacroLocation>();
-      for (const [macro, data] of client_zones) {
+      const active = new Set<MacroZone>();
+      for (const data of client_zones.values()) {
         if (data.layer !== this._z) continue;
-        active.add(macro);
-        if (!this._zones.has(macro)) {
-          const zone = new Zone({ zone_id: macro });
-          this._zones.set(macro, zone);
+        active.add(data.macro_zone);
+        if (!this._zones.has(data.macro_zone)) {
+          const zone = new Zone({ zone_id: data.macro_zone, layer: data.layer });
+          this._zones.set(data.macro_zone, zone);
           this.addLayoutChild(zone);
-          this._placeZone(macro, zone, R, hexW);
+          this._placeZone(data.macro_zone, zone, R, hexW);
         }
       }
       for (const [macro, zone] of this._zones) {
@@ -333,23 +354,25 @@ export class World extends LayoutViewport {
       for (const [macro, zone] of this._zones) this._placeZone(macro, zone, R, hexW);
     }
 
-    // ── Card stacks ──────────────────────────────────────────────────────
-    const roots = this._findRoots();
+    // ── Rect roots → CardStack ───────────────────────────────────────────
+    const rectRoots = this._findRectRoots();
 
     for (const [rootId, stack] of this._stacks) {
-      if (!roots.has(rootId)) {
+      if (!rectRoots.has(rootId)) {
         this._stacks.delete(rootId);
+        unobserveStack(rootId);
         this.removeLayoutChild(stack);
         stack.destroy({ children: true });
       }
     }
 
-    for (const rootId of roots) {
+    for (const rootId of rectRoots) {
       if (!this._stacks.has(rootId)) {
         const stack = new CardStack({ titleHeight: this._titleHeight });
         stack.setCardId(rootId);
         this._stacks.set(rootId, stack);
         this.addOverlay(stack);
+        observeStack(rootId, soul_id);
       }
     }
 
@@ -364,7 +387,43 @@ export class World extends LayoutViewport {
       stack.setLayout(cx - this._stackWidth / 2, cy - this._cardHeight / 2, this._stackWidth, this._cardHeight);
     }
 
-    // Zone and stack positions changed; coverage index is stale.
+    // ── Hex roots → HexCard ──────────────────────────────────────────────
+    // Floor cards are excluded — Zone renders them via the per-cell Tile
+    // path so they don't double-render here.  Other hex types (events,
+    // tile_object, tile_decorator placed in the world by recipes) get a
+    // standalone HexCard sized to the hex circumradius.
+    const hexRoots = this._findHexRoots();
+
+    for (const [rootId, hex] of this._hexCards) {
+      if (!hexRoots.has(rootId)) {
+        this._hexCards.delete(rootId);
+        this.removeLayoutChild(hex);
+        hex.destroy({ children: true });
+      }
+    }
+
+    for (const rootId of hexRoots) {
+      if (!this._hexCards.has(rootId)) {
+        const hex = new HexCard();
+        hex.setCardId(rootId);
+        this._hexCards.set(rootId, hex);
+        this.addOverlay(hex);
+      }
+    }
+
+    const hexBoundW = Math.sqrt(3) * R;
+    const hexBoundH = 2 * R;
+    for (const [rootId, hex] of this._hexCards) {
+      const card = client_cards[rootId];
+      if (!card) continue;
+      const cx = card.world_q * hexW + ((card.world_r & 1) !== 0 ? hexW / 2 : 0);
+      const cy = card.world_r * 1.5 * R;
+      // Same depth ordering as rect stacks; hex cards are also above zones.
+      this.setChildDepth(hex, 0x10000 + card.world_r);
+      hex.setLayout(cx - hexBoundW / 2, cy - hexBoundH / 2, hexBoundW, hexBoundH);
+    }
+
+    // Zone, stack, and hex positions changed; coverage index is stale.
     this._overlayDirty = true;
   }
 
@@ -410,7 +469,7 @@ export class World extends LayoutViewport {
     // ── Zone → Tile ──────────────────────────────────────────────────────
     const zone_q  = Math.floor(world_q / ZONE_SIZE);
     const zone_r  = Math.floor(world_r / ZONE_SIZE);
-    const macro = packMacroWorld(zone_q, zone_r, this._z);
+    const macro = packMacroWorld(zone_q, zone_r);
     const zone  = this._zones.get(macro);
     if (zone?.visible) {
       return zone.hitTestLayout(globalX, globalY, ignore) ?? (this._hitSelf ? this : null);
@@ -421,21 +480,38 @@ export class World extends LayoutViewport {
 
   // ─── Private ─────────────────────────────────────────────────────────────
 
-  private _findRoots(): Set<CardId> {
+  /** Roots eligible for `CardStack` rendering — rect-shape only.  Floor and
+   *  other hex types are filtered out via the shape predicate. */
+  private _findRectRoots(): Set<CardId> {
     const roots = new Set<CardId>();
     for (const macro of this._zones.keys()) {
-      const set = macro_location_cards.get(macro);
-      if (!set) continue;
-      for (const card_id of set) {
-        const card = client_cards[card_id];
-        if (!card)                                continue;
-        if (card.surface !== SURFACE_WORLD)       continue;
-        if (card.dragging)                        continue;
-        if (card.animating)                       continue;
-        if (card.hidden)                          continue;
-        if (card.stacked_up || card.stacked_down) continue;
-        if (card.card_type === CARD_TYPE_TILE)    continue;
-        roots.add(card_id);
+      for (const id of getRoots({
+        macro_zone:    macro,
+        layer:         this._z,
+        worldOnly:     true,
+        shape:         "rect",
+        excludeHidden: true,
+      })) {
+        roots.add(id);
+      }
+    }
+    return roots;
+  }
+
+  /** Roots eligible for `HexCard` rendering — hex-shape, excluding Floor
+   *  (handled by `Zone` via the per-cell `Tile` path). */
+  private _findHexRoots(): Set<CardId> {
+    const roots = new Set<CardId>();
+    for (const macro of this._zones.keys()) {
+      for (const id of getRoots({
+        macro_zone:       macro,
+        layer:            this._z,
+        worldOnly:        true,
+        shape:            "hex",
+        excludeCardTypes: worldExcludeTypes(),
+        excludeHidden:    true,
+      })) {
+        roots.add(id);
       }
     }
     return roots;

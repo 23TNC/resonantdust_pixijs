@@ -12,8 +12,6 @@ import {
 
 export default {
   cardId: __t.u32(),
-  ownerId: __t.u32(),
-  recipe: __t.u16(),
   q: __t.i32(),
   r: __t.i32(),
   layer: __t.u8(),

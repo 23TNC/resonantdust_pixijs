@@ -1,5 +1,7 @@
 import type { Identity } from "spacetimedb";
 import { DbConnection, type ErrorContext, type SubscriptionHandle } from "./bindings/index";
+import { DeathCoordinator } from "@/coordinators/DeathCoordinator";
+import { deathState } from "@/model/CardModel";
 import type {
   Card   as BoundCard,
   Player as BoundPlayer,
@@ -10,6 +12,7 @@ import {
   type CardId,
   type PlayerId,
   type ActionId,
+  type MacroZone,
   type ServerCard,
   type ServerPlayer,
   type ServerAction,
@@ -20,7 +23,7 @@ import {
   server_zones,
   client_cards,
   upsertClientCard,
-  removeClientCard,
+  bindCardChangeNotifier,
   upsertClientPlayer,
   removeClientPlayer,
   upsertClientAction,
@@ -28,6 +31,9 @@ import {
   upsertClientZone,
   removeClientZone,
   setViewedId,
+  zoneKey,
+  packMacroPanel,
+  PANEL_LAYER_INVENTORY,
 } from "./Data";
 
 type Mode = "simulated" | "connected";
@@ -37,30 +43,6 @@ interface SubscriptionEntry {
   holders: Set<object>;
 }
 
-/**
- * Single interface point for all SpacetimeDB operations.
- *
- * In "simulated" mode (default) each method directly applies the table changes
- * that SpacetimeDB subscription callbacks would normally push.
- *
- * In "connected" mode call connect() to establish a WebSocket connection.
- * Table callbacks (insert / update / delete) populate the server_* globals in
- * Data.ts and then call the corresponding upsert/remove helpers to keep the
- * client tables in sync.
- *
- * Subscriptions: call subscribe(owner, sql) to open (or share) a subscription.
- * Multiple owners may hold the same query open simultaneously.  Calling
- * releaseSubscription(owner, query) removes that owner's hold but intentionally
- * leaves the subscription open so rarely-changing data (zones, definitions) is
- * not re-fetched every time the player re-enters an area.  Call
- * collectSubscriptions() to close all zero-holder subscriptions when you need
- * to reclaim bandwidth or memory.
- *
- * Listeners: register a callback keyed by card_id to be notified when that
- * card's state changes (dead=1 on deletion, dead=2 when animation completes).
- * Card widgets use this to start their death animation; CardStack uses it to
- * detect when cleanup is due.
- */
 class SpacetimeManager {
   private _mode: Mode = "simulated";
   private _conn: DbConnection | null = null;
@@ -77,12 +59,6 @@ class SpacetimeManager {
 
   // ─── Connection ─────────────────────────────────────────────────────────────
 
-  /**
-   * Establish a WebSocket connection to a SpacetimeDB instance.
-   * Switches the manager to "connected" mode and registers table callbacks so
-   * all subscription data is routed into server_* / client_* tables.
-   * No-op if already connected.
-   */
   connect(uri: string, moduleName: string): void {
     if (this._conn) {
       console.warn("SpacetimeManager: already connected");
@@ -92,7 +68,7 @@ class SpacetimeManager {
     DbConnection.builder()
       .withUri(uri)
       .withDatabaseName(moduleName)
-      .onConnect((conn: DbConnection, identity: Identity, _token: string) => {
+      .onConnect((conn: DbConnection, _identity: Identity, _token: string) => {
         this._conn = conn;
         this._registerTableCallbacks(conn);
         this._connectListeners.forEach(fn => fn());
@@ -107,14 +83,8 @@ class SpacetimeManager {
       .build();
   }
 
-  /** Returns the live DbConnection, or null before connect() resolves or in simulated mode. */
   getConnection(): DbConnection | null { return this._conn; }
 
-  /**
-   * Register a callback to fire once the WebSocket connection is established.
-   * If already connected, the callback fires synchronously on the next tick.
-   * Returns an unregister function.
-   */
   onConnected(fn: () => void): () => void {
     if (this._conn) {
       queueMicrotask(fn);
@@ -126,16 +96,6 @@ class SpacetimeManager {
 
   // ─── Subscription management ─────────────────────────────────────────────────
 
-  /**
-   * Acquire a hold on a subscription for the given SQL query.
-   *
-   * If no subscription exists for this query it is opened immediately against
-   * the live connection.  If one already exists the owner is added to its
-   * holder set without opening a second connection.
-   *
-   * Returns a release function — identical to calling releaseSubscription(owner, query).
-   * No-op (returns a no-op release) in simulated mode or before connect().
-   */
   subscribe(owner: object, query: string): () => void {
     if (!this._conn) {
       console.warn("SpacetimeManager.subscribe: not connected");
@@ -151,25 +111,10 @@ class SpacetimeManager {
     return () => this.releaseSubscription(owner, query);
   }
 
-  /**
-   * Remove this owner's hold on a subscription.
-   *
-   * The subscription itself stays open — data already received remains in the
-   * client tables and the server keeps sending updates.  Call
-   * collectSubscriptions() when you want to prune zero-holder subscriptions.
-   */
   releaseSubscription(owner: object, query: string): void {
     this._subscriptions.get(query)?.holders.delete(owner);
   }
 
-  /**
-   * Close and remove every subscription that currently has no holders.
-   * Returns the number of subscriptions closed.
-   *
-   * Call this at natural GC points (zone transitions, low-memory pressure).
-   * Subscriptions for rarely-changing data (zones, global definitions) can be
-   * excluded by keeping a permanent holder object alive for them.
-   */
   collectSubscriptions(): number {
     let closed = 0;
     for (const [query, entry] of this._subscriptions) {
@@ -182,8 +127,6 @@ class SpacetimeManager {
     return closed;
   }
 
-  /** Read-only snapshot of active subscriptions and their holder counts.
-   *  Useful for debugging and GC heuristics. */
   getSubscriptionStats(): ReadonlyMap<string, number> {
     const out = new Map<string, number>();
     for (const [query, entry] of this._subscriptions) {
@@ -192,39 +135,62 @@ class SpacetimeManager {
     return out;
   }
 
-  // ─── Zone subscriptions ──────────────────────────────────────────────────────
+  // ─── Zone subscriptions (world layer) ────────────────────────────────────────
 
   /**
    * Subscribe to all rows in zones, cards, players, and actions whose
-   * macro_location matches the given value.
-   * Returns a release function equivalent to releaseZone(owner, macro_location).
+   * `(layer, macro_zone)` matches the given world zone.
+   *
+   * macro_zone is the packed `[zone_q:i16][zone_r:i16]` u32 — a world zone.
+   * For panel subscriptions use `subscribePanel` instead.
    */
-  subscribeZone(owner: object, macro_location: bigint): () => void {
-    const loc = macro_location.toString();
-    this.subscribe(owner, `SELECT * FROM zones   WHERE macro_location = ${loc}`);
-    this.subscribe(owner, `SELECT * FROM cards   WHERE macro_location = ${loc}`);
-    this.subscribe(owner, `SELECT * FROM players WHERE macro_location = ${loc}`);
-    this.subscribe(owner, `SELECT * FROM actions WHERE macro_location = ${loc}`);
-    return () => this.releaseZone(owner, macro_location);
+  subscribeZone(owner: object, layer: number, macro_zone: MacroZone): () => void {
+    const mz = (macro_zone >>> 0).toString();
+    const ly = layer.toString();
+    this.subscribe(owner, `SELECT * FROM zones   WHERE layer = ${ly} AND macro_zone = ${mz}`);
+    this.subscribe(owner, `SELECT * FROM cards   WHERE layer = ${ly} AND macro_zone = ${mz}`);
+    this.subscribe(owner, `SELECT * FROM players WHERE layer = ${ly} AND macro_zone = ${mz}`);
+    this.subscribe(owner, `SELECT * FROM actions WHERE layer = ${ly} AND macro_zone = ${mz}`);
+    return () => this.releaseZone(owner, layer, macro_zone);
   }
 
-  /** Release this owner's hold on all four macro_location subscriptions for the zone. */
-  releaseZone(owner: object, macro_location: bigint): void {
-    const loc = macro_location.toString();
-    this.releaseSubscription(owner, `SELECT * FROM zones   WHERE macro_location = ${loc}`);
-    this.releaseSubscription(owner, `SELECT * FROM cards   WHERE macro_location = ${loc}`);
-    this.releaseSubscription(owner, `SELECT * FROM players WHERE macro_location = ${loc}`);
-    this.releaseSubscription(owner, `SELECT * FROM actions WHERE macro_location = ${loc}`);
+  releaseZone(owner: object, layer: number, macro_zone: MacroZone): void {
+    const mz = (macro_zone >>> 0).toString();
+    const ly = layer.toString();
+    this.releaseSubscription(owner, `SELECT * FROM zones   WHERE layer = ${ly} AND macro_zone = ${mz}`);
+    this.releaseSubscription(owner, `SELECT * FROM cards   WHERE layer = ${ly} AND macro_zone = ${mz}`);
+    this.releaseSubscription(owner, `SELECT * FROM players WHERE layer = ${ly} AND macro_zone = ${mz}`);
+    this.releaseSubscription(owner, `SELECT * FROM actions WHERE layer = ${ly} AND macro_zone = ${mz}`);
+  }
+
+  // ─── Panel subscriptions ─────────────────────────────────────────────────────
+
+  /**
+   * Subscribe to all panel cards / actions of `soul_id` (any panel layer they
+   * occupy).  Geometry encodes ownership: panel rows have `macro_zone =
+   * soul_id`, so a single equality filter pulls the entire panel set.
+   */
+  subscribePanel(owner: object, soul_id: CardId): () => void {
+    const mz = packMacroPanel(soul_id).toString();
+    this.subscribe(owner, `SELECT * FROM cards   WHERE macro_zone = ${mz}`);
+    this.subscribe(owner, `SELECT * FROM actions WHERE macro_zone = ${mz}`);
+    return () => this.releasePanel(owner, soul_id);
+  }
+
+  releasePanel(owner: object, soul_id: CardId): void {
+    const mz = packMacroPanel(soul_id).toString();
+    this.releaseSubscription(owner, `SELECT * FROM cards   WHERE macro_zone = ${mz}`);
+    this.releaseSubscription(owner, `SELECT * FROM actions WHERE macro_zone = ${mz}`);
   }
 
   // ─── Soul subscriptions ──────────────────────────────────────────────────────
+  //
+  // Kept for now per the schema-redesign discussion: visibility is technically
+  // covered by `subscribePanel` plus world-zone subscriptions, but `owner_id`
+  // remains useful for trade audits and as cheap insurance against missing-row
+  // bugs while the panel/world split shakes out.
 
-  /**
-   * Subscribe to all data owned by a soul: players where soul_id = soul_id,
-   * cards where owner_id = soul_id, and actions where owner_id = soul_id.
-   * Returns a release function equivalent to releaseSoul(owner, soul_id).
-   */
-  subscribeSoul(owner: object, soul_id: number): () => void {
+  subscribeSoul(owner: object, soul_id: CardId): () => void {
     const id = soul_id.toString();
     this.subscribe(owner, `SELECT * FROM players WHERE soul_id  = ${id}`);
     this.subscribe(owner, `SELECT * FROM cards   WHERE owner_id = ${id}`);
@@ -232,41 +198,34 @@ class SpacetimeManager {
     return () => this.releaseSoul(owner, soul_id);
   }
 
-  /** Release this owner's hold on the three soul-scoped subscriptions. */
-  releaseSoul(owner: object, soul_id: number): void {
+  releaseSoul(owner: object, soul_id: CardId): void {
     const id = soul_id.toString();
     this.releaseSubscription(owner, `SELECT * FROM players WHERE soul_id  = ${id}`);
     this.releaseSubscription(owner, `SELECT * FROM cards   WHERE owner_id = ${id}`);
     this.releaseSubscription(owner, `SELECT * FROM actions WHERE owner_id = ${id}`);
   }
 
-  /** Switch the viewed soul: releases the previous soul subscription and subscribes to the new one. */
   setViewedSoul(owner: object, soul_id: CardId): void {
     if (this._viewedSoulId === soul_id) return;
     if (this._viewedSoulId !== null && this._viewedSoulOwner !== null) {
       this.releaseSoul(this._viewedSoulOwner, this._viewedSoulId);
+      this.releasePanel(this._viewedSoulOwner, this._viewedSoulId);
     }
     this._viewedSoulId    = soul_id;
     this._viewedSoulOwner = owner;
     setViewedId(soul_id);
     this.subscribeSoul(owner, soul_id);
+    this.subscribePanel(owner, soul_id);
   }
 
   // ─── Player subscriptions ────────────────────────────────────────────────────
 
-  /**
-   * Subscribe to the player row matching player_name.
-   * Use this to bootstrap the session: once the player row arrives, read
-   * soul_id and call subscribeSoul to pull in all soul-owned data.
-   * Returns a release function equivalent to releasePlayer(owner, player_name).
-   */
   subscribePlayer(owner: object, player_name: string): () => void {
     const escaped = player_name.replace(/'/g, "''");
     this.subscribe(owner, `SELECT * FROM players WHERE name = '${escaped}'`);
     return () => this.releasePlayer(owner, player_name);
   }
 
-  /** Release this owner's hold on the player-name subscription. */
   releasePlayer(owner: object, player_name: string): void {
     const escaped = player_name.replace(/'/g, "''");
     this.releaseSubscription(owner, `SELECT * FROM players WHERE name = '${escaped}'`);
@@ -274,8 +233,6 @@ class SpacetimeManager {
 
   // ─── Listener registry ──────────────────────────────────────────────────────
 
-  /** Register a callback fired whenever the named card's state changes.
-   *  Returns an unregister function — call it when the listener is no longer needed. */
   registerCardListener(card_id: CardId, fn: () => void): () => void {
     let set = this._cardListeners.get(card_id);
     if (!set) { set = new Set(); this._cardListeners.set(card_id, set); }
@@ -288,21 +245,19 @@ class SpacetimeManager {
     };
   }
 
-  /** Fire all listeners registered for card_id.  Called by Card when dead
-   *  transitions to 2 so CardStack knows to finalize removal. */
   notifyCardListeners(card_id: CardId): void {
     this._cardListeners.get(card_id)?.forEach(fn => fn());
   }
 
-  /** Register a callback fired whenever any zone row is inserted, updated, or
-   *  deleted.  Returns an unregister function. */
+  clearCardListeners(card_id: CardId): void {
+    this._cardListeners.delete(card_id);
+  }
+
   registerZoneListener(fn: () => void): () => void {
     this._zoneListeners.add(fn);
     return () => this._zoneListeners.delete(fn);
   }
 
-  /** Register a callback fired whenever a player row with the given name is
-   *  inserted or updated.  Returns an unregister function. */
   registerPlayerListener(name: string, fn: (player: ServerPlayer) => void): () => void {
     let set = this._playerListeners.get(name);
     if (!set) { set = new Set(); this._playerListeners.set(name, set); }
@@ -317,42 +272,52 @@ class SpacetimeManager {
 
   // ─── Card reducers ──────────────────────────────────────────────────────────
 
-  setCardPositions(
+  /**
+   * Phase 5 sync protocol entry point.  The server's `update_position`
+   * reducer applies the move, cancels any actions whose claim windows the
+   * move disturbs, then re-runs the matcher on the affected zones to start
+   * newly-eligible recipes.
+   *
+   * Client policy (per the sync table in PHASE_5_SCHEMA_NOTES.md §5):
+   *   - Pure cosmetic moves within own panel: do NOT call.
+   *   - Moves that cross subscription boundaries (panel↔world, panel↔panel
+   *     cross-soul, layer changes touching trade): always call.
+   *   - World-side moves while server already sees the card in world: always
+   *     call (peers can see it).
+   *   - Panel→world local prep without a recipe: do NOT call (commit will
+   *     come via a recipe's product placement).
+   */
+  updatePosition(
+    cardId:        CardId,
+    layer:         number,
+    macroZone:     MacroZone,
+    microZone:     number,
+    microLocation: number,
+    flags:         number,
+  ): void {
+    if (this._mode === "connected") {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (this._conn?.reducers as any)?.updatePosition({ cardId, layer, macroZone, microZone, microLocation, flags });
+    }
+  }
+
+  /** Batched variant of `updatePosition` — atomically applies many position
+   *  changes (e.g. all the cards in a stack-merge) and runs the matcher
+   *  once per affected zone. */
+  updatePositions(
     cardIds:        CardId[],
-    macroLocations: bigint[],
+    layers:         number[],
+    macroZones:     MacroZone[],
+    microZones:     number[],
     microLocations: number[],
     flags:          number[],
   ): void {
     if (this._mode === "connected") {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (this._conn?.reducers as any)?.setCardPositions({ cardIds, macroLocations, microLocations, flags });
+      (this._conn?.reducers as any)?.updatePositions({ cardIds, layers, macroZones, microZones, microLocations, flags });
     }
   }
 
-  startActionNow(cardId: CardId, ownerId: CardId, recipe: number, q: number, r: number, layer: number): void {
-    if (this._mode === "connected") {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (this._conn?.reducers as any)?.startActionNow({ cardId, ownerId, recipe, q, r, layer });
-    }
-  }
-
-  cancelAction(actionId: ActionId): void {
-    if (this._mode === "connected") {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (this._conn?.reducers as any)?.cancelAction({ actionId });
-    }
-  }
-
-  /**
-   * Delete a card row.
-   *
-   * Simulated: removes the row from server_cards and marks client_cards[card_id].dead = 1,
-   * then fires listeners so Card widgets start their death animation.
-   * removeClientCard is deferred until finalizeCardRemoval is called.
-   *
-   * Connected: calls the deleteCard reducer; the server's onDelete callback
-   * will call _beginCardDeath once the row is removed from the subscription.
-   */
   deleteCard(card_id: CardId): void {
     if (this._mode === "simulated") {
       this._simDeleteCard(card_id);
@@ -360,16 +325,6 @@ class SpacetimeManager {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this._conn?.reducers as any)?.deleteCard({ cardId: card_id });
     }
-  }
-
-  /**
-   * Called by the card's owner (e.g. CardStack) after dead===2 is detected and
-   * the Card widget has been destroyed.  Removes the card from all client tables
-   * and indexes and clears its listener set.
-   */
-  finalizeCardRemoval(card_id: CardId): void {
-    removeClientCard(card_id);
-    this._cardListeners.delete(card_id);
   }
 
   // ─── Table callbacks ────────────────────────────────────────────────────────
@@ -405,7 +360,7 @@ class SpacetimeManager {
     conn.db.cards.onDelete((_ctx, row) => {
       const server = adaptCard(row);
       delete server_cards[server.card_id];
-      this._beginCardDeath(server.card_id);
+      DeathCoordinator.beginDeath(server.card_id);
     });
 
     // ── Players ────────────────────────────────────────────────────────────
@@ -457,22 +412,25 @@ class SpacetimeManager {
     // ── Zones ──────────────────────────────────────────────────────────────
     conn.db.zones.onInsert((_ctx, row) => {
       const server = adaptZone(row);
-      server_zones.set(server.macro_location, server);
+      server_zones.set(zoneKey(server.layer, server.macro_zone), server);
       upsertClientZone(server);
       this._zoneListeners.forEach(fn => fn());
       this._invalidateTable('zones');
     });
     conn.db.zones.onUpdate((_ctx, _old, newRow) => {
       const server = adaptZone(newRow);
-      server_zones.set(server.macro_location, server);
+      server_zones.set(zoneKey(server.layer, server.macro_zone), server);
       upsertClientZone(server);
       this._zoneListeners.forEach(fn => fn());
       this._invalidateTable('zones');
     });
     conn.db.zones.onDelete((_ctx, row) => {
-      const loc = row.macroLocation;
-      server_zones.delete(loc);
-      removeClientZone(loc);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const r = row as any;
+      const layer      = r.layer as number;
+      const macro_zone = r.macroZone as number;
+      server_zones.delete(zoneKey(layer, macro_zone));
+      removeClientZone(layer, macro_zone);
       this._zoneListeners.forEach(fn => fn());
       this._invalidateTable('zones');
     });
@@ -481,30 +439,29 @@ class SpacetimeManager {
   // ─── Internal helpers ───────────────────────────────────────────────────────
 
   private _simDeleteCard(card_id: CardId): void {
-    const card = client_cards[card_id];
-    if (!card || card.dead !== 0) return;
+    if (!client_cards[card_id]) return;
+    if (deathState(card_id) !== 0) return;
     delete server_cards[card_id];
-    this._beginCardDeath(card_id);
-  }
-
-  /** Mark card as dying and fire listeners.  Used by both simulated delete
-   *  and the connected onDelete callback so the death animation always runs. */
-  private _beginCardDeath(card_id: CardId): void {
-    const card = client_cards[card_id];
-    if (!card || card.dead !== 0) return;
-    card.dead = 1;
-    this.notifyCardListeners(card_id);
+    DeathCoordinator.beginDeath(card_id);
   }
 }
 
 // ─── Binding adapters ──────────────────────────────────────────────────────────
+//
 // Convert generated camelCase binding types to our snake_case Server* interfaces.
-// Kept as module-level functions (not class methods) since they have no `this` dependency.
+// The bound row shapes here match what `spacetime generate --lang typescript`
+// produces against the Phase 5 server schema (layer, macroZone, microZone,
+// microLocation, etc.).
 
 function adaptCard(row: BoundCard): ServerCard {
   return {
     card_id:           row.cardId,
-    macro_location:    row.macroLocation,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    layer:             (row as any).layer,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    macro_zone:        (row as any).macroZone,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    micro_zone:        (row as any).microZone,
     micro_location:    row.microLocation,
     owner_id:          row.ownerId,
     flags:             row.flags,
@@ -516,33 +473,52 @@ function adaptCard(row: BoundCard): ServerCard {
 
 function adaptPlayer(row: BoundPlayer): ServerPlayer {
   return {
-    player_id:      row.playerId,
-    name:           row.name,
-    soul_id:        row.soulId,
-    macro_location: row.macroLocation,
-    micro_location: row.microLocation,
+    player_id:  row.playerId,
+    name:       row.name,
+    soul_id:    row.soulId,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    layer:      (row as any).layer,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    macro_zone: (row as any).macroZone,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    micro_zone: (row as any).microZone,
   };
 }
 
 function adaptAction(row: BoundAction): ServerAction {
   return {
-    action_id:      row.actionId,
-    card_id:        row.cardId,
-    recipe:         row.recipe,
-    end:            row.end,
-    owner_id:       row.ownerId,
-    macro_location: row.macroLocation,
-    micro_location: row.microLocation,
+    action_id:    row.actionId,
+    card_id:      row.cardId,
+    recipe:       row.recipe,
+    end:          row.end,
+    owner_id:     row.ownerId,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    layer:        (row as any).layer,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    macro_zone:   (row as any).macroZone,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    micro_zone:   (row as any).microZone,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    participants: (row as any).participants,
   };
 }
 
 function adaptZone(row: BoundZone): ServerZone {
   return {
-    macro_location: row.macroLocation,
-    definition:     row.definition,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    layer:      (row as any).layer,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    macro_zone: (row as any).macroZone,
+    definition: row.definition,
     t0: row.t0, t1: row.t1, t2: row.t2, t3: row.t3,
     t4: row.t4, t5: row.t5, t6: row.t6, t7: row.t7,
   };
 }
 
 export const spacetime = new SpacetimeManager();
+
+bindCardChangeNotifier(id => spacetime.notifyCardListeners(id));
+
+// Export legacy import name to not break callers; the panel-layer constant is
+// useful enough to surface here for reducers building macro_zones.
+export { PANEL_LAYER_INVENTORY };
