@@ -1,0 +1,40 @@
+# AGENT.md
+
+## Purpose
+Local data layer. `ShadowedStore` is the per-table shadow primitive (server-believed state + client working copy). `DataManager` holds one store per table AND **owns subscription orchestration** — callers ask DataManager to track a zone (or table) and DataManager decides when to ask SpacetimeManager to subscribe / unsubscribe. SpacetimeManager remains the SDK boundary; DataManager is the policy boundary.
+
+## Important files
+- `ShadowedStore.ts`: generic `ShadowedStore<T>` keyed by a caller-provided `keyOf(row)`. Holds `server` and `client` maps; emits `ShadowedChange<T>` to subscribers. Stored rows are shallow-frozen on insert/update so accidental in-place mutation throws in dev. Optional secondary indexes (e.g. cards by packed `zone`) maintained automatically across `applyServer*` / `setClient` / `removeClient`.
+- `DataManager.ts`: the per-table stores (`cards`, `players`, … later `zones`, `actions`) plus refcounted `track…` methods. Holds a `SpacetimeManager` reference (attached post-construction via `attachSpacetime`) so it can drive subscribe/unsubscribe calls. Doesn't talk to the SDK directly — only the SpacetimeManager verbs.
+
+## Conventions
+- One `ShadowedStore<T>` per table on `DataManager`. New tables added here as fields.
+- **Cards subscriptions are zone-driven via `ZoneManager`.** DataManager listens to `zones.onAdded("active"|"hot")` / `onRemoved` (via `attachZones`) and drives `spacetime.subscribeCards/unsubscribeCards` at zone tier transitions. Callers don't talk to DataManager for cards; they call `ctx.zones.ensure(zoneId)` and hold the release fn. ZoneManager owns the refcount.
+- **Players subscription stays on DataManager.** `data.trackPlayers()` is the public API; refcount lives here. Players isn't a zone (no `(macroZone, layer)` scoping), so it stays out of ZoneManager.
+- SpacetimeManager binds SDK table handlers and pushes inbound rows into `data.applyServer*(table, …)`.
+- **Conflict rule: server wins.** `applyServerInsert` / `applyServerUpdate` overwrite the matching `client` entry and emit a change. UI listening to the store re-renders.
+- **`kind` is computed from the client perspective.** `applyServerInsert` reports `kind: "insert"` only when the key was not previously in `client`; if a `setClient` already optimistically added the key, the same call reports `kind: "update"`. This keeps `subscribe` listeners and the keyset path consistent.
+- **Mutation boundary:**
+  - `data.applyServerInsert(table, row)` / `applyServerUpdate(table, oldRow, newRow)` / `applyServerDelete(table, row)` — only `SpacetimeManager` calls these (it's the conduit for server truth). They dispatch to the matching `ShadowedStore` internally; SpacetimeManager doesn't reach into the stores.
+  - `setClient` / `removeClient` on the underlying store — any code may call these for local-only state (inventory fiddling, drag-in-progress). The delta vs `server` is what would be sent IF a state-changing action triggers a reducer call.
+- **Subscription is the change-notification API, not the read API.** Game objects subscribe through `DataManager`, not the underlying store:
+  - `data.subscribe(table, listener)` — fires on **every** change in that table. Use sparingly (whole-table views).
+  - `data.subscribeKey(table, key, listener)` — fires only when *that key* changes. The expected default for per-row UI elements (a card visual subscribes to its own `card_id`). Both forms return an unsubscribe fn; release them in the component's destroy/onExit.
+  - `data.subscribeKeys(table, listener)` — fires `{ kind: "added"\|"removed", key }` only when the keyset *actually* transitions (gated on `wasPresent` from the underlying apply). Server-driven only — `setClient` / `removeClient` do **not** trigger this. No snapshot of existing keys — callers do their own initial scan via `data.keys(table)` if they need it. Used by spawners/managers (`CardManager`) that mirror the set of `card_id`s into UI elements.
+  - The table name is a string literal (`"cards"`, `"players"`, …); TypeScript narrows the listener's `change.newValue` type from `TableMap[K]`. Adding a table = add to `TableMap` and add a field on `DataManager`.
+  - Reads go through DataManager: `data.get(table, key)` for a single row, `data.keys(table)` / `data.values(table)` for iteration. The underlying `data.cards` / `data.players` stores remain accessible if you need `server` vs `client` distinction or `delta()`, but for typical reads prefer the dispatch methods.
+  - **Secondary-index reads:** `data.keysByIndex(table, indexName, indexKey)` returns a `ReadonlySet<primaryKey>`; `data.valuesByIndex(table, indexName, indexKey)` yields the rows. Indexes are declared at store construction (`new ShadowedStore<Card>(keyOf, { zone: c => packZoneId(c.macroZone, c.layer) })`) and maintained automatically across every mutation path. Currently `cards` has a `zone` index keyed by the packed `(macroZone, layer)` ZoneId; players has no secondary indexes yet.
+  - Subscribing to a key that doesn't yet exist is fine — the listener fires when an insert lands for that key. Listeners are NOT auto-removed on delete; same listener fires again if a row with the same key reappears. Unsubscribe explicitly when the consumer goes away.
+- **Scope changes wipe the table.** `data.clearTable(table)` snapshots every row, calls `applyServerDelete` for each (so `subscribe` / `subscribeKey` / `subscribeKeys` listeners get clean teardown events), then clears the maps. Listener registrations are preserved. Used by `SpacetimeManager` on disconnect and on subscription scope change so listeners (e.g. `CardManager`) tear down stale views before fresh data lands.
+- **Sending to the server is via reducer calls**, NOT by streaming the delta. The delta exists for UI ("show pending state differently") and for retry orchestration.
+
+## Pitfalls
+- `attachSpacetime` MUST be called once between construction and the first `track…` call. Calling `trackCards` / `trackPlayers` before attach throws. main.ts wires this — don't call `track…` from constructors of objects built before the attach.
+- Track fns return a release closure; double-release is a no-op (idempotent), but forgetting to release leaks a refcount and prevents the last unsubscribe. Pair every track with its release in the same lifecycle owner (scene `onEnter`/`onExit`, feature module construct/dispose).
+- `trackCards` is keyed by zoneId — same zone, multiple callers refcount; different zones run concurrent subscriptions on SpacetimeManager. Mixing won't conflict but will keep both data streams in `data.cards` until each zone's refs reach zero.
+- Stored rows are frozen — mutating in place throws in strict mode, silently no-ops in sloppy mode. Always **replace** with a new object (`store.setClient({ ...prev, position: 5 })`). The secondary-index update relies on this: when a row's indexed field changes, the new row's `keyOf` is what gets indexed.
+- Secondary indexes don't fire their own change events — they're a lookup cache, not a subscription channel. If we later want "cards entered/left zone X" notifications, that's a new API (`subscribeIndexKeys`), not a feature of `byIndex`.
+- `delta()` uses reference equality. After `setClient` (which freezes its own copy), `client !== server` for that key — that's the divergence signal.
+- `dispose()` calls `clear()` on each store, which drops all listener sets. Subscribing after dispose silently registers a listener that will never fire. Treat `DataManager` as bootstrap-scoped.
+- Listener errors are caught and logged via `console.error` so one bad listener can't take down the rest of the dispatch. Don't rely on listener exceptions propagating to callers.
+- If we later unpack at insert time (e.g. expanding `packed_definition`), the unpacked shape becomes the stored shape — `delta` should compare by unpacked fields, not the raw row. The unpacking would happen in `SpacetimeManager` before calling `applyServer*`, NOT in DataManager.

@@ -1,0 +1,27 @@
+{
+  "_comment": "Card type registry. Authoritative source for card_type id → name mapping shared between TS client and Rust server. Visibility splits at id < 4: types with id 0..3 are 'public' (visible across players for trade subscriptions), types 4..15 are 'private' (visible only to the owner). The bit cutoff is enforced via packed_definition < 0x4000 in subscription queries; this file is the design-time labeling and the source of validation. Shape splits the type space into 'rect' (drawn as rectangles, stack into RectCard chains) and 'hex' (drawn as hexagons, serve as anchors that rect roots may attach to via stack_state == 11).",
+
+  "_rules": {
+    "public_max_id":     3,
+    "max_id":            15,
+    "subscription_mask": "packed_definition < 0x4000 → public types only",
+    "shapes":            ["rect", "hex"]
+  },
+
+  "types": {
+    "requisite":      { "id": 0, "visibility": "public",  "shape": "rect", "_comment": "Items / resources — logs, axe, food. Core trade goods." },
+    "_reserved_1":    { "id": 1, "visibility": "public",  "shape": "rect", "_comment": "Reserved for a future tradeable category." },
+    "revery":         { "id": 2, "visibility": "public",  "shape": "rect", "_comment": "Memories — shared in-fiction via talk actions." },
+    "_reserved_3":    { "id": 3, "visibility": "public",  "shape": "rect", "_comment": "Reserved for a future tradeable category." },
+    "discipline":     { "id": 4, "visibility": "private", "shape": "rect", "_comment": "Player actions / verbs — soul-bound." },
+    "faculty":        { "id": 5, "visibility": "private", "shape": "rect", "_comment": "Action modifiers — soul-bound." },
+    "soul":           { "id": 6, "visibility": "private", "shape": "rect", "_comment": "Player identity." },
+    "tile":           { "id": 7, "visibility": "private", "shape": "hex",  "_comment": "Per-hex override of the zone's packed tile data. Renamed from 'tile'." },
+    "tile_object":    { "id": 8, "visibility": "private", "shape": "hex",  "_comment": "World occupant (Tree, Rock). Never in inventory." },
+    "tile_decorator": { "id": 9, "visibility": "private", "shape": "hex",  "_comment": "Visual addition." }
+  },
+
+  "categories": {
+    "default": { "id": 0 }
+  }
+}
