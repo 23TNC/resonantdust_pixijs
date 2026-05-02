@@ -4,7 +4,8 @@
 Pointer-event router. Listens to DOM pointer events on the canvas, runs a tiny state machine, hit-tests **only at down and up** (not on every move — that's expensive), and emits semantic events that downstream consumers (drag manager, click handlers) subscribe to. Scene-scoped — owned by `GameScene`.
 
 ## Important files
-- `InputManager.ts`: the one class. Constructor `(canvas, hitRoot: LayoutNode)`. Subscribe via `on(event, listener)`; returns an unsubscribe fn.
+- `InputManager.ts`: pointer event router. Constructor `(canvas, hitRoot: LayoutNode)`. Subscribe via `on(event, listener)`; returns an unsubscribe fn.
+- `DragManager.ts`: drag orchestrator. Subscribes to `left_drag_start` / `left_drag_stop`; while dragging, owns its own `pointermove` listener on the canvas (attached on start, detached on stop) so per-move cost is paid only during an active drag. Reads `data.hit` to identify draggable cards (loose `GameRectCard` only); writes new `microLocation` via `setClient` on each move.
 
 ## Events
 - **`left_down`** — pointerdown, button 0. Payload: `PointerEventData` (`x, y, hit, t`).

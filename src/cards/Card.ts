@@ -13,7 +13,6 @@ export class Card {
   readonly cardId: number;
   readonly gameCard: GameCard;
   readonly layoutCard: LayoutCard;
-  private readonly ctx: GameContext;
   private readonly cardManager: CardManager;
   private unsubscribe: (() => void) | null = null;
   private currentZoneId: ZoneId;
@@ -61,7 +60,6 @@ export class Card {
     layoutCard: LayoutCard,
   ) {
     this.cardId = cardId;
-    this.ctx = ctx;
     this.cardManager = cardManager;
     this.gameCard = gameCard;
     this.layoutCard = layoutCard;
@@ -88,6 +86,16 @@ export class Card {
 
   whereAreYou(): { x: number; y: number } {
     return this.gameCard.whereAreYou();
+  }
+
+  /** Forwards to both halves so game logic (e.g. overlap-push skip) and visual state stay in sync. */
+  setDragging(value: boolean): void {
+    this.gameCard.setDragging(value);
+    this.layoutCard.setDragging(value);
+  }
+
+  isDragging(): boolean {
+    return this.gameCard.isDragging();
   }
 
   destroy(): void {

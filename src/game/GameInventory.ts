@@ -20,10 +20,7 @@ export class GameInventory {
   private readonly cards = new Set<GameRectCard>();
   private readonly unsubscribe: () => void;
 
-  constructor(
-    private readonly ctx: GameContext,
-    private readonly zoneId: ZoneId,
-  ) {
+  constructor(ctx: GameContext, zoneId: ZoneId) {
     if (!ctx.cards) {
       throw new Error("[GameInventory] ctx.cards is null");
     }
@@ -60,6 +57,7 @@ export class GameInventory {
   }
 
   private tryPush(a: GameRectCard, b: GameRectCard): void {
+    if (a.isDragging() || b.isDragging()) return;
     const ap = a.getLoosePosition();
     const bp = b.getLoosePosition();
     if (!ap || !bp) return;

@@ -2,6 +2,7 @@ import { CardManager } from "../cards/CardManager";
 import { GameInventory } from "../game/GameInventory";
 import { GameManager } from "../game/GameManager";
 import type { GameContext } from "../GameContext";
+import { DragManager } from "../input/DragManager";
 import { InputManager } from "../input/InputManager";
 import { LayoutManager } from "../layout/LayoutManager";
 import { packZoneId } from "../zones/zoneId";
@@ -17,6 +18,7 @@ export class GameScene extends Scene {
   private gameManager!: GameManager;
   private gameInventory!: GameInventory;
   private inputManager!: InputManager;
+  private dragManager!: DragManager;
   private releaseCards: (() => void) | null = null;
   private ctxRef: GameContext | null = null;
 
@@ -51,6 +53,8 @@ export class GameScene extends Scene {
     this.inputManager = new InputManager(ctx.app.canvas, this.gameLayout);
     ctx.input = this.inputManager;
 
+    this.dragManager = new DragManager(ctx, ctx.app.canvas);
+
     this.releaseCards = ctx.zones.ensure(inventoryZoneId);
   }
 
@@ -58,6 +62,7 @@ export class GameScene extends Scene {
     this.releaseCards?.();
     this.releaseCards = null;
 
+    this.dragManager.dispose();
     this.inputManager.dispose();
     this.gameManager.dispose();
     this.cardManager.dispose();
