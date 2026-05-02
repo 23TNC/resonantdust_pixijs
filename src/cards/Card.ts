@@ -88,10 +88,41 @@ export class Card {
     return this.gameCard.whereAreYou();
   }
 
-  /** Forwards to both halves so game logic (e.g. overlap-push skip) and visual state stay in sync. */
-  setDragging(value: boolean): void {
+  /**
+   * Forwards drag state to both halves so game logic (overlap-push skip) and
+   * visual state stay in sync. On drag start, also re-parents the layout half
+   * from its zone surface up to the global overlay so the card can roam
+   * freely above the rest of the scene; on drag stop, returns it to the
+   * surface for its current zone. The on-screen position is preserved across
+   * each re-parent (display is converted between coord spaces) so the
+   * transition is seamless.
+   *
+   * `offsetX` / `offsetY` are the cursor → card top-left offsets at grab time
+   * (in surface-local coords). They get plumbed to LayoutCard which uses them
+   * to keep the card under the cursor while dragging.
+   */
+  setDragging(value: boolean, offsetX = 0, offsetY = 0): void {
     this.gameCard.setDragging(value);
-    this.layoutCard.setDragging(value);
+    if (value) {
+      const overlay = this.layoutCard.ctx.layout?.overlay;
+      if (overlay) {
+        const g = this.layoutCard.container.getGlobalPosition();
+        this.layoutCard.detach();
+        overlay.addChild(this.layoutCard);
+        this.layoutCard.setDisplayPosition(g.x, g.y);
+      }
+      this.layoutCard.setDragging(true, offsetX, offsetY);
+    } else {
+      const g = this.layoutCard.container.getGlobalPosition();
+      this.layoutCard.detach();
+      this.layoutCard.attach(this.currentZoneId);
+      const surface = this.layoutCard.parent;
+      if (surface) {
+        const sg = surface.container.getGlobalPosition();
+        this.layoutCard.setDisplayPosition(g.x - sg.x, g.y - sg.y);
+      }
+      this.layoutCard.setDragging(false);
+    }
   }
 
   isDragging(): boolean {

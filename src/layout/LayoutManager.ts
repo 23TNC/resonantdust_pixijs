@@ -13,6 +13,14 @@ export type SurfaceListener = (zoneId: ZoneId, surface: LayoutNode) => void;
  * LayoutManager is just the "who hosts cards for this zone" lookup.
  */
 export class LayoutManager {
+  /**
+   * Top-most surface used for in-flight UI (drag previews, tooltips, drop
+   * indicators). Card visuals re-parent here while dragging — a card is
+   * pulled out of its zone surface so it can roam freely above the rest of
+   * the scene. GameScene wires this from `GameLayout.overlay` on enter.
+   */
+  overlay: LayoutNode | null = null;
+
   private readonly surfaces = new Map<ZoneId, LayoutNode>();
   private readonly registerListeners = new Set<SurfaceListener>();
 
@@ -56,5 +64,6 @@ export class LayoutManager {
   dispose(): void {
     this.surfaces.clear();
     this.registerListeners.clear();
+    this.overlay = null;
   }
 }

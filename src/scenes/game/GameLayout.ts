@@ -9,6 +9,13 @@ export class GameLayout extends LayoutNode {
   readonly titleBar: TitleBar;
   readonly worldView: LayoutWorld;
   readonly inventoryView: LayoutInventory;
+  /**
+   * Top-most surface used for drag previews and other in-flight UI.
+   * Last child so it draws above the title bar / world / inventory.
+   * `LayoutManager.overlay` points at this; cards re-parent here while
+   * dragging.
+   */
+  readonly overlay: LayoutNode;
 
   constructor(
     playerName: string,
@@ -19,9 +26,11 @@ export class GameLayout extends LayoutNode {
     this.titleBar = new TitleBar(playerName);
     this.worldView = new LayoutWorld();
     this.inventoryView = new LayoutInventory(layoutManager, inventoryZoneId);
+    this.overlay = new LayoutNode();
     this.addChild(this.titleBar);
     this.addChild(this.worldView);
     this.addChild(this.inventoryView);
+    this.addChild(this.overlay);
   }
 
   protected override layout(): void {
@@ -34,5 +43,6 @@ export class GameLayout extends LayoutNode {
     this.titleBar.setBounds(0, 0, this.width, titleH);
     this.worldView.setBounds(0, bodyTop, worldW, bodyH);
     this.inventoryView.setBounds(worldW, bodyTop, inventoryW, bodyH);
+    this.overlay.setBounds(0, 0, this.width, this.height);
   }
 }

@@ -7,37 +7,38 @@ import type { PointerEventData } from "./InputManager";
 
 interface DragState {
   card: Card;
+  /** Cursor → card top-left, captured at drag start in surface-local coords. */
   offsetX: number;
   offsetY: number;
+  /** The zone surface the card was on when the drag started (used to convert
+   *  the up-event's canvas coords into surface-local coords for the data
+   *  write at drop time). */
   surface: LayoutNode;
 }
 
 /**
  * Scene-scoped drag orchestrator. Subscribes to `left_drag_start` /
- * `left_drag_stop` from `InputManager`. While a drag is active, owns its own
- * `pointermove` listener on the canvas — so we pay the per-move cost only
- * when something is actually moving (no always-on hit-test, no event
- * allocation otherwise).
+ * `left_drag_stop` from `InputManager` and manages drag-gesture state
+ * (which card, with what offset). The visual cursor-follow is owned by
+ * `LayoutCard.layout()`, which reads `InputManager.lastPointer` while
+ * `state.dragging` is true — DragManager does NOT update card position
+ * during the drag.
  *
- * Currently handles loose `GameRectCard` only: writes new `microLocation`
- * via `setClient` on each pointermove. Stacked cards aren't directly
- * draggable yet (drag the stack root instead — future).
+ * On drop, DragManager writes the new `microLocation` once via `setClient`
+ * — that's just a data update like `GameInventory.tryPush` does, not a
+ * visual driver. Card data flows through the same path the rest of the
+ * game uses; the card's visual catches up via tween from its current
+ * (cursor-follow) display position to the new data-driven target.
  */
 export class DragManager {
   private state: DragState | null = null;
   private readonly unsubStart: () => void;
   private readonly unsubStop: () => void;
-  private readonly onPointerMove: (e: PointerEvent) => void;
 
-  constructor(
-    private readonly ctx: GameContext,
-    private readonly canvas: HTMLCanvasElement,
-  ) {
+  constructor(private readonly ctx: GameContext) {
     if (!ctx.input) {
       throw new Error("[DragManager] ctx.input is null — InputManager must exist");
     }
-
-    this.onPointerMove = this.handlePointerMove.bind(this);
 
     this.unsubStart = ctx.input.on("left_drag_start", (data) => {
       this.handleDragStart(data);
@@ -49,7 +50,6 @@ export class DragManager {
 
   dispose(): void {
     if (this.state) {
-      this.canvas.removeEventListener("pointermove", this.onPointerMove);
       this.state.card.setDragging(false);
       this.state = null;
     }
@@ -74,35 +74,30 @@ export class DragManager {
     const offsetY = data.y - cardGlobal.y;
 
     this.state = { card, offsetX, offsetY, surface };
-    card.setDragging(true);
-    this.canvas.addEventListener("pointermove", this.onPointerMove);
+    card.setDragging(true, offsetX, offsetY);
   }
 
-  private handlePointerMove(e: PointerEvent): void {
+  private handleDragStop(_down: PointerEventData, up: PointerEventData): void {
     if (!this.state) return;
-    if (!(this.state.card.gameCard instanceof GameRectCard)) return;
-
-    const rect = this.canvas.getBoundingClientRect();
-    const cursorX = e.clientX - rect.left;
-    const cursorY = e.clientY - rect.top;
-
-    const surfaceGlobal = this.state.surface.container.getGlobalPosition();
-    const newX = cursorX - surfaceGlobal.x - this.state.offsetX;
-    const newY = cursorY - surfaceGlobal.y - this.state.offsetY;
-
-    this.state.card.gameCard.setLoosePosition(newX, newY);
-  }
-
-  private handleDragStop(_down: PointerEventData, _up: PointerEventData): void {
-    if (!this.state) return;
-
-    this.state.card.setDragging(false);
-    this.canvas.removeEventListener("pointermove", this.onPointerMove);
-
-    // TODO: inspect _up.hit for cross-zone drops, drop-target reducer calls,
-    // recipe placements, etc. For inventory-internal drags, the card is
-    // already at the new position from setLoosePosition during the drag.
-
+    const { card, offsetX, offsetY, surface } = this.state;
     this.state = null;
+
+    // Clear drag state first so the card re-parents back to its zone surface
+    // (display position preserved). After this, applyData targets are
+    // interpreted in the correct (zone-surface) coord space.
+    card.setDragging(false);
+
+    // Write the drop location once, converted from canvas to surface-local.
+    // This is the same data path GameInventory uses for overlap-push — the
+    // card's tween catches up visually on the next frame.
+    if (card.gameCard instanceof GameRectCard && card.gameCard.isLoose()) {
+      const sg = surface.container.getGlobalPosition();
+      const newX = up.x - sg.x - offsetX;
+      const newY = up.y - sg.y - offsetY;
+      card.gameCard.setLoosePosition(newX, newY);
+    }
+
+    // TODO: cross-zone drops (compute new macroZone/layer/microZone from
+    // up.hit's zone), drop-target reducer calls, recipe placements.
   }
 }

@@ -44,6 +44,15 @@ type State = "idle" | "pressed" | "dragging";
  * have everything they need to act on the gesture endpoints.
  */
 export class InputManager {
+  /**
+   * Last pointer position, in canvas-local pixels. Updated on every
+   * `pointermove` (no event fired). Sticky across pointermoves — readers
+   * (e.g. LayoutCard during drag) can read every frame for cursor-follow.
+   * Stays at (0,0) until the first move; consumers that care only about
+   * drag scenarios always see it valid because a drag implies prior moves.
+   */
+  readonly lastPointer = { x: 0, y: 0 };
+
   private state: State = "idle";
   private downData: PointerEventData | null = null;
   private capturedPointerId: number | null = null;
@@ -139,11 +148,14 @@ export class InputManager {
   }
 
   private handlePointerMove(e: PointerEvent): void {
-    if (this.state !== "pressed" || !this.downData) return;
-
     const rect = this.canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
+    this.lastPointer.x = x;
+    this.lastPointer.y = y;
+
+    if (this.state !== "pressed" || !this.downData) return;
+
     if (
       Math.abs(x - this.downData.x) > DRAG_THRESHOLD_PX ||
       Math.abs(y - this.downData.y) > DRAG_THRESHOLD_PX

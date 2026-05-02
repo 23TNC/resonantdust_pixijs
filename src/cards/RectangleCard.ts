@@ -17,6 +17,9 @@ const FALLBACK_NAME = "?";
 
 export const RECT_CARD_WIDTH = 72;
 export const RECT_CARD_HEIGHT = 96;
+export const RECT_CARD_TITLE_HEIGHT = 24;
+
+export type RectCardTitlePosition = "top" | "bottom";
 
 export class GameRectCard extends GameCard {
   private flags = 0;
@@ -65,24 +68,34 @@ export class LayoutRectCard extends LayoutCard {
   private readonly nameText: Text;
   private definition: CardDefinition | null = null;
   private currentPackedDefinition: number | null = null;
+  private titlePosition: RectCardTitlePosition = "top";
 
   constructor(cardId: number, ctx: GameContext) {
     super(cardId, ctx);
     this.nameText = new Text({
       text: FALLBACK_NAME,
       style: {
-        fill: 0xffffff,
-        fontFamily: "sans-serif",
-        fontSize: 12,
+        fill: FALLBACK_STYLE[2],
+        fontFamily: "Segoe UI",
+        fontSize: Math.max(8, Math.floor(RECT_CARD_TITLE_HEIGHT * 0.55)),
+        fontWeight: "700",
         align: "center",
         wordWrap: true,
-        wordWrapWidth: RECT_CARD_WIDTH - 8,
+        wordWrapWidth: RECT_CARD_WIDTH - 4,
       },
     });
     this.nameText.anchor.set(0.5);
     this.container.addChild(this.bg);
     this.container.addChild(this.nameText);
     this.container.addChild(this.stateOverlay);
+    // Card size is constant; position is owned by the tween in layout().
+    this.setSize(RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
+  }
+
+  setTitlePosition(position: RectCardTitlePosition): void {
+    if (this.titlePosition === position) return;
+    this.titlePosition = position;
+    this.invalidate();
   }
 
   applyData(row: CardRow): void {
@@ -91,33 +104,52 @@ export class LayoutRectCard extends LayoutCard {
       const def = this.ctx.definitions.decode(row.packedDefinition);
       this.definition = def ?? null;
       this.nameText.text = def?.name ?? FALLBACK_NAME;
+      this.nameText.style.fill = def?.style[2] ?? FALLBACK_STYLE[2];
       this.invalidate();
     }
 
     // Self-position from row when loose. Stacked cards derive position from
-    // their parent (handled later when stack chains land).
+    // their parent (handled later when stack chains land). The tween in
+    // layout() does the actual on-screen movement; we just update the target.
     if (getStackedState(row.flags) === STACKED_LOOSE) {
       const { x, y } = decodeLooseXY(row.microLocation);
-      this.setBounds(x, y, RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
+      this.setTarget(x, y);
     }
   }
 
-  protected override layout(): void {
+  protected override layout(): boolean | void {
     const style = this.definition?.style ?? FALLBACK_STYLE;
-    const [primary, , outline] = style;
+    const [primary, secondary, outline] = style;
     const baseStrokeColor = this.state.selected ? 0xffff00 : outline;
     const baseStrokeWidth = this.state.selected ? 3 : 2;
+
+    const titleY =
+      this.titlePosition === "top"
+        ? 0
+        : Math.max(0, this.height - RECT_CARD_TITLE_HEIGHT);
+
+    this.bg.clear();
+    // Body — full card filled with primary.
+    this.bg.rect(0, 0, this.width, this.height).fill({ color: primary });
+    // Title bar — top or bottom strip filled with secondary.
     this.bg
-      .clear()
-      .roundRect(0, 0, this.width, this.height, 6)
-      .fill({ color: primary })
+      .rect(0, titleY, this.width, RECT_CARD_TITLE_HEIGHT)
+      .fill({ color: secondary });
+    // Outline around the whole card.
+    this.bg
+      .rect(0, 0, this.width, this.height)
       .stroke({ color: baseStrokeColor, width: baseStrokeWidth });
-    this.nameText.position.set(this.width / 2, this.height / 2);
+
+    // Name centered within the title bar.
+    this.nameText.position.set(
+      this.width / 2,
+      titleY + RECT_CARD_TITLE_HEIGHT / 2,
+    );
 
     this.stateOverlay.clear();
     if (this.state.hovered) {
       this.stateOverlay
-        .roundRect(-2, -2, this.width + 4, this.height + 4, 8)
+        .rect(-2, -2, this.width + 4, this.height + 4)
         .stroke({ color: 0xffffff, width: 1, alpha: 0.5 });
     }
     if (this.state.pending) {
@@ -126,5 +158,22 @@ export class LayoutRectCard extends LayoutCard {
         .fill({ color: 0xff8800 });
     }
     this.container.alpha = this.state.dragging ? 0.7 : 1;
+
+    // Tween toward the effective target. While dragging the cursor wins
+    // (parent surface is the canvas-aligned overlay, so pointer coords map
+    // 1:1 to local coords); otherwise the data-driven target set in
+    // applyData wins. While dragging, stay dirty even after reaching the
+    // target so cursor moves continue to drive layout.
+    let effX = this.targetX;
+    let effY = this.targetY;
+    if (this.state.dragging) {
+      const ptr = this.ctx.input?.lastPointer;
+      if (ptr) {
+        effX = ptr.x - this.dragOffsetX;
+        effY = ptr.y - this.dragOffsetY;
+      }
+    }
+    const moving = this.tweenTo(effX, effY);
+    return this.state.dragging || moving;
   }
 }

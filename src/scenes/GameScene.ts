@@ -39,6 +39,7 @@ export class GameScene extends Scene {
       inventoryZoneId,
     );
     this.gameLayout.setContext(ctx);
+    this.layoutManager.overlay = this.gameLayout.overlay;
     this.root.addChild(this.gameLayout.container);
 
     this.cardManager = new CardManager(ctx);
@@ -53,7 +54,7 @@ export class GameScene extends Scene {
     this.inputManager = new InputManager(ctx.app.canvas, this.gameLayout);
     ctx.input = this.inputManager;
 
-    this.dragManager = new DragManager(ctx, ctx.app.canvas);
+    this.dragManager = new DragManager(ctx);
 
     this.releaseCards = ctx.zones.ensure(inventoryZoneId);
   }

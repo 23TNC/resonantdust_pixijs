@@ -76,15 +76,20 @@ export class LayoutNode {
   layoutIfDirty(): void {
     if (!this.selfDirty && !this.subtreeDirty) return;
     if (this.selfDirty) {
-      this.layout();
-      this.selfDirty = false;
+      // layout() may return true to indicate it's still dirty (e.g. mid-tween)
+      // — selfDirty stays true so it runs again next frame.
+      this.selfDirty = this.layout() === true;
     }
+    let anyDirty = false;
     for (const child of this.children) {
       if (child.selfDirty || child.subtreeDirty) {
         child.layoutIfDirty();
       }
+      if (child.selfDirty || child.subtreeDirty) {
+        anyDirty = true;
+      }
     }
-    this.subtreeDirty = false;
+    this.subtreeDirty = anyDirty;
   }
 
   hitTestLayout(parentX: number, parentY: number): LayoutNode | null {
@@ -130,7 +135,11 @@ export class LayoutNode {
     this.container.destroy({ children: true });
   }
 
-  protected layout(): void {}
+  /**
+   * Subclass hook. Return `true` to indicate this node is still dirty (e.g.
+   * mid-tween) and should re-run next frame. Return nothing to clear dirty.
+   */
+  protected layout(): boolean | void {}
 
   protected intersects(localX: number, localY: number): boolean {
     return (
