@@ -5,6 +5,20 @@ import { LayoutInventory } from "./InventoryView";
 import { LayoutWorld } from "./WorldView";
 import { TitleBar } from "./TitleBar";
 
+/**
+ * Hit-transparent host for in-flight UI (drag previews, tooltips). Sits on
+ * top of every other child of GameLayout, so it draws above them, but
+ * hit-testing skips it entirely — clicks fall through to the surfaces
+ * underneath. Cards parented here while dragging don't catch their own
+ * drop-time hit-test either (the up-event needs to find the drop target
+ * beneath the card, not the card itself).
+ */
+class OverlayNode extends LayoutNode {
+  protected override intersects(): boolean {
+    return false;
+  }
+}
+
 export class GameLayout extends LayoutNode {
   readonly titleBar: TitleBar;
   readonly worldView: LayoutWorld;
@@ -26,7 +40,7 @@ export class GameLayout extends LayoutNode {
     this.titleBar = new TitleBar(playerName);
     this.worldView = new LayoutWorld();
     this.inventoryView = new LayoutInventory(layoutManager, inventoryZoneId);
-    this.overlay = new LayoutNode();
+    this.overlay = new OverlayNode();
     this.addChild(this.titleBar);
     this.addChild(this.worldView);
     this.addChild(this.inventoryView);

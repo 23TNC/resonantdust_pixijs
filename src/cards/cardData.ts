@@ -27,6 +27,11 @@ export function getStackedState(flags: number): number {
   return flags & STACKED_STATE_MASK;
 }
 
+/** Clears the stacked-state bits of `flags` (i.e. forces it to STACKED_LOOSE). */
+export function clearStackedState(flags: number): number {
+  return flags & ~STACKED_STATE_MASK;
+}
+
 export function decodeLooseXY(microLocation: number): LooseXY {
   return {
     x: microLocation & 0xffff,

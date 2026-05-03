@@ -7,6 +7,7 @@ import {
   encodeLooseXY,
   getStackedState,
   STACKED_LOOSE,
+  STACKED_ON_RECT_X,
   type LooseXY,
 } from "./cardData";
 import { GameCard } from "./GameCard";
@@ -85,6 +86,8 @@ export class LayoutRectCard extends LayoutCard {
       },
     });
     this.nameText.anchor.set(0.5);
+    // stackHost was added by LayoutCard's constructor as the first child so
+    // it draws *behind* these — stacked children peek out from behind us.
     this.container.addChild(this.bg);
     this.container.addChild(this.nameText);
     this.container.addChild(this.stateOverlay);
@@ -108,12 +111,20 @@ export class LayoutRectCard extends LayoutCard {
       this.invalidate();
     }
 
-    // Self-position from row when loose. Stacked cards derive position from
-    // their parent (handled later when stack chains land). The tween in
-    // layout() does the actual on-screen movement; we just update the target.
-    if (getStackedState(row.flags) === STACKED_LOOSE) {
+    // Self-position from row. When loose, target = decoded inventory xy.
+    // When top-stacked (state 1), we're parented into the parent's stackHost
+    // (Card.onDataChange handled the re-parent). We sit *behind* the parent
+    // at local y = -titleHeight so our own titlebar peeks out above the
+    // parent's top edge. Stack chains accumulate naturally — each child is
+    // -titleHeight from its own parent, so child2 ends up at -2*titleHeight
+    // from the root parent.
+    const stacked = getStackedState(row.flags);
+    if (stacked === STACKED_LOOSE) {
       const { x, y } = decodeLooseXY(row.microLocation);
       this.setTarget(x, y);
+    } else if (stacked === STACKED_ON_RECT_X) {
+      this.setTitlePosition("top");
+      this.setTarget(0, -RECT_CARD_TITLE_HEIGHT);
     }
   }
 

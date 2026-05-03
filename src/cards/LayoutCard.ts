@@ -4,6 +4,25 @@ import type { Card as CardRow } from "../server/bindings/types";
 import type { ZoneId } from "../zones/zoneId";
 
 /**
+ * Hit-passthrough host for stacked-child cards. Always recurses into children
+ * regardless of its own bounds, and never returns itself as a hit — so a click
+ * inside the parent's body area falls through to a stacked child if one
+ * catches it, or out of stackHost entirely if not (letting the parent's title
+ * region or other siblings catch the click instead).
+ */
+class StackHost extends LayoutNode {
+  override hitTestLayout(parentX: number, parentY: number): LayoutNode | null {
+    const localX = parentX - this.x;
+    const localY = parentY - this.y;
+    for (let i = this.children.length - 1; i >= 0; i--) {
+      const hit = this.children[i].hitTestLayout(localX, localY);
+      if (hit) return hit;
+    }
+    return null;
+  }
+}
+
+/**
  * Visual state flags that consumers (input handling, optimistic UI) toggle on
  * a card. Independent of `packed_definition` — flag changes invalidate layout
  * and let subclasses redraw a cheap overlay without re-running expensive
@@ -36,6 +55,16 @@ export abstract class LayoutCard extends LayoutNode {
   readonly cardId: number;
   protected readonly state: CardVisualState = { ...DEFAULT_STATE };
 
+  /**
+   * Host for stacked-child LayoutCards. A stacked card re-parents into its
+   * parent's stackHost rather than the zone surface, so the parent's
+   * transform automatically carries it (drag, tween, all free). Subclasses
+   * own when/how to attach it to their own container so they can pick the
+   * z-order (usually after bg/title so children cover the parent's body)
+   * and the local position (e.g. (0, titleHeight) for top-stack).
+   */
+  readonly stackHost: LayoutNode = new StackHost();
+
   // Tween bookkeeping. `display` is what's drawn; `target` is what we're
   // animating toward. First setTarget snaps display=target so newly-spawned
   // cards don't fly in from (0,0).
@@ -57,6 +86,34 @@ export abstract class LayoutCard extends LayoutNode {
     super();
     this.cardId = cardId;
     this.setContext(ctx);
+    // stackHost is the FIRST child so it draws *behind* whatever the
+    // subclass paints (bg/title/overlay). Stacked children live in here;
+    // they peek out from behind their parent on the appropriate edge.
+    this.addChild(this.stackHost);
+  }
+
+  /**
+   * Hit-test override: always recurse into children, *even* when the click is
+   * outside our own bounds. Stacked children's titlebars peek beyond our
+   * drawn rect (above for top-stack, below for bottom-stack), so the
+   * standard intersects-gate would miss them. Self-hit still requires the
+   * click to land inside our bounds — the parent body isn't a hit target
+   * outside its drawn rect.
+   *
+   * Children are checked in reverse z-order (last addChild = topmost), and
+   * the inventory's hit-test recurses into LayoutCards in the same order, so
+   * a loose card visually on top of a stacked-child's exposed title also
+   * wins the hit (its container is later in the parent's child list).
+   */
+  override hitTestLayout(parentX: number, parentY: number): LayoutNode | null {
+    const localX = parentX - this.x;
+    const localY = parentY - this.y;
+    for (let i = this.children.length - 1; i >= 0; i--) {
+      const hit = this.children[i].hitTestLayout(localX, localY);
+      if (hit) return hit;
+    }
+    if (this.intersects(localX, localY)) return this;
+    return null;
   }
 
   abstract applyData(row: CardRow): void;
@@ -106,6 +163,16 @@ export abstract class LayoutCard extends LayoutNode {
       return;
     }
     surface.addChild(this);
+  }
+
+  /**
+   * Self-attach to a parent card's stackHost. Stacked cards live inside their
+   * parent's container — the parent's transform carries them for drag/tween,
+   * so the child needs no special drag or position handling beyond a
+   * (0, 0) tween target inside stackHost.
+   */
+  attachToStack(parent: LayoutCard): void {
+    parent.stackHost.addChild(this);
   }
 
   detach(): void {
