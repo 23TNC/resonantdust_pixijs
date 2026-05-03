@@ -117,7 +117,7 @@ export class CardManager {
     if (
       !child ||
       !childRow ||
-      getStackedState(childRow.flags) !== expectedState ||
+      getStackedState(childRow.microZone) !== expectedState ||
       childRow.microLocation !== parentId
     ) {
       if (direction === "top") parent.stackedTop = 0;
@@ -129,10 +129,10 @@ export class CardManager {
 
   /**
    * Walks the chain rooted at `rootId` in `fromDir` and rewrites every link
-   * to `toDir`. Each card stays stacked on the same parent — only the flag
-   * bits flip (and the titlebar swaps top↔bottom via applyData). Used to
-   * keep a card's chain uniform when accepting a stack opposite to what it
-   * currently holds.
+   * to `toDir`. Each card stays stacked on the same parent — only the
+   * stackedState bits in `microZone` flip (and the titlebar swaps top↔bottom
+   * via applyData). Used to keep a card's chain uniform when accepting a
+   * stack opposite to what it currently holds.
    *
    * Collects the chain ids before mutating so each setPosition sees a
    * coherent pre-flip view. setPosition fires onDataChange synchronously
@@ -170,7 +170,7 @@ export class CardManager {
     for (const card of this.cards.values()) {
       const row = this.ctx.data.get("cards", card.cardId);
       if (!row) continue;
-      const state = getStackedState(row.flags);
+      const state = getStackedState(row.microZone);
       if (state === STACKED_ON_RECT_X) {
         const parent = this.cards.get(row.microLocation);
         if (parent) parent.stackedTop = card.cardId;

@@ -1,5 +1,11 @@
 import type { Card } from "../cards/Card";
 import {
+  getStackedState,
+  STACKED_LOOSE,
+  STACKED_ON_RECT_X,
+  STACKED_ON_RECT_Y,
+} from "../cards/cardData";
+import {
   GameRectCard,
   RECT_CARD_HEIGHT,
   RECT_CARD_WIDTH,
@@ -10,12 +16,21 @@ import type { ZoneId } from "../zones/zoneId";
 const PUSH_FACTOR = 0.5;
 const TIE_BREAK_DIRECTION_X = 1;
 const TIE_BREAK_DIRECTION_Y = 0;
+/** Safety bound on chain walks — prevents runaway on malformed cyclic data. */
+const FIND_ROOT_MAX_DEPTH = 64;
 
 /**
  * Game logic for a single inventory zone. Subscribes to `CardManager` for the
  * zone's cards, holds the rect-shaped Cards in a `Set`, runs overlap-push
- * every game tick. Loose cards (stackedState == 0) get bumped; stacked cards
- * are left alone.
+ * every game tick.
+ *
+ * Stacked cards collide via their root — the loose card at the base of the
+ * chain (state 0). For each tracked card we walk up via `microLocation`
+ * while state is 1 (top) or 2 (bottom); state 3 (hex) is unsupported here
+ * and just opts the card out of pushing. Multiple cards in the same chain
+ * resolve to the same root, so we deduplicate before the pairwise pass.
+ * Pushing the root carries the rest of the stack along through the
+ * layout-tree parenting.
  *
  * Cards (composites) are stored rather than `GameRectCard`s so we can route
  * mutations through the canonical `Card.setPosition` setter.
@@ -24,7 +39,10 @@ export class GameInventory {
   private readonly cards = new Set<Card>();
   private readonly unsubscribe: () => void;
 
-  constructor(ctx: GameContext, zoneId: ZoneId) {
+  constructor(
+    private readonly ctx: GameContext,
+    zoneId: ZoneId,
+  ) {
     if (!ctx.cards) {
       throw new Error("[GameInventory] ctx.cards is null");
     }
@@ -43,18 +61,44 @@ export class GameInventory {
   }
 
   update(_dt: number): void {
-    const loose: Card[] = [];
+    const roots = new Set<Card>();
     for (const c of this.cards) {
-      if (c.gameCard instanceof GameRectCard && c.gameCard.isLoose()) {
-        loose.push(c);
-      }
+      const root = this.findRoot(c);
+      // Skip roots outside our tracked set — a chain that crosses zones
+      // belongs to whichever zone holds its root, not us.
+      if (root && this.cards.has(root)) roots.add(root);
     }
 
-    for (let i = 0; i < loose.length; i++) {
-      for (let j = i + 1; j < loose.length; j++) {
-        this.tryPush(loose[i], loose[j]);
+    const arr = [...roots];
+    for (let i = 0; i < arr.length; i++) {
+      for (let j = i + 1; j < arr.length; j++) {
+        this.tryPush(arr[i], arr[j]);
       }
     }
+  }
+
+  /**
+   * Walks `card` up via `microLocation` while its stack-state is 1 (top) or
+   * 2 (bottom) and returns the root — the card whose state is 0 (loose).
+   * Returns null for hex-anchored cards (state 3, not yet supported), or
+   * if the chain is broken (missing parent / row).
+   */
+  private findRoot(card: Card): Card | null {
+    let current: Card = card;
+    for (let i = 0; i < FIND_ROOT_MAX_DEPTH; i++) {
+      if (!(current.gameCard instanceof GameRectCard)) return null;
+      const row = this.ctx.data.get("cards", current.cardId);
+      if (!row) return null;
+      const state = getStackedState(row.microZone);
+      if (state === STACKED_LOOSE) return current;
+      if (state !== STACKED_ON_RECT_X && state !== STACKED_ON_RECT_Y) {
+        return null;
+      }
+      const parent = this.ctx.cards?.get(row.microLocation);
+      if (!parent) return null;
+      current = parent;
+    }
+    return null;
   }
 
   dispose(): void {

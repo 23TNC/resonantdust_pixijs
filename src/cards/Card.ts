@@ -38,23 +38,24 @@ export class Card {
   /** card_id we're stacked on, or 0 when loose. Drives layout-side parenting:
    *  loose → zone surface, stacked → parent card's stackHost. */
   private currentParentId = 0;
-  /** Mirror of `getStackedState(flags)` in semantic form. null when loose. */
+  /** Mirror of `getStackedState(microZone)` in semantic form. null when loose. */
   private currentStackDirection: StackDirection | null = null;
 
   /**
    * Card stacked directly on top of us (state 1), or 0 if none. Public so
    * `CardManager.stack`'s chain-walk can read these without ceremony. The
    * authoritative state still lives in the child's row (microLocation +
-   * flags); these are convenience back-pointers that let us walk down a
-   * chain in O(1) per step instead of scanning every card. Kept in sync
-   * by Card.onDataChange (incoming data) and Card.destroy (removal).
+   * microZone's stackedState bits); these are convenience back-pointers that
+   * let us walk down a chain in O(1) per step instead of scanning every
+   * card. Kept in sync by Card.onDataChange (incoming data) and Card.destroy
+   * (removal).
    */
   public stackedTop = 0;
   /** Card stacked directly below us (state 2), or 0 if none. Same caveat. */
   public stackedBottom = 0;
 
   private static stackParentOf(row: CardRow): number {
-    const state = getStackedState(row.flags);
+    const state = getStackedState(row.microZone);
     if (state === STACKED_ON_RECT_X || state === STACKED_ON_RECT_Y) {
       return row.microLocation;
     }
@@ -62,7 +63,7 @@ export class Card {
   }
 
   private static stackDirectionOf(row: CardRow): StackDirection | null {
-    const state = getStackedState(row.flags);
+    const state = getStackedState(row.microZone);
     if (state === STACKED_ON_RECT_X) return "top";
     if (state === STACKED_ON_RECT_Y) return "bottom";
     return null;
@@ -170,7 +171,7 @@ export class Card {
       newRow = {
         ...row,
         microLocation: encodeLooseXY(state.x, state.y),
-        flags: clearStackedState(row.flags),
+        microZone: clearStackedState(row.microZone),
       };
     } else {
       const stateBits =
@@ -178,7 +179,7 @@ export class Card {
       newRow = {
         ...row,
         microLocation: state.parentId,
-        flags: setStackedState(row.flags, stateBits),
+        microZone: setStackedState(row.microZone, stateBits),
       };
     }
     this.layoutCard.ctx.data.cards.setClient(newRow);
@@ -240,8 +241,10 @@ export class Card {
       ...row,
       macroZone: row.ownerId,
       layer: INVENTORY_LAYER,
+      // microZone: 0 clears localQ/localR/stackedState — fully resets the
+      // packed sub-fields since none of them are meaningful for a loose card
+      // dropped into the owner's inventory.
       microZone: 0,
-      flags: clearStackedState(row.flags),
       microLocation: 0,
     };
     this.layoutCard.ctx.data.cards.setClient(fixed);

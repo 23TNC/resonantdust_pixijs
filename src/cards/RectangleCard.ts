@@ -23,16 +23,16 @@ export const RECT_CARD_TITLE_HEIGHT = 24;
 export type RectCardTitlePosition = "top" | "bottom";
 
 export class GameRectCard extends GameCard {
-  private flags = 0;
+  private stackedState = 0;
   private microLocation = 0;
 
   applyData(row: CardRow): void {
-    this.flags = row.flags;
+    this.stackedState = getStackedState(row.microZone);
     this.microLocation = row.microLocation;
   }
 
   isLoose(): boolean {
-    return getStackedState(this.flags) === STACKED_LOOSE;
+    return this.stackedState === STACKED_LOOSE;
   }
 
   getLoosePosition(): LooseXY | null {
@@ -103,7 +103,7 @@ export class LayoutRectCard extends LayoutCard {
     // parent's top edge. Stack chains accumulate naturally — each child is
     // -titleHeight from its own parent, so child2 ends up at -2*titleHeight
     // from the root parent.
-    const stacked = getStackedState(row.flags);
+    const stacked = getStackedState(row.microZone);
     if (stacked === STACKED_LOOSE) {
       const { x, y } = decodeLooseXY(row.microLocation);
       this.setTarget(x, y);

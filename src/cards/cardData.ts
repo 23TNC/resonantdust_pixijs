@@ -1,9 +1,13 @@
 /*
- * Card location helpers. Position state lives directly on the row now —
- * `microZone: u8`, `microLocation: u32`, `flags: u8` are first-class fields,
- * not packed into a single `u64`.
+ * Card location helpers. Position state lives directly on the row —
+ * `microZone: u8`, `microLocation: u32`, `flags: u8` are first-class fields.
  *
- * `microLocation` interpretation depends on `flags.stackedState`:
+ * `microZone` (u8) packs three sub-fields, LSB-first:
+ *   - bits 0-1 (u2): stackedState
+ *   - bits 2-4 (u3): localR
+ *   - bits 5-7 (u3): localQ
+ *
+ * `microLocation` interpretation depends on `microZone.stackedState`:
  *   - 0 (loose):  microLocation packs (x: u16, y: u16) — inventory pixel coords
  *   - 1 or 2 (stacked on rect): microLocation is parent card_id (u32)
  *   - 3 (stacked on hex, future): rect-on-hex anchor; not implemented
@@ -23,18 +27,20 @@ export interface LooseXY {
   y: number;
 }
 
-export function getStackedState(flags: number): number {
-  return flags & STACKED_STATE_MASK;
+export function getStackedState(microZone: number): number {
+  return microZone & STACKED_STATE_MASK;
 }
 
-/** Clears the stacked-state bits of `flags` (i.e. forces it to STACKED_LOOSE). */
-export function clearStackedState(flags: number): number {
-  return flags & ~STACKED_STATE_MASK;
+/** Clears the stacked-state bits of `microZone` (forces state to STACKED_LOOSE).
+ *  Preserves localQ / localR. */
+export function clearStackedState(microZone: number): number {
+  return microZone & ~STACKED_STATE_MASK;
 }
 
-/** Replaces the stacked-state bits of `flags` with `newState` (low 2 bits). */
-export function setStackedState(flags: number, newState: number): number {
-  return (flags & ~STACKED_STATE_MASK) | (newState & STACKED_STATE_MASK);
+/** Replaces the stacked-state bits of `microZone` with `newState` (low 2 bits).
+ *  Preserves localQ / localR. */
+export function setStackedState(microZone: number, newState: number): number {
+  return (microZone & ~STACKED_STATE_MASK) | (newState & STACKED_STATE_MASK);
 }
 
 export function decodeLooseXY(microLocation: number): LooseXY {

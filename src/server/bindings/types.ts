@@ -18,7 +18,6 @@ export const Card = __t.object("Card", {
   microLocation: __t.u32(),
   ownerId: __t.u32(),
   packedDefinition: __t.u16(),
-  flags: __t.u8(),
 });
 export type Card = __Infer<typeof Card>;
 
