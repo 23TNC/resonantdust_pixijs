@@ -1,4 +1,4 @@
-import type { Card } from "../cards/Card";
+import type { Card, StackDirection } from "../cards/Card";
 import { LayoutCard } from "../cards/LayoutCard";
 import { GameRectCard } from "../cards/RectangleCard";
 import type { GameContext } from "../GameContext";
@@ -7,13 +7,9 @@ import type { PointerEventData } from "./InputManager";
 
 interface DragState {
   card: Card;
-  /** Cursor → card top-left, captured at drag start in surface-local coords. */
+  /** Cursor → card top-left in canvas coords, captured at drag start. */
   offsetX: number;
   offsetY: number;
-  /** The zone surface the card was on when the drag started (used to convert
-   *  the up-event's canvas coords into surface-local coords for the data
-   *  write at drop time). */
-  surface: LayoutNode;
 }
 
 /**
@@ -64,40 +60,82 @@ export class DragManager {
     const card = this.ctx.cards?.get(data.hit.cardId);
     if (!card) return;
     if (!(card.gameCard instanceof GameRectCard)) return;
-    if (!card.gameCard.isLoose()) return;
 
-    const surface = data.hit.parent;
-    if (!surface) return;
+    // Stacked cards are draggable too — dropping them on another card
+    // re-stacks, dropping on empty space converts to loose (unstack). Both
+    // paths flow through Card.setPosition so the linked-list back-pointers
+    // stay consistent.
 
     const cardGlobal = data.hit.container.getGlobalPosition();
     const offsetX = data.x - cardGlobal.x;
     const offsetY = data.y - cardGlobal.y;
 
-    this.state = { card, offsetX, offsetY, surface };
+    this.state = { card, offsetX, offsetY };
     card.setDragging(true, offsetX, offsetY);
   }
 
   private handleDragStop(_down: PointerEventData, up: PointerEventData): void {
     if (!this.state) return;
-    const { card, offsetX, offsetY, surface } = this.state;
+    const { card, offsetX, offsetY } = this.state;
     this.state = null;
 
-    // Clear drag state first so the card re-parents back to its zone surface
-    // (display position preserved). After this, applyData targets are
-    // interpreted in the correct (zone-surface) coord space.
+    // Clear drag state first so the card re-parents back to whichever
+    // surface its current data implies (zone surface for loose, parent's
+    // stackHost for stacked). Display position is preserved across the
+    // re-parent, so the visual stays put while we resolve the drop.
     card.setDragging(false);
 
-    // Write the drop location once, converted from canvas to surface-local.
-    // This is the same data path GameInventory uses for overlap-push — the
-    // card's tween catches up visually on the next frame.
-    if (card.gameCard instanceof GameRectCard && card.gameCard.isLoose()) {
-      const sg = surface.container.getGlobalPosition();
-      const newX = up.x - sg.x - offsetX;
-      const newY = up.y - sg.y - offsetY;
-      card.gameCard.setLoosePosition(newX, newY);
+    // If we dropped on another card, stack onto it. The dragged card was
+    // parented to the hit-transparent overlay during the drag, so the up
+    // event's hit-test fell through to whatever was beneath. Drop on a
+    // peeking title from a chain returns the child link; CardManager.stack
+    // walks down to the actual leaf so we always land at the chain's end.
+    const target = this.targetCardFromHit(up.hit, card.cardId);
+    if (target) {
+      const direction = this.directionFromCursor(up, target);
+      this.ctx.cards?.stack(card.cardId, target.cardId, direction);
+      return;
     }
 
-    // TODO: cross-zone drops (compute new macroZone/layer/microZone from
-    // up.hit's zone), drop-target reducer calls, recipe placements.
+    // No card under the cursor — write a loose position. Look the zone
+    // surface up fresh (rather than using whatever the card was parented to
+    // at drag start) because for a stacked-source drag that was a stackHost,
+    // not the inventory's coord space we need for loose xy.
+    if (card.gameCard instanceof GameRectCard) {
+      const surface = this.ctx.layout?.surfaceFor(card.zoneId());
+      if (surface) {
+        const sg = surface.container.getGlobalPosition();
+        const newX = up.x - sg.x - offsetX;
+        const newY = up.y - sg.y - offsetY;
+        card.setPosition({ kind: "loose", x: newX, y: newY });
+      }
+    }
+
+    // TODO: cross-zone drops (propagate target's macroZone/layer to the
+    // dragged card on stack), drop-target reducer calls, recipe placements.
+  }
+
+  private targetCardFromHit(
+    hit: LayoutNode | null,
+    draggedId: number,
+  ): Card | null {
+    if (!(hit instanceof LayoutCard)) return null;
+    if (hit.cardId === draggedId) return null;
+    return this.ctx.cards?.get(hit.cardId) ?? null;
+  }
+
+  /**
+   * Upper half of the target → top stack; lower half → bottom stack. Maps
+   * intuitively to the visual: drop near where you want the new card's
+   * peeking titlebar to appear. Works the same for peeking-title hits since
+   * those titles are at the top/bottom edge of their own card.
+   */
+  private directionFromCursor(
+    up: PointerEventData,
+    target: Card,
+  ): StackDirection {
+    const g = target.layoutCard.container.getGlobalPosition();
+    const localY = up.y - g.y;
+    return localY < target.layoutCard.height / 2 ? "top" : "bottom";
   }
 }

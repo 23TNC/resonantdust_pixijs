@@ -4,10 +4,10 @@ import type { GameContext } from "../GameContext";
 import type { Card as CardRow } from "../server/bindings/types";
 import {
   decodeLooseXY,
-  encodeLooseXY,
   getStackedState,
   STACKED_LOOSE,
   STACKED_ON_RECT_X,
+  STACKED_ON_RECT_Y,
   type LooseXY,
 } from "./cardData";
 import { GameCard } from "./GameCard";
@@ -42,21 +42,6 @@ export class GameRectCard extends GameCard {
 
   override whereAreYou(): { x: number; y: number } {
     return this.getLoosePosition() ?? { x: 0, y: 0 };
-  }
-
-  /**
-   * Write a new loose `(x, y)` into client_cards. Server doesn't see this
-   * until a state-changing action triggers a reducer. No-op if the card is
-   * not loose (stacked cards track parents, not their own xy).
-   */
-  setLoosePosition(x: number, y: number): void {
-    if (!this.isLoose()) return;
-    const row = this.ctx.data.get("cards", this.cardId);
-    if (!row) return;
-    this.ctx.data.cards.setClient({
-      ...row,
-      microLocation: encodeLooseXY(x, y),
-    });
   }
 }
 
@@ -123,9 +108,28 @@ export class LayoutRectCard extends LayoutCard {
       const { x, y } = decodeLooseXY(row.microLocation);
       this.setTarget(x, y);
     } else if (stacked === STACKED_ON_RECT_X) {
+      // Top stack: behind parent, titlebar peeking out above.
       this.setTitlePosition("top");
       this.setTarget(0, -RECT_CARD_TITLE_HEIGHT);
+    } else if (stacked === STACKED_ON_RECT_Y) {
+      // Bottom stack: behind parent, titlebar peeking out below.
+      this.setTitlePosition("bottom");
+      this.setTarget(0, +RECT_CARD_TITLE_HEIGHT);
     }
+  }
+
+  /**
+   * When stacked, only our peeking titlebar is visible — the rest of our
+   * rect is hidden behind the parent. Restrict self-hits to the titlebar
+   * strip so clicks landing on the parent's visible body fall through to
+   * the parent. Loose cards keep the default full-rect behavior.
+   */
+  protected override intersects(localX: number, localY: number): boolean {
+    if (!this.isStacked) return super.intersects(localX, localY);
+    if (localX < 0 || localX >= this.width) return false;
+    const titleY =
+      this.titlePosition === "top" ? 0 : this.height - RECT_CARD_TITLE_HEIGHT;
+    return localY >= titleY && localY < titleY + RECT_CARD_TITLE_HEIGHT;
   }
 
   protected override layout(): boolean | void {

@@ -116,6 +116,17 @@ export abstract class LayoutCard extends LayoutNode {
     return null;
   }
 
+  /**
+   * True when we're currently a stack child of another card — parented into
+   * a StackHost rather than a zone surface. Subclasses use this in their
+   * `intersects` override to restrict self-hits to the visible region (the
+   * peeking titlebar) since the rest of the card is hidden behind the
+   * parent and shouldn't catch clicks.
+   */
+  protected get isStacked(): boolean {
+    return this.parent instanceof StackHost;
+  }
+
   abstract applyData(row: CardRow): void;
 
   setHovered(value: boolean): void {

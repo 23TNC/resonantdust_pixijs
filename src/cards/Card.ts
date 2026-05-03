@@ -6,8 +6,11 @@ import type { ShadowedChange } from "../state/ShadowedStore";
 import { packZoneId, type ZoneId } from "../zones/zoneId";
 import {
   clearStackedState,
+  encodeLooseXY,
   getStackedState,
+  setStackedState,
   STACKED_ON_RECT_X,
+  STACKED_ON_RECT_Y,
 } from "./cardData";
 import type { CardManager } from "./CardManager";
 import type { GameCard } from "./GameCard";
@@ -16,6 +19,14 @@ import type { LayoutCard } from "./LayoutCard";
 import { GameRectCard, LayoutRectCard } from "./RectangleCard";
 
 const INVENTORY_LAYER = 1;
+
+export type StackDirection = "top" | "bottom";
+
+/** What `Card.setPosition` accepts. Loose = freely placed inventory xy;
+ *  stacked = pinned to another card's stack-host with a direction. */
+export type CardPositionState =
+  | { kind: "loose"; x: number; y: number }
+  | { kind: "stacked"; parentId: number; direction: StackDirection };
 
 export class Card {
   readonly cardId: number;
@@ -27,11 +38,34 @@ export class Card {
   /** card_id we're stacked on, or 0 when loose. Drives layout-side parenting:
    *  loose → zone surface, stacked → parent card's stackHost. */
   private currentParentId = 0;
+  /** Mirror of `getStackedState(flags)` in semantic form. null when loose. */
+  private currentStackDirection: StackDirection | null = null;
+
+  /**
+   * Card stacked directly on top of us (state 1), or 0 if none. Public so
+   * `CardManager.stack`'s chain-walk can read these without ceremony. The
+   * authoritative state still lives in the child's row (microLocation +
+   * flags); these are convenience back-pointers that let us walk down a
+   * chain in O(1) per step instead of scanning every card. Kept in sync
+   * by Card.onDataChange (incoming data) and Card.destroy (removal).
+   */
+  public stackedTop = 0;
+  /** Card stacked directly below us (state 2), or 0 if none. Same caveat. */
+  public stackedBottom = 0;
 
   private static stackParentOf(row: CardRow): number {
-    return getStackedState(row.flags) === STACKED_ON_RECT_X
-      ? row.microLocation
-      : 0;
+    const state = getStackedState(row.flags);
+    if (state === STACKED_ON_RECT_X || state === STACKED_ON_RECT_Y) {
+      return row.microLocation;
+    }
+    return 0;
+  }
+
+  private static stackDirectionOf(row: CardRow): StackDirection | null {
+    const state = getStackedState(row.flags);
+    if (state === STACKED_ON_RECT_X) return "top";
+    if (state === STACKED_ON_RECT_Y) return "bottom";
+    return null;
   }
 
   static create(
@@ -92,20 +126,79 @@ export class Card {
       // space. Orphan stacked cards (parent missing) get rewritten loose to
       // the owner's inventory and then attached there.
       this.currentParentId = Card.stackParentOf(initialRow);
+      this.currentStackDirection = Card.stackDirectionOf(initialRow);
       let row = initialRow;
       if (this.currentParentId !== 0 && !cardManager.get(this.currentParentId)) {
         row = this.fallbackToInventory(initialRow);
         this.currentZoneId = packZoneId(row.macroZone, row.layer);
         this.currentParentId = 0;
+        this.currentStackDirection = null;
       }
       this.gameCard.applyData(row);
       this.layoutCard.applyData(row);
       this.attachToCurrent();
+      // Best-effort back-pointer: if our parent already exists, claim our
+      // slot on it. If the parent hasn't spawned yet, CardManager's
+      // post-init repair pass picks it up.
+      if (this.currentParentId !== 0 && this.currentStackDirection) {
+        this.setBackPointerOn(this.currentParentId, this.currentStackDirection);
+      }
     }
 
     this.unsubscribe = ctx.data.subscribeKey("cards", cardId, (change) => {
       this.onDataChange(change as ShadowedChange<CardRow>);
     });
+  }
+
+  /**
+   * Canonical setter for a card's position. Always go through here so we
+   * (a) flow through the same setClient → onDataChange path the rest of the
+   * system uses, which keeps the layout-side re-parent + tween + back-pointer
+   * maintenance in lockstep with the data, and (b) callers don't need to
+   * know about flag bit-fiddling or which slot to touch on which neighbor.
+   *
+   * The back-pointer cleanup (clearing our slot on the old parent if any,
+   * claiming our slot on the new parent if stacked) happens in onDataChange
+   * — single funnel for both our writes here and any server-driven update.
+   */
+  setPosition(state: CardPositionState): void {
+    const row = this.layoutCard.ctx.data.get("cards", this.cardId);
+    if (!row) return;
+
+    let newRow: CardRow;
+    if (state.kind === "loose") {
+      newRow = {
+        ...row,
+        microLocation: encodeLooseXY(state.x, state.y),
+        flags: clearStackedState(row.flags),
+      };
+    } else {
+      const stateBits =
+        state.direction === "top" ? STACKED_ON_RECT_X : STACKED_ON_RECT_Y;
+      newRow = {
+        ...row,
+        microLocation: state.parentId,
+        flags: setStackedState(row.flags, stateBits),
+      };
+    }
+    this.layoutCard.ctx.data.cards.setClient(newRow);
+  }
+
+  private clearBackPointerOn(parentId: number, direction: StackDirection): void {
+    const parent = this.cardManager.get(parentId);
+    if (!parent) return;
+    if (direction === "top") {
+      if (parent.stackedTop === this.cardId) parent.stackedTop = 0;
+    } else {
+      if (parent.stackedBottom === this.cardId) parent.stackedBottom = 0;
+    }
+  }
+
+  private setBackPointerOn(parentId: number, direction: StackDirection): void {
+    const parent = this.cardManager.get(parentId);
+    if (!parent) return;
+    if (direction === "top") parent.stackedTop = this.cardId;
+    else parent.stackedBottom = this.cardId;
   }
 
   /** Attach layoutCard to whichever surface matches our current state. */
@@ -190,7 +283,13 @@ export class Card {
     } else {
       const g = this.layoutCard.container.getGlobalPosition();
       this.layoutCard.detach();
-      this.layoutCard.attach(this.currentZoneId);
+      // Re-attach to whatever the current data implies: stackHost for a
+      // stacked card, zone surface for a loose one. If the drop ends up
+      // changing state (loose → stack, stack → loose, stack → other parent),
+      // onDataChange will reparent again — but landing on the right surface
+      // here means a "drop on same parent" path doesn't strand us on the
+      // zone surface when no data actually changes.
+      this.attachToCurrent();
       const surface = this.layoutCard.parent;
       if (surface) {
         const sg = surface.container.getGlobalPosition();
@@ -207,6 +306,10 @@ export class Card {
   destroy(): void {
     this.unsubscribe?.();
     this.unsubscribe = null;
+    // Free our slot on the parent so its back-pointer doesn't dangle.
+    if (this.currentParentId !== 0 && this.currentStackDirection) {
+      this.clearBackPointerOn(this.currentParentId, this.currentStackDirection);
+    }
     this.gameCard.destroy();
     this.layoutCard.destroy();
   }
@@ -218,26 +321,33 @@ export class Card {
 
     const newZoneId = packZoneId(row.macroZone, row.layer);
     const newParentId = Card.stackParentOf(row);
+    const newStackDirection = Card.stackDirectionOf(row);
     const zoneChanged = newZoneId !== this.currentZoneId;
     const parentChanged = newParentId !== this.currentParentId;
+    const directionChanged = newStackDirection !== this.currentStackDirection;
 
-    if (zoneChanged || parentChanged) {
+    if (zoneChanged || parentChanged || directionChanged) {
       // Resolve the new attach target before mutating state, so we can early-
       // out cleanly on orphan without leaving currentZoneId / currentParentId
-      // in a half-updated state.
-      let nextParent: LayoutNode | null;
-      if (newParentId !== 0) {
-        const parent = this.cardManager.get(newParentId);
-        if (!parent) {
-          // Orphan — write a corrected row. setClient fires this same
-          // subscriber synchronously, and that recursive pass (with
-          // newParentId === 0) does the actual re-parent.
-          this.fallbackToInventory(row);
-          return;
+      // in a half-updated state. Direction-only changes (same parent, top↔
+      // bottom) don't move us between surfaces — only the layout target
+      // shifts, which applyData handles.
+      let nextParent: LayoutNode | null = null;
+      const reparentNeeded = zoneChanged || parentChanged;
+      if (reparentNeeded) {
+        if (newParentId !== 0) {
+          const parent = this.cardManager.get(newParentId);
+          if (!parent) {
+            // Orphan — write a corrected row. setClient fires this same
+            // subscriber synchronously, and that recursive pass (with
+            // newParentId === 0) does the actual re-parent.
+            this.fallbackToInventory(row);
+            return;
+          }
+          nextParent = parent.layoutCard.stackHost;
+        } else {
+          nextParent = this.layoutCard.ctx.layout?.surfaceFor(newZoneId) ?? null;
         }
-        nextParent = parent.layoutCard.stackHost;
-      } else {
-        nextParent = this.layoutCard.ctx.layout?.surfaceFor(newZoneId) ?? null;
       }
 
       if (zoneChanged) {
@@ -245,9 +355,24 @@ export class Card {
         this.currentZoneId = newZoneId;
         this.cardManager.move(this.cardId, oldZoneId, newZoneId);
       }
-      this.currentParentId = newParentId;
 
-      this.reparentSmoothly(nextParent);
+      // Back-pointer maintenance: clear our slot on the old parent (if we had
+      // one) and claim our slot on the new parent (if stacked).
+      if (parentChanged || directionChanged) {
+        if (this.currentParentId !== 0 && this.currentStackDirection) {
+          this.clearBackPointerOn(
+            this.currentParentId,
+            this.currentStackDirection,
+          );
+        }
+        this.currentParentId = newParentId;
+        this.currentStackDirection = newStackDirection;
+        if (newParentId !== 0 && newStackDirection) {
+          this.setBackPointerOn(newParentId, newStackDirection);
+        }
+      }
+
+      if (reparentNeeded) this.reparentSmoothly(nextParent);
     }
 
     this.gameCard.applyData(row);
