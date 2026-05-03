@@ -13,6 +13,7 @@ import {
 export const Action = __t.object("Action", {
   actionId: __t.u32(),
   cardId: __t.u32(),
+  rootCardId: __t.u32(),
   recipe: __t.u32(),
   ownerId: __t.u32(),
   layer: __t.u8(),

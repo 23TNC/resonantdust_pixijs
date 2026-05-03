@@ -121,6 +121,7 @@ export class LayoutRectCard extends LayoutCard {
     // from the root parent.
     const stacked = getStackedState(row.microZone);
     if (stacked === STACKED_LOOSE) {
+      this.setTitlePosition("top");
       const { x, y } = decodeLooseXY(row.microLocation);
       this.setTarget(x, y);
     } else if (stacked === STACKED_ON_RECT_X || stacked === STACKED_ON_RECT_Y) {

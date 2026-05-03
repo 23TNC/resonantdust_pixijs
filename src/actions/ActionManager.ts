@@ -2,7 +2,7 @@ import type { CardManager } from "../cards/CardManager";
 import type { CardDefinition } from "../definitions/DefinitionManager";
 import type { RecipeType } from "../definitions/RecipeManager";
 import type { GameContext } from "../GameContext";
-import type { Action as ActionRow } from "../server/bindings/types";
+import type { Action as ActionRow, InventoryStack } from "../server/bindings/types";
 import type { ShadowedChange } from "../state/ShadowedStore";
 import { packZoneId, type ZoneId } from "../zones/zoneId";
 
@@ -173,8 +173,13 @@ export class ActionManager {
     const bottom = this.collectChain(rootId, "bottom");
 
     if (this.byCardId.size > 0) {
-      this.checkCancels(top, "top");
-      this.checkCancels(bottom, "bottom");
+      const stack: InventoryStack = {
+        root: rootId,
+        stackUp: top.slice(1),
+        stackDown: bottom.slice(1),
+      };
+      this.checkCancels(top, "top", stack);
+      this.checkCancels(bottom, "bottom", stack);
     }
 
     if (top.length >= 2) this.detectRecipe(top, "top_stack");
@@ -186,7 +191,7 @@ export class ActionManager {
    * below the required length for this direction. A required length of 0
    * means no constraint in that direction — those actors are skipped.
    */
-  private checkCancels(chain: readonly number[], direction: StackDirection): void {
+  private checkCancels(chain: readonly number[], direction: StackDirection, stack: InventoryStack): void {
     if (chain.length === 0) return;
     for (const cardId of chain) {
       const actionId = this.byCardId.get(cardId);
@@ -198,7 +203,7 @@ export class ActionManager {
         console.log(
           `[ActionManager] cancel action=${action.actionId} reason="${direction} chain too short: ${chain.length} < ${required}"`,
         );
-        this.ctx.spacetime.cancelRecipe(action.actionId);
+        this.ctx.spacetime.cancelRecipe(action.actionId, stack);
       }
     }
   }

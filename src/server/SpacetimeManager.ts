@@ -196,8 +196,9 @@ export class SpacetimeManager {
    * (ActionManager) can be wired up against a stable surface. Replace the
    * body with the generated reducer call once it lands.
    */
-  cancelRecipe(actionId: number): void {
-    console.log(`[SpacetimeManager] cancelRecipe(${actionId}) — TODO`);
+  cancelRecipe(actionId: number, stack: InventoryStack): void {
+    console.log(`[SpacetimeManager] cancelRecipe(${actionId})`);
+    void this.submitStacks([stack]);
   }
 
   disconnect(): void {
