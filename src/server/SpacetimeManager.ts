@@ -6,6 +6,7 @@ import type {
 import type { DataManager } from "../state/DataManager";
 import { unpackZoneId, type ZoneId } from "../zones/zoneId";
 import type { DbConnection } from "./bindings";
+import type { InventoryStack } from "./bindings/types";
 
 type AnySubscriptionHandle = SubscriptionHandleImpl<any>;
 
@@ -166,6 +167,39 @@ export class SpacetimeManager {
     this.removeSubscription("players");
   }
 
+  async subscribeActions(zoneId: ZoneId): Promise<void> {
+    const { macroZone, layer } = unpackZoneId(zoneId);
+    return this.installSubscription(`actions:${zoneId}`, {
+      queries: [
+        `SELECT * FROM actions WHERE macro_zone = ${macroZone} AND layer = ${layer}`,
+      ],
+      scopeKey: `zone:${zoneId}`,
+      clearStore: () => this.clearActionsInZone(zoneId),
+    });
+  }
+
+  unsubscribeActions(zoneId: ZoneId): void {
+    this.removeSubscription(`actions:${zoneId}`);
+  }
+
+  /**
+   * Submit inventory stacks to trigger recipe matching on the server.
+   */
+  async submitStacks(stacks: InventoryStack[]): Promise<void> {
+    const conn = await this.connect();
+    await conn.reducers.submitInventoryStacks({ stacks });
+  }
+
+  /**
+   * Ask the server to cancel an in-flight recipe action. Phase-1 stub —
+   * the real reducer is in flight; for now we just log so callers
+   * (ActionManager) can be wired up against a stable surface. Replace the
+   * body with the generated reducer call once it lands.
+   */
+  cancelRecipe(actionId: number): void {
+    console.log(`[SpacetimeManager] cancelRecipe(${actionId}) — TODO`);
+  }
+
   disconnect(): void {
     this.connection?.disconnect();
     this.connection = null;
@@ -224,10 +258,16 @@ export class SpacetimeManager {
   }
 
   private clearCardsInZone(zoneId: ZoneId): void {
-    const keys = Array.from(this.data.cards.byIndex("zone", zoneId));
+    for (const key of Array.from(this.data.cards.byIndex("zone", zoneId))) {
+      this.data.advanceCardDeath(key as number);
+    }
+  }
+
+  private clearActionsInZone(zoneId: ZoneId): void {
+    const keys = Array.from(this.data.actions.byIndex("zone", zoneId));
     for (const key of keys) {
-      const row = this.data.cards.client.get(key);
-      if (row) this.data.applyServerDelete("cards", row);
+      const row = this.data.actions.client.get(key);
+      if (row) this.data.applyServerDelete("actions", row);
     }
   }
 
@@ -322,6 +362,22 @@ export class SpacetimeManager {
     conn.db.players.onDelete((_ctx, row) =>
       safe("players", "onDelete", () =>
         this.data.applyServerDelete("players", row),
+      ),
+    );
+
+    conn.db.actions.onInsert((_ctx, row) =>
+      safe("actions", "onInsert", () =>
+        this.data.applyServerInsert("actions", row),
+      ),
+    );
+    conn.db.actions.onUpdate((_ctx, oldRow, newRow) =>
+      safe("actions", "onUpdate", () =>
+        this.data.applyServerUpdate("actions", oldRow, newRow),
+      ),
+    );
+    conn.db.actions.onDelete((_ctx, row) =>
+      safe("actions", "onDelete", () =>
+        this.data.applyServerDelete("actions", row),
       ),
     );
   }

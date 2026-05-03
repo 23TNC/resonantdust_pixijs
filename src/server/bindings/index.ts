@@ -41,6 +41,7 @@ import SubmitInventoryStacksReducer from "./submit_inventory_stacks_reducer";
 // Import all procedure arg schemas
 
 // Import all table schema definitions
+import ActionsRow from "./actions_table";
 import CardsRow from "./cards_table";
 import PlayersRow from "./players_table";
 
@@ -48,6 +49,26 @@ import PlayersRow from "./players_table";
 
 /** The schema information for all tables in this module. This is defined the same was as the tables would have been defined in the server. */
 const tablesSchema = __schema({
+  actions: __table({
+    name: 'actions',
+    indexes: [
+      { accessor: 'action_id', name: 'actions_action_id_idx_btree', algorithm: 'btree', columns: [
+        'actionId',
+      ] },
+      { accessor: 'card_id', name: 'actions_card_id_idx_btree', algorithm: 'btree', columns: [
+        'cardId',
+      ] },
+      { accessor: 'macro_zone', name: 'actions_macro_zone_idx_btree', algorithm: 'btree', columns: [
+        'macroZone',
+      ] },
+      { accessor: 'owner_id', name: 'actions_owner_id_idx_btree', algorithm: 'btree', columns: [
+        'ownerId',
+      ] },
+    ],
+    constraints: [
+      { name: 'actions_action_id_key', constraint: 'unique', columns: ['actionId'] },
+    ],
+  }, ActionsRow),
   cards: __table({
     name: 'cards',
     indexes: [

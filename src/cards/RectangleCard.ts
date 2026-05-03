@@ -1,4 +1,4 @@
-import { Graphics, Text } from "pixi.js";
+import { Container, Graphics, Text } from "pixi.js";
 import type { CardDefinition } from "../definitions/DefinitionManager";
 import type { GameContext } from "../GameContext";
 import type { Card as CardRow } from "../server/bindings/types";
@@ -15,6 +15,9 @@ import { LayoutCard } from "./LayoutCard";
 
 const FALLBACK_STYLE = ["#3a3a4a", "#7a7a8a", "#0b1426"] as const;
 const FALLBACK_NAME = "?";
+
+const DEATH_FADE_LERP = 0.15;
+const DEATH_ALPHA_SNAP = 0.01;
 
 export const RECT_CARD_WIDTH = 72;
 export const RECT_CARD_HEIGHT = 96;
@@ -49,15 +52,25 @@ export class LayoutRectCard extends LayoutCard {
   static readonly WIDTH = RECT_CARD_WIDTH;
   static readonly HEIGHT = RECT_CARD_HEIGHT;
 
+  private readonly visual = new Container();
   private readonly bg = new Graphics();
   private readonly stateOverlay = new Graphics();
   private readonly nameText: Text;
   private definition: CardDefinition | null = null;
   private currentPackedDefinition: number | null = null;
   private titlePosition: RectCardTitlePosition = "top";
+  private dying = false;
+  private deathAlpha = 1;
+  private unsubDying: (() => void) | null = null;
 
   constructor(cardId: number, ctx: GameContext) {
     super(cardId, ctx);
+    this.unsubDying = ctx.data.subscribeKey("cards", cardId, (change) => {
+      if (change.kind === "dying") {
+        this.dying = true;
+        this.invalidate();
+      }
+    });
     this.nameText = new Text({
       text: FALLBACK_NAME,
       style: {
@@ -73,9 +86,12 @@ export class LayoutRectCard extends LayoutCard {
     this.nameText.anchor.set(0.5);
     // stackHost was added by LayoutCard's constructor as the first child so
     // it draws *behind* these — stacked children peek out from behind us.
-    this.container.addChild(this.bg);
-    this.container.addChild(this.nameText);
-    this.container.addChild(this.stateOverlay);
+    // visual wraps only this card's own pixels so death-fade alpha does not
+    // bleed into stackHost (and therefore into stacked children).
+    this.visual.addChild(this.bg);
+    this.visual.addChild(this.nameText);
+    this.visual.addChild(this.stateOverlay);
+    this.container.addChild(this.visual);
     // Card size is constant; position is owned by the tween in layout().
     this.setSize(RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
   }
@@ -107,14 +123,26 @@ export class LayoutRectCard extends LayoutCard {
     if (stacked === STACKED_LOOSE) {
       const { x, y } = decodeLooseXY(row.microLocation);
       this.setTarget(x, y);
-    } else if (stacked === STACKED_ON_RECT_X) {
-      // Top stack: behind parent, titlebar peeking out above.
-      this.setTitlePosition("top");
-      this.setTarget(0, -RECT_CARD_TITLE_HEIGHT);
-    } else if (stacked === STACKED_ON_RECT_Y) {
-      // Bottom stack: behind parent, titlebar peeking out below.
-      this.setTitlePosition("bottom");
-      this.setTarget(0, +RECT_CARD_TITLE_HEIGHT);
+    } else if (stacked === STACKED_ON_RECT_X || stacked === STACKED_ON_RECT_Y) {
+      const parentId = row.microLocation;
+      if (!this.ctx.data.get("cards", parentId)) {
+        // Parent gone — fall back to loose at current visual position.
+        this.ctx.cards?.get(this.cardId)?.setPosition({
+          kind: "loose",
+          x: this.targetX,
+          y: this.targetY,
+        });
+        return;
+      }
+      if (stacked === STACKED_ON_RECT_X) {
+        // Top stack: behind parent, titlebar peeking out above.
+        this.setTitlePosition("top");
+        this.setTarget(0, -RECT_CARD_TITLE_HEIGHT);
+      } else {
+        // Bottom stack: behind parent, titlebar peeking out below.
+        this.setTitlePosition("bottom");
+        this.setTarget(0, +RECT_CARD_TITLE_HEIGHT);
+      }
     }
   }
 
@@ -143,13 +171,47 @@ export class LayoutRectCard extends LayoutCard {
         ? 0
         : Math.max(0, this.height - RECT_CARD_TITLE_HEIGHT);
 
+    // Resolve progress bar from current action.
+    const card = this.ctx.cards?.get(this.cardId);
+    const actionRow = card?.currentAction
+      ? this.ctx.data.get("actions", card.currentAction.actionId)
+      : undefined;
+    const recipeDef = actionRow
+      ? this.ctx.recipes.getByIndex(actionRow.recipe)
+      : undefined;
+    let progressFill = 0;
+    if (actionRow && recipeDef && recipeDef.duration > 0) {
+      const now = Date.now() / 1000;
+      const start = actionRow.end - recipeDef.duration;
+      progressFill = Math.min(1, Math.max(0, (now - start) / recipeDef.duration));
+    }
+    const barStyle = recipeDef?.style ?? null;
+
     this.bg.clear();
     // Body — full card filled with primary.
     this.bg.rect(0, 0, this.width, this.height).fill({ color: primary });
-    // Title bar — top or bottom strip filled with secondary.
-    this.bg
-      .rect(0, titleY, this.width, RECT_CARD_TITLE_HEIGHT)
-      .fill({ color: secondary });
+    // Title bar — split into left/right for progress, or solid secondary.
+    if (barStyle && progressFill > 0) {
+      const resolveColor = (c: string) => (c === "default" ? secondary : c);
+      const left = resolveColor(barStyle.colorLeft);
+      const right = resolveColor(barStyle.colorRight);
+      const splitX =
+        barStyle.direction === "ltr"
+          ? progressFill * this.width
+          : (1 - progressFill) * this.width;
+      if (splitX > 0) {
+        this.bg.rect(0, titleY, splitX, RECT_CARD_TITLE_HEIGHT).fill({ color: left });
+      }
+      if (splitX < this.width) {
+        this.bg
+          .rect(splitX, titleY, this.width - splitX, RECT_CARD_TITLE_HEIGHT)
+          .fill({ color: right });
+      }
+    } else {
+      this.bg
+        .rect(0, titleY, this.width, RECT_CARD_TITLE_HEIGHT)
+        .fill({ color: secondary });
+    }
     // Outline around the whole card.
     this.bg
       .rect(0, 0, this.width, this.height)
@@ -172,7 +234,20 @@ export class LayoutRectCard extends LayoutCard {
         .rect(0, 0, this.width, 3)
         .fill({ color: 0xff8800 });
     }
-    this.container.alpha = this.state.dragging ? 0.7 : 1;
+    if (this.dying) {
+      this.deathAlpha += (0 - this.deathAlpha) * DEATH_FADE_LERP;
+      if (this.deathAlpha < DEATH_ALPHA_SNAP) {
+        this.deathAlpha = 0;
+        this.dying = false;
+        this.unsubDying?.();
+        this.unsubDying = null;
+
+        this.ctx.cards?.spliceCard(this.cardId);
+
+        queueMicrotask(() => this.ctx.data.advanceCardDeath(this.cardId));
+      }
+    }
+    this.visual.alpha = (this.state.dragging ? 0.7 : 1) * this.deathAlpha;
 
     // Tween toward the effective target. While dragging the cursor wins
     // (parent surface is the canvas-aligned overlay, so pointer coords map
@@ -189,6 +264,12 @@ export class LayoutRectCard extends LayoutCard {
       }
     }
     const moving = this.tweenTo(effX, effY);
-    return this.state.dragging || moving;
+    return this.state.dragging || moving || this.dying || actionRow !== undefined;
+  }
+
+  override destroy(): void {
+    this.unsubDying?.();
+    this.unsubDying = null;
+    super.destroy();
   }
 }

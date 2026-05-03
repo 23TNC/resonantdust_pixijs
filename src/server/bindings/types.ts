@@ -10,6 +10,25 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+export const Action = __t.object("Action", {
+  actionId: __t.u32(),
+  cardId: __t.u32(),
+  recipe: __t.u32(),
+  ownerId: __t.u32(),
+  layer: __t.u8(),
+  macroZone: __t.u32(),
+  end: __t.u32(),
+  participants: __t.u8(),
+});
+export type Action = __Infer<typeof Action>;
+
+export const ActionScheduler = __t.object("ActionScheduler", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+  actionId: __t.u32(),
+});
+export type ActionScheduler = __Infer<typeof ActionScheduler>;
+
 export const Card = __t.object("Card", {
   cardId: __t.u32(),
   layer: __t.u8(),
@@ -20,6 +39,12 @@ export const Card = __t.object("Card", {
   packedDefinition: __t.u16(),
 });
 export type Card = __Infer<typeof Card>;
+
+export const CardHold = __t.object("CardHold", {
+  cardId: __t.u32(),
+  actionId: __t.u32(),
+});
+export type CardHold = __Infer<typeof CardHold>;
 
 export const InventoryStack = __t.object("InventoryStack", {
   root: __t.u32(),

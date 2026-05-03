@@ -1,4 +1,5 @@
 import cardTypesData from "../data/card_types.json";
+import cardIdsData from "../data/cards/id.json";
 
 export type ColorTriple = readonly [string, string, string];
 export type AspectEntry = readonly [name: string, value: number];
@@ -134,6 +135,7 @@ export class DefinitionManager {
     const seenGroups = new Map<number, string>();
 
     for (const [path, module] of entries) {
+      if (!Array.isArray(module.default)) continue;
       for (const group of module.default) {
         const typeId = this.typeIdByName.get(group.card_type);
         if (typeId === undefined) {
@@ -162,15 +164,22 @@ export class DefinitionManager {
         const typeName = this.typeNameById.get(typeId)!;
         const categoryName = this.categoryNameById.get(categoryId)!;
 
-        let definitionId = 1;
+        const cardIds = cardIdsData as unknown as Record<string, Record<string, Record<string, number>>>;
+        const groupIds = cardIds[group.card_type]?.[group.category];
+        if (groupIds === undefined) {
+          throw new Error(
+            `[DefinitionManager] ${path}: no id.json entry for "${group.card_type}"/"${group.category}"`,
+          );
+        }
         for (const [key, raw] of Object.entries(group.cards)) {
-          if (definitionId > 0xff) {
+          const definitionId = groupIds[key];
+          if (definitionId === undefined) {
             throw new Error(
-              `[DefinitionManager] ${path}: too many cards under (${typeName}, ${categoryName}); max 255`,
+              `[DefinitionManager] ${path}: card "${key}" missing from data/cards/id.json under "${group.card_type}"/"${group.category}"`,
             );
           }
-          const [displayName, style, aspects] = raw;
           const packed = DefinitionManager.pack(typeId, categoryId, definitionId);
+          const [displayName, style, aspects] = raw;
           this.byPacked.set(packed, {
             packed,
             typeId,
@@ -183,7 +192,6 @@ export class DefinitionManager {
             style,
             aspects,
           });
-          definitionId++;
         }
       }
     }

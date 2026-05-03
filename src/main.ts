@@ -1,5 +1,6 @@
 import { Application } from "pixi.js";
 import { DefinitionManager } from "./definitions/DefinitionManager";
+import { RecipeManager } from "./definitions/RecipeManager";
 import { PlayerSession } from "./features/PlayerSession";
 import type { GameContext } from "./GameContext";
 import { LoginScene } from "./scenes/LoginScene";
@@ -34,6 +35,7 @@ async function main(): Promise<Runtime> {
 
   const scenes = new SceneManager(app);
   const definitions = new DefinitionManager();
+  const recipes = new RecipeManager();
   const data = new DataManager();
   const zones = new ZoneManager();
 
@@ -63,6 +65,7 @@ async function main(): Promise<Runtime> {
     app,
     scenes,
     definitions,
+    recipes,
     spacetime,
     playerSession,
     data,
@@ -71,6 +74,7 @@ async function main(): Promise<Runtime> {
     layout: null,
     game: null,
     input: null,
+    actions: null,
   };
   scenes.setContext(ctx);
 

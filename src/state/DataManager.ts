@@ -1,12 +1,20 @@
-import type { Card, Player } from "../server/bindings/types";
+import type { Action, Card, Player } from "../server/bindings/types";
 import type { SpacetimeManager } from "../server/SpacetimeManager";
+import { getStackedState, STACKED_LOOSE } from "../cards/cardData";
 import { packZoneId, type ZoneId } from "../zones/zoneId";
 import type { ZoneManager } from "../zones/ZoneManager";
 import { ShadowedStore, type ShadowedListener } from "./ShadowedStore";
 
+/** Card row extended with a client-only death counter. `dead === 0` is live;
+ *  `dead === 1` means the server deleted it but it is still playing out its
+ *  death (subscribers see `kind === "dying"`); `dead === 2` is the final
+ *  removal (subscribers see `kind === "dead"`). */
+export type ClientCard = Card & { readonly dead: 0 | 1 | 2 };
+
 export type TableMap = {
-  cards: Card;
+  cards: ClientCard;
   players: Player;
+  actions: Action;
 };
 
 export type TableName = keyof TableMap;
@@ -21,11 +29,15 @@ export interface KeySetChange {
 export type KeySetListener = (change: KeySetChange) => void;
 
 export class DataManager {
-  readonly cards = new ShadowedStore<Card>(
+  readonly cards = new ShadowedStore<ClientCard>(
     (c) => c.cardId,
     { zone: (c) => packZoneId(c.macroZone, c.layer) },
   );
   readonly players = new ShadowedStore<Player>((p) => p.playerId);
+  readonly actions = new ShadowedStore<Action>(
+    (a) => a.actionId,
+    { zone: (a) => packZoneId(a.macroZone, a.layer) },
+  );
 
   private spacetime: SpacetimeManager | null = null;
   private zonesUnsub: (() => void) | null = null;
@@ -45,22 +57,27 @@ export class DataManager {
 
   /**
    * Subscribe to ZoneManager so that any zone reaching `active` or `hot`
-   * becomes a spacetime cards subscription, and demotion drops it. Replaces
-   * the old direct `trackCards` API — callers now go through `zones.ensure`.
+   * becomes a spacetime subscription for the per-zone tables (cards +
+   * actions), and demotion drops them. Replaces the old direct `trackCards`
+   * API — callers now go through `zones.ensure`.
    */
   attachZones(zones: ZoneManager): void {
     if (this.zonesUnsub) {
       throw new Error("[DataManager] zones already attached");
     }
     const onAdded = (zoneId: ZoneId) => {
-      this.requireSpacetime()
-        .subscribeCards(zoneId)
-        .catch((err) => {
-          console.error(`[DataManager] subscribeCards(${zoneId}) failed`, err);
-        });
+      const spacetime = this.requireSpacetime();
+      spacetime.subscribeCards(zoneId).catch((err) => {
+        console.error(`[DataManager] subscribeCards(${zoneId}) failed`, err);
+      });
+      spacetime.subscribeActions(zoneId).catch((err) => {
+        console.error(`[DataManager] subscribeActions(${zoneId}) failed`, err);
+      });
     };
     const onRemoved = (zoneId: ZoneId) => {
-      this.requireSpacetime().unsubscribeCards(zoneId);
+      const spacetime = this.requireSpacetime();
+      spacetime.unsubscribeCards(zoneId);
+      spacetime.unsubscribeActions(zoneId);
     };
     const unsubActiveAdd = zones.onAdded("active", onAdded);
     const unsubActiveRemove = zones.onRemoved("active", onRemoved);
@@ -171,32 +188,100 @@ export class DataManager {
     }
   }
 
-  applyServerInsert<K extends TableName>(table: K, row: TableMap[K]): void {
-    const { key, wasPresent } = this.storeOf(table).applyServerInsert(row);
+  /** Client-side card position update (drag, orphan fallback, etc.).
+   *  Preserves the existing `dead` value so dying cards stay dying. */
+  setClientCard(row: Card): void {
+    const existing = this.cards.get(row.cardId);
+    this.cards.setClient({ ...row, dead: existing?.dead ?? 0 });
+  }
+
+  applyServerInsert(table: "cards", row: Card): void;
+  applyServerInsert<K extends Exclude<TableName, "cards">>(table: K, row: TableMap[K]): void;
+  applyServerInsert(table: TableName, row: Card | TableMap[TableName]): void {
+    if (table === "cards") {
+      const clientCard: ClientCard = { ...(row as Card), dead: 0 };
+      const { key, wasPresent } = this.cards.applyServerInsert(clientCard);
+      if (!wasPresent) this.notifyKeySet("cards", "added", key);
+      return;
+    }
+    const { key, wasPresent } = this.storeOf(table).applyServerInsert(row as TableMap[typeof table]);
     if (!wasPresent) this.notifyKeySet(table, "added", key);
   }
 
-  applyServerUpdate<K extends TableName>(
-    table: K,
-    oldRow: TableMap[K],
-    newRow: TableMap[K],
-  ): void {
-    this.storeOf(table).applyServerUpdate(oldRow, newRow);
+  applyServerUpdate(table: "cards", oldRow: Card, newRow: Card): void;
+  applyServerUpdate<K extends Exclude<TableName, "cards">>(table: K, oldRow: TableMap[K], newRow: TableMap[K]): void;
+  applyServerUpdate(table: TableName, oldRow: Card | TableMap[TableName], newRow: Card | TableMap[TableName]): void {
+    if (table === "cards") {
+      let merged = newRow as Card;
+      const existing = this.cards.get((newRow as Card).cardId);
+      if (existing && existing.layer === 1) {
+        // Server doesn't track inventory positions — preserve the client's
+        // macroZone/microZone/microLocation so local drag state is not overwritten.
+        merged = {
+          ...merged,
+          macroZone: existing.macroZone,
+          microZone: existing.microZone,
+          microLocation: existing.microLocation,
+        };
+      }
+      this.cards.applyServerUpdate(oldRow as ClientCard, merged as ClientCard);
+      return;
+    }
+    this.storeOf(table).applyServerUpdate(
+      oldRow as TableMap[typeof table],
+      newRow as TableMap[typeof table],
+    );
   }
 
-  applyServerDelete<K extends TableName>(table: K, row: TableMap[K]): void {
-    const { key, wasPresent } = this.storeOf(table).applyServerDelete(row);
+  /** For cards: marks the row dying (`dead === 1`) and emits `"dying"` — the
+   *  row stays in the store until `advanceCardDeath` is called. For all other
+   *  tables: immediate removal with `"delete"` as before. */
+  applyServerDelete(table: "cards", row: Card): void;
+  applyServerDelete<K extends Exclude<TableName, "cards">>(table: K, row: TableMap[K]): void;
+  applyServerDelete(table: TableName, row: Card | TableMap[TableName]): void {
+    if (table === "cards") {
+      let merged = row as Card;
+      const existing = this.cards.get((row as Card).cardId);
+      if (existing && existing.layer === 1) {
+        merged = {
+          ...merged,
+          macroZone: existing.macroZone,
+          microZone: existing.microZone,
+          microLocation: existing.microLocation,
+        };
+      }
+      this.cards.markDying({ ...merged, dead: 1 });
+      return;
+    }
+    const { key, wasPresent } = this.storeOf(table).applyServerDelete(row as TableMap[typeof table]);
     if (wasPresent) this.notifyKeySet(table, "removed", key);
   }
 
-  /** Fire a `removed` keyset event and a delete change for every row, then drop the rows. Used when a subscription's scope changes or the connection drops — listeners get a clean teardown signal before fresh data lands. Listener registrations are preserved. */
+  /** Advance a dying card (`dead === 1`) to fully dead: removes it from the
+   *  store and emits `"dead"` with the last-known row as `oldValue`. */
+  advanceCardDeath(cardId: number): void {
+    const { key, wasPresent } = this.cards.markDead(cardId);
+    if (wasPresent) this.notifyKeySet("cards", "removed", key);
+  }
+
+  /** Fire a `removed` keyset event and remove every row. For cards this
+   *  bypasses the dying phase (subscription teardown, not a game event) and
+   *  emits `"dead"` directly. Listener registrations are preserved. */
   clearTable<K extends TableName>(table: K): void {
+    if (table === "cards") {
+      if (this.cards.client.size === 0) return;
+      for (const key of [...this.cards.client.keys()]) {
+        const { wasPresent } = this.cards.markDead(key);
+        if (wasPresent) this.notifyKeySet("cards", "removed", key);
+      }
+      return;
+    }
     const store = this.storeOf(table);
     if (store.client.size === 0) return;
-    const snapshot: TableMap[K][] = [];
-    for (const row of store.client.values()) snapshot.push(row);
-    for (const row of snapshot) {
-      this.applyServerDelete(table, row);
+    const rows = [...store.client.values()];
+    for (const row of rows) {
+      const { key, wasPresent } = store.applyServerDelete(row);
+      if (wasPresent) this.notifyKeySet(table, "removed", key);
     }
   }
 
@@ -205,6 +290,7 @@ export class DataManager {
     this.zonesUnsub = null;
     this.cards.clear();
     this.players.clear();
+    this.actions.clear();
     for (const key of Object.keys(this.keySetListeners) as TableName[]) {
       delete this.keySetListeners[key];
     }

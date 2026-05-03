@@ -1,19 +1,35 @@
 import type { GameContext } from "../GameContext";
+import type { Card as CardRow } from "../server/bindings/types";
 import type { ZoneId } from "../zones/zoneId";
-import { Card, type StackDirection } from "./Card";
+import { Card, type CardPositionState, type StackDirection } from "./Card";
 import {
+  clearStackedState,
+  decodeLooseXY,
+  encodeLooseXY,
   getStackedState,
+  setStackedState,
+  STACKED_LOOSE,
   STACKED_ON_RECT_X,
   STACKED_ON_RECT_Y,
 } from "./cardData";
 
 export type CardChangeKind = "added" | "removed";
 export type CardListener = (kind: CardChangeKind, card: Card) => void;
+/**
+ * Fired when a stack is "modified" — a card joined, left, or changed
+ * direction within a chain. Receives the root id of the affected chain in
+ * its post-change state. Same root may be reported via two listeners
+ * (oldRoot + newRoot) when a card moves between chains.
+ */
+export type StackChangeListener = (rootId: number) => void;
+
+const FIND_ROOT_MAX_DEPTH = 64;
 
 export class CardManager {
   private readonly cards = new Map<number, Card>();
   private readonly byZone = new Map<ZoneId, Set<Card>>();
   private readonly listeners = new Map<ZoneId, Set<CardListener>>();
+  private readonly stackListeners = new Map<ZoneId, Set<StackChangeListener>>();
   private readonly unsubscribe: () => void;
 
   constructor(private readonly ctx: GameContext) {
@@ -29,6 +45,56 @@ export class CardManager {
       if (kind === "added") this.spawn(cardId);
       else this.destroy(cardId);
     });
+  }
+
+  /**
+   * Remove `cardId` from its chain, bridging the gap it leaves behind.
+   *
+   * - State 0 (loose/root): both stacked children are freed to loose positions
+   *   offset one title-height above/below the dying card's packed XY.
+   * - State 1/2 (mid-chain): the continuation child (same direction as this
+   *   card's attachment) inherits this card's `microZone` and `microLocation`
+   *   verbatim, transplanting its chain position exactly. The cross child is
+   *   left for orphan-detection to recover (uncommon case).
+   * - State 3 (hex): not handled yet.
+   */
+  spliceCard(cardId: number): void {
+    const card = this.cards.get(cardId);
+    if (!card) return;
+    const row = this.ctx.data.get("cards", cardId);
+    if (!row) return;
+
+    const state = getStackedState(row.microZone);
+
+    if (state === STACKED_LOOSE) {
+      const { x, y } = decodeLooseXY(row.microLocation);
+      // Make the top child the new root, then re-stack the bottom child onto
+      // it so the two survivors stay paired rather than scattering loose.
+      const topId    = card.stackedTop;
+      const bottomId = card.stackedBottom;
+      if (topId !== 0) {
+        this.setCardPosition(topId, { kind: "loose", x, y });
+        if (bottomId !== 0) this.stack(bottomId, topId, "bottom");
+      } else if (bottomId !== 0) {
+        this.setCardPosition(bottomId, { kind: "loose", x, y });
+      }
+    } else if (state === STACKED_ON_RECT_X || state === STACKED_ON_RECT_Y) {
+      // stack() does a leaf walk from the parent which still sees this card
+      // as a live child, so attach the continuation child directly instead.
+      const dir: StackDirection = state === STACKED_ON_RECT_X ? "top" : "bottom";
+      const continuationId = dir === "top" ? card.stackedTop : card.stackedBottom;
+      this.setCardPosition(continuationId, {
+        kind: "stacked",
+        parentId: row.microLocation,
+        direction: dir,
+      });
+      // Detach this card from its parent so it is no longer part of the chain.
+      this.setCardPosition(cardId, { kind: "loose", x: 0, y: 0 });
+      // Cross child left for orphan-detection; state 3 not handled yet.
+    }
+
+    card.stackedTop = 0;
+    card.stackedBottom = 0;
   }
 
   /**
@@ -77,24 +143,202 @@ export class CardManager {
     while (true) {
       const leaf = this.cards.get(leafId);
       if (!leaf) return;
-
-      const candidateId =
-        direction === "top" ? leaf.stackedTop : leaf.stackedBottom;
-      if (candidateId === 0) break;
-      // If A is currently in this chain (e.g. dragging a stacked card and
-      // dropping back near its existing parent), don't descend through
-      // ourselves — that would make A its own leaf and self-stack. Stop at
-      // leaf and let setPosition do the (possibly no-op) write. Don't repair
-      // the pointer either: A's data still says it's stacked here, and
-      // onDataChange will clear the pointer when A's row updates.
-      if (candidateId === aId) break;
-
+      // Check for self-stack before validatedSlot can repair the pointer away.
+      const raw = direction === "top" ? leaf.stackedTop : leaf.stackedBottom;
+      if (raw === aId) break;
       const next = this.validatedSlot(leafId, direction);
       if (next === 0) break;
       leafId = next;
     }
 
-    a.setPosition({ kind: "stacked", parentId: leafId, direction });
+    this.setCardPosition(aId, { kind: "stacked", parentId: leafId, direction });
+  }
+
+  /**
+   * Build and write a client-side position update for `cardId`. The row is
+   * read from the data store, the position fields are replaced, and the
+   * result is written back via `setClientCard` — which fires `Card.onDataChange`
+   * synchronously, triggering back-pointer maintenance and layout re-parenting.
+   */
+  setCardPosition(cardId: number, state: CardPositionState): void {
+    const row = this.ctx.data.get("cards", cardId);
+    if (!row) return;
+    let newRow: CardRow;
+    if (state.kind === "loose") {
+      newRow = {
+        ...row,
+        microLocation: encodeLooseXY(state.x, state.y),
+        microZone: clearStackedState(row.microZone),
+      };
+    } else {
+      const stateBits =
+        state.direction === "top" ? STACKED_ON_RECT_X : STACKED_ON_RECT_Y;
+      newRow = {
+        ...row,
+        microLocation: state.parentId,
+        microZone: setStackedState(row.microZone, stateBits),
+      };
+    }
+    this.ctx.data.setClientCard(newRow);
+  }
+
+  get(cardId: number): Card | undefined {
+    return this.cards.get(cardId);
+  }
+
+  size(): number {
+    return this.cards.size;
+  }
+
+  /** Snapshot iterator of cards currently in the given zone. */
+  *cardsInZone(zoneId: ZoneId): Generator<Card> {
+    const bucket = this.byZone.get(zoneId);
+    if (bucket) yield* bucket;
+  }
+
+  /**
+   * Per-zone delivery. Listener fires `("added", card)` when a card enters
+   * the zone (spawned-into or moved-into) and `("removed", card)` when it
+   * leaves (destroyed or moved-out). No snapshot of existing cards on
+   * subscribe — call `cardsInZone(zoneId)` for an initial scan.
+   */
+  subscribe(zoneId: ZoneId, listener: CardListener): () => void {
+    return this.addListener(this.listeners, zoneId, listener);
+  }
+
+  /**
+   * Per-zone delivery of stack-change events. Listener receives the root id
+   * of an affected chain in the requested zone. `Card.onDataChange` fires
+   * here when its parent or stack-direction changes — once for the old
+   * chain's root (if applicable), once for the new chain's root (deduped if
+   * they're the same). Loose-to-loose moves do NOT fire — those aren't
+   * stack changes.
+   *
+   * Subscribers should walk the chain from `rootId` themselves to discover
+   * the cards in it. Chains are uniform-direction by invariant, so walking
+   * `stackedTop` xor `stackedBottom` from root finds every card in O(depth).
+   */
+  subscribeStackChange(zoneId: ZoneId, listener: StackChangeListener): () => void {
+    return this.addListener(this.stackListeners, zoneId, listener);
+  }
+
+  /**
+   * Fire stack-change listeners for the chain rooted at `rootId`. Called
+   * by `Card.onDataChange` after a parent/direction transition. Determines
+   * the zone from the root card's current zoneId; listeners registered for
+   * that zone hear the event.
+   */
+  fireStackChange(rootId: number): void {
+    const root = this.cards.get(rootId);
+    if (!root) return;
+    const zoneId = root.zoneId();
+    const set = this.stackListeners.get(zoneId);
+    if (!set) return;
+    for (const listener of set) {
+      try {
+        listener(rootId);
+      } catch (err) {
+        console.error("[CardManager] stack-change listener threw", err);
+      }
+    }
+  }
+
+  /**
+   * Walk up the stack chain from `cardId` via row data and return the loose
+   * root (the first ancestor whose stackedState is 0). Doesn't depend on
+   * local back-pointers — uses microZone+microLocation directly so it's
+   * usable from `onDataChange` after the local pointers have been updated
+   * (since the data is the source of truth for `microLocation`/parent, and
+   * only THIS card's row changed in any given onDataChange firing).
+   */
+  rootOf(cardId: number): number {
+    let id = cardId;
+    for (let i = 0; i < FIND_ROOT_MAX_DEPTH; i++) {
+      const row = this.ctx.data.get("cards", id);
+      if (!row) return id;
+      const state = getStackedState(row.microZone);
+      if (state !== STACKED_ON_RECT_X && state !== STACKED_ON_RECT_Y) return id;
+      const parentId = row.microLocation;
+      if (!this.cards.get(parentId)) return id;
+      id = parentId;
+    }
+    return id;
+  }
+
+  /**
+   * Re-route a Card between zone buckets. Called by `Card` itself when its
+   * data update changes `(macroZone, layer)`. Same Card instance preserved —
+   * no destroy/respawn, gameCard / renderCard state survives.
+   */
+  move(cardId: number, oldZoneId: ZoneId, newZoneId: ZoneId): void {
+    if (oldZoneId === newZoneId) return;
+    const card = this.cards.get(cardId);
+    if (!card) return;
+    this.removeFromZone(oldZoneId, card);
+    this.addToZone(newZoneId, card);
+  }
+
+  dispose(): void {
+    this.unsubscribe();
+    for (const card of this.cards.values()) card.destroy();
+    this.cards.clear();
+    this.byZone.clear();
+    this.listeners.clear();
+    this.stackListeners.clear();
+  }
+
+  private spawn(cardId: number): void {
+    if (this.cards.has(cardId)) return;
+    const card = Card.create(cardId, this.ctx, this);
+    if (!card) return;
+    this.cards.set(cardId, card);
+    this.addToZone(card.zoneId(), card);
+  }
+
+  private destroy(cardId: number): void {
+    const card = this.cards.get(cardId);
+    if (!card) return;
+    this.removeFromZone(card.zoneId(), card);
+    card.destroy();
+    this.cards.delete(cardId);
+  }
+
+  private addToZone(zoneId: ZoneId, card: Card): void {
+    let bucket = this.byZone.get(zoneId);
+    if (!bucket) {
+      bucket = new Set();
+      this.byZone.set(zoneId, bucket);
+    }
+    bucket.add(card);
+    this.fireZone(zoneId, "added", card);
+  }
+
+  private removeFromZone(zoneId: ZoneId, card: Card): void {
+    const bucket = this.byZone.get(zoneId);
+    if (bucket) {
+      bucket.delete(card);
+      if (bucket.size === 0) this.byZone.delete(zoneId);
+    }
+    this.fireZone(zoneId, "removed", card);
+  }
+
+  private addListener<L>(
+    map: Map<ZoneId, Set<L>>,
+    zoneId: ZoneId,
+    listener: L,
+  ): () => void {
+    let set = map.get(zoneId);
+    if (!set) {
+      set = new Set();
+      map.set(zoneId, set);
+    }
+    set.add(listener);
+    return () => {
+      const s = map.get(zoneId);
+      if (!s) return;
+      s.delete(listener);
+      if (s.size === 0) map.delete(zoneId);
+    };
   }
 
   /**
@@ -154,11 +398,9 @@ export class CardManager {
     }
 
     for (const id of chain) {
-      const card = this.cards.get(id);
-      if (!card) continue;
       const row = this.ctx.data.get("cards", id);
       if (!row) continue;
-      card.setPosition({
+      this.setCardPosition(id, {
         kind: "stacked",
         parentId: row.microLocation,
         direction: toDir,
@@ -179,107 +421,6 @@ export class CardManager {
         if (parent) parent.stackedBottom = card.cardId;
       }
     }
-  }
-
-  get(cardId: number): Card | undefined {
-    return this.cards.get(cardId);
-  }
-
-  size(): number {
-    return this.cards.size;
-  }
-
-  /** Snapshot iterator of cards currently in the given zone. */
-  *cardsInZone(zoneId: ZoneId): Generator<Card> {
-    const bucket = this.byZone.get(zoneId);
-    if (bucket) yield* bucket;
-  }
-
-  /**
-   * Per-zone delivery. Listener fires `("added", card)` when a card enters
-   * the zone (spawned-into or moved-into) and `("removed", card)` when it
-   * leaves (destroyed or moved-out). No snapshot of existing cards on
-   * subscribe — call `cardsInZone(zoneId)` for an initial scan.
-   */
-  subscribe(zoneId: ZoneId, listener: CardListener): () => void {
-    let set = this.listeners.get(zoneId);
-    if (!set) {
-      set = new Set();
-      this.listeners.set(zoneId, set);
-    }
-    set.add(listener);
-    return () => {
-      const s = this.listeners.get(zoneId);
-      if (!s) return;
-      s.delete(listener);
-      if (s.size === 0) this.listeners.delete(zoneId);
-    };
-  }
-
-  /**
-   * Re-route a Card between zone buckets. Called by `Card` itself when its
-   * data update changes `(macroZone, layer)`. Same Card instance preserved —
-   * no destroy/respawn, gameCard / renderCard state survives.
-   */
-  move(cardId: number, oldZoneId: ZoneId, newZoneId: ZoneId): void {
-    if (oldZoneId === newZoneId) return;
-    const card = this.cards.get(cardId);
-    if (!card) return;
-
-    const oldBucket = this.byZone.get(oldZoneId);
-    if (oldBucket) {
-      oldBucket.delete(card);
-      if (oldBucket.size === 0) this.byZone.delete(oldZoneId);
-    }
-    this.fireZone(oldZoneId, "removed", card);
-
-    let newBucket = this.byZone.get(newZoneId);
-    if (!newBucket) {
-      newBucket = new Set();
-      this.byZone.set(newZoneId, newBucket);
-    }
-    newBucket.add(card);
-    this.fireZone(newZoneId, "added", card);
-  }
-
-  dispose(): void {
-    this.unsubscribe();
-    for (const card of this.cards.values()) card.destroy();
-    this.cards.clear();
-    this.byZone.clear();
-    this.listeners.clear();
-  }
-
-  private spawn(cardId: number): void {
-    if (this.cards.has(cardId)) return;
-    const card = Card.create(cardId, this.ctx, this);
-    if (!card) return;
-    this.cards.set(cardId, card);
-
-    const zoneId = card.zoneId();
-    let bucket = this.byZone.get(zoneId);
-    if (!bucket) {
-      bucket = new Set();
-      this.byZone.set(zoneId, bucket);
-    }
-    bucket.add(card);
-    this.fireZone(zoneId, "added", card);
-  }
-
-  private destroy(cardId: number): void {
-    const card = this.cards.get(cardId);
-    if (!card) return;
-
-    const zoneId = card.zoneId();
-    const bucket = this.byZone.get(zoneId);
-    if (bucket) {
-      bucket.delete(card);
-      if (bucket.size === 0) this.byZone.delete(zoneId);
-    }
-    this.fireZone(zoneId, "removed", card);
-
-    card.destroy();
-    this.cards.delete(cardId);
   }
 
   private fireZone(zoneId: ZoneId, kind: CardChangeKind, card: Card): void {

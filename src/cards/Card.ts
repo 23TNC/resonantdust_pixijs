@@ -1,3 +1,4 @@
+import type { CachedAction } from "../actions/ActionManager";
 import { DefinitionManager } from "../definitions/DefinitionManager";
 import type { GameContext } from "../GameContext";
 import type { LayoutNode } from "../layout/LayoutNode";
@@ -5,10 +6,7 @@ import type { Card as CardRow } from "../server/bindings/types";
 import type { ShadowedChange } from "../state/ShadowedStore";
 import { packZoneId, type ZoneId } from "../zones/zoneId";
 import {
-  clearStackedState,
-  encodeLooseXY,
   getStackedState,
-  setStackedState,
   STACKED_ON_RECT_X,
   STACKED_ON_RECT_Y,
 } from "./cardData";
@@ -32,8 +30,10 @@ export class Card {
   readonly cardId: number;
   readonly gameCard: GameCard;
   readonly layoutCard: LayoutCard;
+  public currentAction: CachedAction | null = null;
   private readonly cardManager: CardManager;
   private unsubscribe: (() => void) | null = null;
+  private unsubAction: (() => void) | null = null;
   private currentZoneId: ZoneId;
   /** card_id we're stacked on, or 0 when loose. Drives layout-side parenting:
    *  loose → zone surface, stacked → parent card's stackHost. */
@@ -128,9 +128,10 @@ export class Card {
       // the owner's inventory and then attached there.
       this.currentParentId = Card.stackParentOf(initialRow);
       this.currentStackDirection = Card.stackDirectionOf(initialRow);
-      let row = initialRow;
+      let row: CardRow = initialRow;
       if (this.currentParentId !== 0 && !cardManager.get(this.currentParentId)) {
-        row = this.fallbackToInventory(initialRow);
+        this.fallbackToInventory(initialRow);
+        row = ctx.data.get("cards", cardId) ?? initialRow;
         this.currentZoneId = packZoneId(row.macroZone, row.layer);
         this.currentParentId = 0;
         this.currentStackDirection = null;
@@ -149,6 +150,13 @@ export class Card {
     this.unsubscribe = ctx.data.subscribeKey("cards", cardId, (change) => {
       this.onDataChange(change as ShadowedChange<CardRow>);
     });
+
+    if (ctx.actions) {
+      this.unsubAction = ctx.actions.subscribeCard(cardId, (action) => {
+        this.currentAction = action;
+        this.layoutCard.invalidate();
+      });
+    }
   }
 
   /**
@@ -163,26 +171,7 @@ export class Card {
    * — single funnel for both our writes here and any server-driven update.
    */
   setPosition(state: CardPositionState): void {
-    const row = this.layoutCard.ctx.data.get("cards", this.cardId);
-    if (!row) return;
-
-    let newRow: CardRow;
-    if (state.kind === "loose") {
-      newRow = {
-        ...row,
-        microLocation: encodeLooseXY(state.x, state.y),
-        microZone: clearStackedState(row.microZone),
-      };
-    } else {
-      const stateBits =
-        state.direction === "top" ? STACKED_ON_RECT_X : STACKED_ON_RECT_Y;
-      newRow = {
-        ...row,
-        microLocation: state.parentId,
-        microZone: setStackedState(row.microZone, stateBits),
-      };
-    }
-    this.layoutCard.ctx.data.cards.setClient(newRow);
+    this.cardManager.setCardPosition(this.cardId, state);
   }
 
   private clearBackPointerOn(parentId: number, direction: StackDirection): void {
@@ -231,13 +220,12 @@ export class Card {
   }
 
   /**
-   * Stacked card whose parent doesn't exist — orphan. Rewrite the row to
-   * loose in the owner's inventory and return the corrected row so the
-   * caller can apply it. The setClient also fires subscribers, so the
+   * Stacked card whose parent doesn't exist — orphan. Writes a corrected
+   * loose row into DataManager. `setClientCard` fires subscribers, so the
    * post-init data path will see the fixed row through onDataChange too.
    */
-  private fallbackToInventory(row: CardRow): CardRow {
-    const fixed: CardRow = {
+  private fallbackToInventory(row: CardRow): void {
+    this.layoutCard.ctx.data.setClientCard({
       ...row,
       macroZone: row.ownerId,
       layer: INVENTORY_LAYER,
@@ -246,9 +234,7 @@ export class Card {
       // dropped into the owner's inventory.
       microZone: 0,
       microLocation: 0,
-    };
-    this.layoutCard.ctx.data.cards.setClient(fixed);
-    return fixed;
+    });
   }
 
   zoneId(): ZoneId {
@@ -309,6 +295,8 @@ export class Card {
   destroy(): void {
     this.unsubscribe?.();
     this.unsubscribe = null;
+    this.unsubAction?.();
+    this.unsubAction = null;
     // Free our slot on the parent so its back-pointer doesn't dangle.
     if (this.currentParentId !== 0 && this.currentStackDirection) {
       this.clearBackPointerOn(this.currentParentId, this.currentStackDirection);
@@ -359,14 +347,17 @@ export class Card {
         this.cardManager.move(this.cardId, oldZoneId, newZoneId);
       }
 
+      // Capture old parent before we mutate it, so we can fire a stack-
+      // change event for the chain we're leaving. The new chain's root we
+      // resolve from newParentId (or this card itself when becoming loose).
+      const oldParentId = this.currentParentId;
+      const oldDirection = this.currentStackDirection;
+
       // Back-pointer maintenance: clear our slot on the old parent (if we had
       // one) and claim our slot on the new parent (if stacked).
       if (parentChanged || directionChanged) {
-        if (this.currentParentId !== 0 && this.currentStackDirection) {
-          this.clearBackPointerOn(
-            this.currentParentId,
-            this.currentStackDirection,
-          );
+        if (oldParentId !== 0 && oldDirection) {
+          this.clearBackPointerOn(oldParentId, oldDirection);
         }
         this.currentParentId = newParentId;
         this.currentStackDirection = newStackDirection;
@@ -376,6 +367,21 @@ export class Card {
       }
 
       if (reparentNeeded) this.reparentSmoothly(nextParent);
+
+      // Fire stack-change events for both affected chains. A chain is
+      // "affected" if this card joined or left it; when both old and new
+      // resolve to the same root (e.g. direction-only change on the same
+      // parent) we only fire once. Loose-to-loose moves don't enter this
+      // block so they don't fire — that matches the spec ("any case that
+      // wasn't a rejected drop or a loose -> loose drop").
+      if (parentChanged || directionChanged) {
+        const oldRoot =
+          oldParentId !== 0 ? this.cardManager.rootOf(oldParentId) : this.cardId;
+        const newRoot =
+          newParentId !== 0 ? this.cardManager.rootOf(newParentId) : this.cardId;
+        this.cardManager.fireStackChange(oldRoot);
+        if (newRoot !== oldRoot) this.cardManager.fireStackChange(newRoot);
+      }
     }
 
     this.gameCard.applyData(row);

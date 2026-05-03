@@ -1,4 +1,4 @@
-export type ChangeKind = "insert" | "update" | "delete";
+export type ChangeKind = "insert" | "update" | "delete" | "dying" | "dead";
 export type ChangeSource = "server" | "client";
 
 export interface ShadowedChange<T> {
@@ -114,6 +114,36 @@ export class ShadowedStore<T> {
     if (wasPresent) {
       this.updateIndexes(prev, undefined, key);
       this.emit({ kind: "delete", source: "server", key, oldValue: prev });
+    }
+    return { key, wasPresent };
+  }
+
+  /**
+   * Keeps the row in the client map (so it remains readable) but removes it
+   * from the server map and emits `"dying"`. The caller is responsible for
+   * setting whatever dead-marker field the row carries before passing it here.
+   */
+  markDying(row: T): void {
+    const key = this.keyOf(row);
+    const prev = this.client.get(key);
+    const stored = Object.freeze({ ...row }) as T;
+    this.server.delete(key);
+    this.client.set(key, stored);
+    this.updateIndexes(prev, stored, key);
+    this.emit({ kind: "dying", source: "server", key, oldValue: prev, newValue: stored });
+  }
+
+  /**
+   * Removes the row from the client map and emits `"dead"` with the
+   * last-known row as `oldValue`. No-op if the key is not present.
+   */
+  markDead(key: number | string): ApplyResult {
+    const prev = this.client.get(key);
+    const wasPresent = prev !== undefined;
+    if (wasPresent) {
+      this.client.delete(key);
+      this.updateIndexes(prev, undefined, key);
+      this.emit({ kind: "dead", source: "client", key, oldValue: prev });
     }
     return { key, wasPresent };
   }

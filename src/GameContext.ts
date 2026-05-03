@@ -1,6 +1,8 @@
 import type { Application } from "pixi.js";
+import type { ActionManager } from "./actions/ActionManager";
 import type { CardManager } from "./cards/CardManager";
 import type { DefinitionManager } from "./definitions/DefinitionManager";
+import type { RecipeManager } from "./definitions/RecipeManager";
 import type { PlayerSession } from "./features/PlayerSession";
 import type { GameManager } from "./game/GameManager";
 import type { InputManager } from "./input/InputManager";
@@ -14,6 +16,7 @@ export interface GameContext {
   readonly app: Application;
   readonly scenes: SceneManager;
   readonly definitions: DefinitionManager;
+  readonly recipes: RecipeManager;
   readonly spacetime: SpacetimeManager;
   readonly playerSession: PlayerSession;
   readonly data: DataManager;
@@ -26,4 +29,6 @@ export interface GameContext {
   game: GameManager | null;
   /** Scene-scoped: set by GameScene on enter, cleared on exit. Null otherwise. */
   input: InputManager | null;
+  /** Scene-scoped: set by GameScene on enter, cleared on exit. Null otherwise. */
+  actions: ActionManager | null;
 }
