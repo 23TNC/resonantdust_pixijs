@@ -6,10 +6,12 @@ import {
   decodeLooseXY,
   getStackedState,
   STACKED_LOOSE,
+  STACKED_ON_HEX,
   STACKED_ON_RECT_X,
   STACKED_ON_RECT_Y,
   type LooseXY,
 } from "./cardData";
+import { HEX_HEIGHT, HEX_WIDTH } from "./HexagonCard";
 import { GameCard } from "./GameCard";
 import { LayoutCard } from "./LayoutCard";
 
@@ -144,6 +146,22 @@ export class LayoutRectCard extends LayoutCard {
         this.setTitlePosition("bottom");
         this.setTarget(0, +RECT_CARD_TITLE_HEIGHT);
       }
+    } else if (stacked === STACKED_ON_HEX) {
+      const parentId = row.microLocation;
+      if (!this.ctx.data.get("cards", parentId)) {
+        this.ctx.cards?.get(this.cardId)?.setPosition({
+          kind: "loose",
+          x: this.targetX,
+          y: this.targetY,
+        });
+        return;
+      }
+      // Mounted on top of a hex — center the rect over the hex face.
+      this.setTitlePosition("top");
+      this.setTarget(
+        (HEX_WIDTH - RECT_CARD_WIDTH) / 2,
+        (HEX_HEIGHT - RECT_CARD_HEIGHT) / 2,
+      );
     }
   }
 

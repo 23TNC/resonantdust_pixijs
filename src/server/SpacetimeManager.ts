@@ -184,21 +184,16 @@ export class SpacetimeManager {
 
   /**
    * Submit inventory stacks to trigger recipe matching on the server.
+   * The server runs the upgrade machinery (`process_top_branch` /
+   * `process_bottom_branch`) over each submitted stack — start, keep,
+   * cancel, or upgrade decisions all flow from this single reducer.
+   * There is intentionally no separate cancel reducer: the only way a
+   * client influences action state is by submitting validated stacks
+   * (or by causing card creation, which fires the on_create matcher).
    */
   async submitStacks(stacks: InventoryStack[]): Promise<void> {
     const conn = await this.connect();
     await conn.reducers.submitInventoryStacks({ stacks });
-  }
-
-  /**
-   * Ask the server to cancel an in-flight recipe action. Phase-1 stub —
-   * the real reducer is in flight; for now we just log so callers
-   * (ActionManager) can be wired up against a stable surface. Replace the
-   * body with the generated reducer call once it lands.
-   */
-  cancelRecipe(actionId: number, stack: InventoryStack): void {
-    console.log(`[SpacetimeManager] cancelRecipe(${actionId})`);
-    void this.submitStacks([stack]);
   }
 
   disconnect(): void {

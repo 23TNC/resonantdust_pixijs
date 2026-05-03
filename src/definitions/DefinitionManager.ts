@@ -115,6 +115,13 @@ export class DefinitionManager {
     return this.typeNameById.get(typeId);
   }
 
+  /** Resolve a card-type name (e.g. `"discipline"`) to its u4 id. Used by
+   *  RecipeManager to parse `"@<type>"` entity strings at recipe-build time
+   *  — same role as `cards_registry().type_ids` on the server. */
+  typeId(name: string): number | undefined {
+    return this.typeIdByName.get(name);
+  }
+
   categoryName(categoryId: number): string | undefined {
     return this.categoryNameById.get(categoryId);
   }

@@ -1,4 +1,4 @@
-import type { CardDefinition } from "./DefinitionManager";
+import type { CardDefinition, DefinitionManager } from "./DefinitionManager";
 import recipeIdsData from "../data/recipes/id.json";
 
 /**
@@ -16,8 +16,31 @@ export type RecipeType = "top_stack" | "bottom_stack" | "on_create";
 export type RecipeEntity =
   | { kind: "key"; key: string }
   | { kind: "aspect"; name: string; min: number }
+  | { kind: "type"; typeId: number }
+  | { kind: "any" }
   | { kind: "and"; a: RecipeEntity; b: RecipeEntity }
   | { kind: "or"; a: RecipeEntity; b: RecipeEntity };
+
+// Per-leaf entity weights — must match the server's `actions.rs` constants.
+// Higher = more specific.
+const ENTITY_WEIGHT_CARD = 4;
+const ENTITY_WEIGHT_ASPECT = 3;
+const ENTITY_WEIGHT_TYPE = 2;
+const ENTITY_WEIGHT_ANY = 1;
+
+/**
+ * Lex-ordered priority for a successful recipe match. Field order **is** the
+ * comparison order: `tile` outranks `root` outranks `slot`. Recipes with no
+ * `tile` / `root` field score `0` for that tier — so a recipe with a satisfied
+ * tile beats any combination of root and slot weights.
+ *
+ * Today the matcher always sets `tile = 0` (tile context isn't wired up).
+ */
+export interface MatchWeight {
+  readonly tile: number;
+  readonly root: number;
+  readonly slot: number;
+}
 
 /** Progress bar style attached to a recipe. Colors may be CSS hex strings or
  *  the sentinel `"default"`, which tells the renderer to use the card's own
@@ -29,8 +52,8 @@ export interface RecipeProgressStyle {
 }
 
 export interface RecipeDef {
-  /** Declaration-order index across all recipe files — also the priority
-   *  (lower wins when multiple recipes match the same chain). */
+  /** Stable integer ID from `data/recipes/id.json`. Matches `Action.recipe`
+   *  on the wire. Used as the priority tiebreak too — declaration order. */
   readonly index: number;
   readonly id: string;
   readonly type: RecipeType;
@@ -46,10 +69,19 @@ export interface RecipeDef {
   readonly style: RecipeProgressStyle | null;
 }
 
-export interface RecipeMatch {
+/**
+ * Outcome of scoring a recipe at a specific actor position. Mirrors
+ * `actions.rs::ActorMatch` so the client can apply the same upgrade
+ * decisions as a pre-filter.
+ */
+export interface ActorMatch {
   readonly recipe: RecipeDef;
-  /** Index into the chain where slot 1 (the actor) sits. */
-  readonly actorPos: number;
+  readonly weight: MatchWeight;
+  /** card_ids the action would claim — chain root (if recipe is rooted)
+   *  followed by the actor and each slot filler in chain order. */
+  readonly claimed: readonly number[];
+  /** Position of the actor in the branch chain. */
+  readonly actorIdx: number;
 }
 
 interface RawRecipe {
@@ -69,15 +101,21 @@ const recipeModules = import.meta.glob<{ default: RawRecipe[] }>(
 );
 
 /**
- * Loads and matches recipes. Mirrors the server-side matcher in
- * `actions.rs::try_match_stack`: the actor slides from `min_actor_pos`
- * (`1` if rooted, else `0`); slot `i` fills `chain[actor_pos + i]`; first
- * recipe in declaration order whose slot window fits + every entity
- * matches wins.
+ * Loads recipes and runs the priority/upgrade matcher. Mirrors the
+ * server-side machinery in `actions.rs`:
  *
- * Client-side use is detection-only — actual recipe starts happen on the
- * server via `submit_inventory_stacks`. We exist so the UI can hint
- * "this stack will trigger X recipe" before the user submits it.
+ *   - Per-leaf entity weights (`Card`=4, `Aspect`=3, `Type`=2, `Any`=1).
+ *   - Lex-ordered `MatchWeight { tile, root, slot }` picks the best recipe
+ *     across all candidates of a type.
+ *   - `scoreRecipeForActor` evaluates one recipe at one actor position over
+ *     the visible window starting there; `findBestForActor` iterates all
+ *     recipes of a type and returns the highest-scoring match.
+ *
+ * Client-side this is the **pre-filter** — it decides whether a stack
+ * submission would actually change server-side state. The server is the
+ * authoritative evaluator and re-runs the calculation independently. Both
+ * sides must produce identical results; see
+ * `data/recipes/AGENT.md` ("Where this is implemented").
  */
 export class RecipeManager {
   private readonly all: RecipeDef[] = [];
@@ -88,29 +126,8 @@ export class RecipeManager {
   };
   private readonly byIndex = new Map<number, RecipeDef>();
 
-  constructor() {
+  constructor(private readonly definitions: DefinitionManager) {
     this.load();
-  }
-
-  /**
-   * Try to match `chain` against `type`'s recipes. Returns the first
-   * recipe whose slots all fill (priority = declaration order). Chain
-   * shape: `[root, …branch]`, with `branch` going outward in the
-   * direction implied by `type`.
-   *
-   * `chain[i]` may be `null` when the row's `packed_definition` doesn't
-   * decode (missing card definition); such positions never match.
-   */
-  match(
-    chain: readonly (CardDefinition | null)[],
-    type: RecipeType,
-  ): RecipeMatch | null {
-    const candidates = this.byType[type];
-    for (const recipe of candidates) {
-      const result = this.tryMatch(chain, recipe);
-      if (result) return result;
-    }
-    return null;
   }
 
   /** Read-only snapshot of every parsed recipe. */
@@ -118,57 +135,141 @@ export class RecipeManager {
     return this.all;
   }
 
-  /** Look up a recipe by its declaration-order index (matches `ActionRow.recipe`). */
+  /** All recipes of one type, in declaration order. Used by the matcher
+   *  loop in ActionManager. */
+  recipesOfType(type: RecipeType): readonly RecipeDef[] {
+    return this.byType[type];
+  }
+
+  /** Look up a recipe by its stable ID (matches `ActionRow.recipe`). */
   getByIndex(index: number): RecipeDef | undefined {
     return this.byIndex.get(index);
   }
 
-  private tryMatch(
-    chain: readonly (CardDefinition | null)[],
-    recipe: RecipeDef,
-  ): RecipeMatch | null {
-    if (recipe.slots.length === 0) return null;
-
-    if (recipe.root !== null) {
-      const rootDef = chain[0];
-      if (!rootDef || !this.entityMatches(recipe.root, rootDef)) return null;
-    }
-    const minActorPos = recipe.root !== null ? 1 : 0;
-
-    for (let actorPos = minActorPos; actorPos < chain.length; actorPos++) {
-      if (actorPos + recipe.slots.length > chain.length) break;
-      let allMatch = true;
-      for (let i = 0; i < recipe.slots.length; i++) {
-        const def = chain[actorPos + i];
-        if (!def || !this.entityMatches(recipe.slots[i], def)) {
-          allMatch = false;
-          break;
-        }
-      }
-      if (allMatch) return { recipe, actorPos };
-    }
-    return null;
+  /**
+   * Lex compare for `MatchWeight`. Returns positive if `a > b`, negative if
+   * `a < b`, zero if equal. The triple is compared field-by-field —
+   * comparison stops at the first non-equal tier.
+   */
+  static compareWeight(a: MatchWeight, b: MatchWeight): number {
+    if (a.tile !== b.tile) return a.tile - b.tile;
+    if (a.root !== b.root) return a.root - b.root;
+    return a.slot - b.slot;
   }
 
-  private entityMatches(entity: RecipeEntity, def: CardDefinition): boolean {
+  /**
+   * Score how specifically `entity` matches `def`. `0` means no match; any
+   * positive value indicates a match, with higher = more specific. Mirrors
+   * `actions.rs::entity_match_weight`.
+   */
+  static entityMatchWeight(entity: RecipeEntity, def: CardDefinition): number {
     switch (entity.kind) {
       case "key":
-        return def.key === entity.key;
+        return def.key === entity.key ? ENTITY_WEIGHT_CARD : 0;
       case "aspect": {
         for (const [name, value] of def.aspects) {
-          if (name === entity.name) return value >= entity.min;
+          if (name === entity.name) return value >= entity.min ? ENTITY_WEIGHT_ASPECT : 0;
         }
-        return false;
+        return 0;
       }
-      case "and":
-        return (
-          this.entityMatches(entity.a, def) && this.entityMatches(entity.b, def)
-        );
-      case "or":
-        return (
-          this.entityMatches(entity.a, def) || this.entityMatches(entity.b, def)
-        );
+      case "type":
+        return def.typeId === entity.typeId ? ENTITY_WEIGHT_TYPE : 0;
+      case "any":
+        return ENTITY_WEIGHT_ANY;
+      case "and": {
+        const wa = RecipeManager.entityMatchWeight(entity.a, def);
+        const wb = RecipeManager.entityMatchWeight(entity.b, def);
+        return wa > 0 && wb > 0 ? wa + wb : 0;
+      }
+      case "or": {
+        const wa = RecipeManager.entityMatchWeight(entity.a, def);
+        if (wa > 0) return wa;
+        return RecipeManager.entityMatchWeight(entity.b, def);
+      }
     }
+  }
+
+  /**
+   * Score `recipe` for an actor at `chain[actorIdx]` over the visible
+   * window `chain[actorIdx..visibleEnd]`. Returns the match plus its
+   * weight, or `null` if the recipe doesn't fit or doesn't match.
+   *
+   * The chain root is always `chain[0]` (the submitted root) regardless
+   * of where the actor sits — for `top_stack` and `bottom_stack` recipes
+   * alike. Rooted recipes pin the chain root at index 0 and the actor
+   * sits *above* it, so `actorIdx === 0` is reserved for the root and
+   * skipped.
+   */
+  scoreRecipeForActor(
+    recipe: RecipeDef,
+    chain: readonly number[],
+    defs: readonly (CardDefinition | null)[],
+    actorIdx: number,
+    visibleEnd: number,
+  ): ActorMatch | null {
+    const slotCount = recipe.slots.length;
+    if (slotCount === 0) return null;
+    if (actorIdx + slotCount > visibleEnd) return null;
+    if (recipe.root !== null && actorIdx === 0) return null;
+
+    let rootWeight = 0;
+    if (recipe.root !== null) {
+      const def = defs[0];
+      if (!def) return null;
+      const w = RecipeManager.entityMatchWeight(recipe.root, def);
+      if (w === 0) return null;
+      rootWeight = w;
+    }
+
+    let slotWeight = 0;
+    for (let i = 0; i < slotCount; i++) {
+      const def = defs[actorIdx + i];
+      if (!def) return null;
+      const w = RecipeManager.entityMatchWeight(recipe.slots[i], def);
+      if (w === 0) return null;
+      slotWeight += w;
+    }
+
+    const claimed: number[] = [];
+    if (recipe.root !== null) claimed.push(chain[0]);
+    for (let i = 0; i < slotCount; i++) {
+      const id = chain[actorIdx + i];
+      if (!claimed.includes(id)) claimed.push(id);
+    }
+
+    return {
+      recipe,
+      weight: { tile: 0, root: rootWeight, slot: slotWeight },
+      claimed,
+      actorIdx,
+    };
+  }
+
+  /**
+   * Iterate every recipe of `type` and pick the highest-weight match for
+   * an actor at `chain[actorIdx]` over the visible window
+   * `chain[actorIdx..visibleEnd]`. Ties go to declaration order (first
+   * wins), matching the server.
+   *
+   * Callers needing to filter out claim conflicts (e.g. a slot filler
+   * already held by another action) should iterate `recipesOfType(type)`
+   * and call `scoreRecipeForActor` directly so they can drop conflicting
+   * candidates before picking the winner.
+   */
+  findBestForActor(
+    chain: readonly number[],
+    defs: readonly (CardDefinition | null)[],
+    actorIdx: number,
+    visibleEnd: number,
+    type: RecipeType,
+  ): ActorMatch | null {
+    let best: ActorMatch | null = null;
+    for (const recipe of this.byType[type]) {
+      const m = this.scoreRecipeForActor(recipe, chain, defs, actorIdx, visibleEnd);
+      if (!m) continue;
+      if (!best || RecipeManager.compareWeight(m.weight, best.weight) > 0) best = m;
+    }
+    return best;
   }
 
   private load(): void {
@@ -278,6 +379,8 @@ export class RecipeManager {
   /**
    * Parse the entity grammar:
    *   `"key"`            → `{kind: "key"}`
+   *   `"any"`            → `{kind: "any"}`
+   *   `"@<type>"`        → `{kind: "type"}` (type name resolved via DefinitionManager)
    *   `[X]`              → unwrap and reparse `X`
    *   `[name, n]`        → `{kind: "aspect"}` (when 2nd is number)
    *   `[A, B]`           → `{kind: "and"}` (when 2nd is not number)
@@ -286,6 +389,17 @@ export class RecipeManager {
    */
   private parseEntity(value: unknown, path: string): RecipeEntity {
     if (typeof value === "string") {
+      if (value === "any") return { kind: "any" };
+      if (value.startsWith("@")) {
+        const typeName = value.slice(1);
+        const typeId = this.definitions.typeId(typeName);
+        if (typeId === undefined) {
+          throw new Error(
+            `${path}: unknown card type "${typeName}" (not declared in card_types.json)`,
+          );
+        }
+        return { kind: "type", typeId };
+      }
       return { kind: "key", key: value };
     }
     if (!Array.isArray(value)) {

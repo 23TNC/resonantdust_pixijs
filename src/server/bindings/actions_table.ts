@@ -13,11 +13,11 @@ import {
 export default __t.row({
   actionId: __t.u32().primaryKey().name("action_id"),
   cardId: __t.u32().name("card_id"),
-  rootCardId: __t.u32().name("root_card_id"),
   recipe: __t.u32(),
   ownerId: __t.u32().name("owner_id"),
   layer: __t.u8(),
   macroZone: __t.u32().name("macro_zone"),
   end: __t.u32(),
   participants: __t.u8(),
+  flags: __t.u8(),
 });

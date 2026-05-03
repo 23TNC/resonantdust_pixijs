@@ -214,9 +214,11 @@ export class DataManager {
     if (table === "cards") {
       let merged = newRow as Card;
       const existing = this.cards.get((newRow as Card).cardId);
-      if (existing && existing.layer === 1) {
+      if (existing && existing.layer === 1 && (existing.microZone & 0xE0) === 0) {
         // Server doesn't track inventory positions — preserve the client's
         // macroZone/microZone/microLocation so local drag state is not overwritten.
+        // Only applies when localQ (bits 5-7) is 0; non-zero means the card is
+        // hex-placed and the server's position is authoritative.
         merged = {
           ...merged,
           macroZone: existing.macroZone,
@@ -242,7 +244,7 @@ export class DataManager {
     if (table === "cards") {
       let merged = row as Card;
       const existing = this.cards.get((row as Card).cardId);
-      if (existing && existing.layer === 1) {
+      if (existing && existing.layer === 1 && (existing.microZone & 0xE0) === 0) {
         merged = {
           ...merged,
           macroZone: existing.macroZone,

@@ -5,6 +5,7 @@ import {
   STACKED_ON_RECT_X,
   STACKED_ON_RECT_Y,
 } from "../cards/cardData";
+import { GameHexCard, HEX_HEIGHT, HEX_WIDTH } from "../cards/HexagonCard";
 import {
   GameRectCard,
   RECT_CARD_HEIGHT,
@@ -21,18 +22,17 @@ const FIND_ROOT_MAX_DEPTH = 64;
 
 /**
  * Game logic for a single inventory zone. Subscribes to `CardManager` for the
- * zone's cards, holds the rect-shaped Cards in a `Set`, runs overlap-push
+ * zone's cards, holds rect- and hex-shaped Cards in a `Set`, runs overlap-push
  * every game tick.
  *
  * Stacked cards collide via their root — the loose card at the base of the
  * chain (state 0). For each tracked card we walk up via `microLocation`
- * while state is 1 (top) or 2 (bottom); state 3 (hex) is unsupported here
- * and just opts the card out of pushing. Multiple cards in the same chain
- * resolve to the same root, so we deduplicate before the pairwise pass.
- * Pushing the root carries the rest of the stack along through the
- * layout-tree parenting.
+ * while state is 1 (top) or 2 (bottom). Hex cards are always loose roots.
+ * Multiple cards in the same chain resolve to the same root, so we deduplicate
+ * before the pairwise pass. Pushing the root carries the rest of the stack
+ * along through the layout-tree parenting.
  *
- * Cards (composites) are stored rather than `GameRectCard`s so we can route
+ * Cards (composites) are stored rather than card subtypes so we can route
  * mutations through the canonical `Card.setPosition` setter.
  */
 export class GameInventory {
@@ -48,13 +48,13 @@ export class GameInventory {
     }
 
     for (const card of ctx.cards.cardsInZone(zoneId)) {
-      if (card.gameCard instanceof GameRectCard) {
+      if (card.gameCard instanceof GameRectCard || card.gameCard instanceof GameHexCard) {
         this.cards.add(card);
       }
     }
 
     this.unsubscribe = ctx.cards.subscribe(zoneId, (kind, card) => {
-      if (!(card.gameCard instanceof GameRectCard)) return;
+      if (!(card.gameCard instanceof GameRectCard) && !(card.gameCard instanceof GameHexCard)) return;
       if (kind === "added") this.cards.add(card);
       else this.cards.delete(card);
     });
@@ -80,23 +80,34 @@ export class GameInventory {
   /**
    * Walks `card` up via `microLocation` while its stack-state is 1 (top) or
    * 2 (bottom) and returns the root — the card whose state is 0 (loose).
-   * Returns null for hex-anchored cards (state 3, not yet supported), or
-   * if the chain is broken (missing parent / row).
+   * Hex cards are always loose, so they return immediately. Returns null for
+   * hex-anchored rect cards (state 3) or if the chain is broken.
    */
   private findRoot(card: Card): Card | null {
     let current: Card = card;
     for (let i = 0; i < FIND_ROOT_MAX_DEPTH; i++) {
-      if (!(current.gameCard instanceof GameRectCard)) return null;
       const row = this.ctx.data.get("cards", current.cardId);
       if (!row) return null;
       const state = getStackedState(row.microZone);
       if (state === STACKED_LOOSE) return current;
-      if (state !== STACKED_ON_RECT_X && state !== STACKED_ON_RECT_Y) {
-        return null;
-      }
+      if (state !== STACKED_ON_RECT_X && state !== STACKED_ON_RECT_Y) return null;
       const parent = this.ctx.cards?.get(row.microLocation);
       if (!parent) return null;
       current = parent;
+    }
+    return null;
+  }
+
+  private getBounds(card: Card): { x: number; y: number; w: number; h: number } | null {
+    if (card.gameCard instanceof GameRectCard) {
+      const pos = card.gameCard.getLoosePosition();
+      if (!pos) return null;
+      return { x: pos.x, y: pos.y, w: RECT_CARD_WIDTH, h: RECT_CARD_HEIGHT };
+    }
+    if (card.gameCard instanceof GameHexCard) {
+      const pos = card.gameCard.getLoosePosition();
+      if (!pos) return null;
+      return { x: pos.x, y: pos.y, w: HEX_WIDTH, h: HEX_HEIGHT };
     }
     return null;
   }
@@ -108,21 +119,15 @@ export class GameInventory {
 
   private tryPush(a: Card, b: Card): void {
     if (a.isDragging() || b.isDragging()) return;
-    // Caller already filtered to GameRectCard + loose; narrow for the API.
-    if (
-      !(a.gameCard instanceof GameRectCard) ||
-      !(b.gameCard instanceof GameRectCard)
-    ) {
-      return;
-    }
-    const ap = a.gameCard.getLoosePosition();
-    const bp = b.gameCard.getLoosePosition();
-    if (!ap || !bp) return;
+    const ab = this.getBounds(a);
+    const bb = this.getBounds(b);
+    if (!ab || !bb) return;
 
-    const dx = bp.x - ap.x;
-    const dy = bp.y - ap.y;
-    const overlapX = RECT_CARD_WIDTH - Math.abs(dx);
-    const overlapY = RECT_CARD_HEIGHT - Math.abs(dy);
+    // Center-to-center delta; overlap formula handles mixed card sizes.
+    const dx = (bb.x + bb.w / 2) - (ab.x + ab.w / 2);
+    const dy = (bb.y + bb.h / 2) - (ab.y + ab.h / 2);
+    const overlapX = (ab.w + bb.w) / 2 - Math.abs(dx);
+    const overlapY = (ab.h + bb.h) / 2 - Math.abs(dy);
     if (overlapX <= 0 || overlapY <= 0) return;
 
     let dirX = dx;
@@ -137,15 +142,7 @@ export class GameInventory {
     }
 
     const push = Math.min(overlapX, overlapY) * PUSH_FACTOR;
-    a.setPosition({
-      kind: "loose",
-      x: ap.x - dirX * push,
-      y: ap.y - dirY * push,
-    });
-    b.setPosition({
-      kind: "loose",
-      x: bp.x + dirX * push,
-      y: bp.y + dirY * push,
-    });
+    a.setPosition({ kind: "loose", x: ab.x - dirX * push, y: ab.y - dirY * push });
+    b.setPosition({ kind: "loose", x: bb.x + dirX * push, y: bb.y + dirY * push });
   }
 }

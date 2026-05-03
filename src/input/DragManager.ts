@@ -1,4 +1,5 @@
 import type { Card, StackDirection } from "../cards/Card";
+import { GameHexCard } from "../cards/HexagonCard";
 import { LayoutCard } from "../cards/LayoutCard";
 import { GameRectCard } from "../cards/RectangleCard";
 import type { GameContext } from "../GameContext";
@@ -59,7 +60,7 @@ export class DragManager {
 
     const card = this.ctx.cards?.get(data.hit.cardId);
     if (!card) return;
-    if (!(card.gameCard instanceof GameRectCard)) return;
+    if (!(card.gameCard instanceof GameRectCard) && !(card.gameCard instanceof GameHexCard)) return;
 
     // Stacked cards are draggable too — dropping them on another card
     // re-stacks, dropping on empty space converts to loose (unstack). Both
@@ -85,34 +86,70 @@ export class DragManager {
     // re-parent, so the visual stays put while we resolve the drop.
     card.setDragging(false);
 
-    // If we dropped on another card, stack onto it. The dragged card was
-    // parented to the hit-transparent overlay during the drag, so the up
-    // event's hit-test fell through to whatever was beneath. Drop on a
-    // peeking title from a chain returns the child link; CardManager.stack
-    // walks down to the actual leaf so we always land at the chain's end.
+    if (card.gameCard instanceof GameRectCard) {
+      this.handleRectDrop(card, up, offsetX, offsetY);
+    } else if (card.gameCard instanceof GameHexCard) {
+      this.handleHexDrop(card, up, offsetX, offsetY);
+    }
+  }
+
+  private handleRectDrop(
+    card: Card,
+    up: PointerEventData,
+    offsetX: number,
+    offsetY: number,
+  ): void {
+    // Stack onto another rect card if one is under the cursor. The dragged
+    // card was parented to the hit-transparent overlay, so the up event's
+    // hit-test fell through to whatever was beneath. Drop on a peeking title
+    // returns the child; CardManager.stack walks to the actual leaf.
     const target = this.targetCardFromHit(up.hit, card.cardId);
     if (target) {
-      const direction = this.directionFromCursor(up, target);
-      this.ctx.cards?.stack(card.cardId, target.cardId, direction);
-      return;
-    }
-
-    // No card under the cursor — write a loose position. Look the zone
-    // surface up fresh (rather than using whatever the card was parented to
-    // at drag start) because for a stacked-source drag that was a stackHost,
-    // not the inventory's coord space we need for loose xy.
-    if (card.gameCard instanceof GameRectCard) {
-      const surface = this.ctx.layout?.surfaceFor(card.zoneId());
-      if (surface) {
-        const sg = surface.container.getGlobalPosition();
-        const newX = up.x - sg.x - offsetX;
-        const newY = up.y - sg.y - offsetY;
-        card.setPosition({ kind: "loose", x: newX, y: newY });
+      if (target.gameCard instanceof GameRectCard) {
+        const direction = this.directionFromCursor(up, target);
+        this.ctx.cards?.stack(card.cardId, target.cardId, direction);
+        return;
+      }
+      if (target.gameCard instanceof GameHexCard) {
+        if (target.stackedHex === 0) {
+          this.ctx.cards?.setCardPosition(card.cardId, {
+            kind: "stacked",
+            parentId: target.cardId,
+            direction: "hex",
+          });
+          return;
+        }
       }
     }
+    // No valid target — drop loose in the same zone.
+    this.dropLoose(card, up, offsetX, offsetY);
+    // TODO: cross-zone drops
+  }
 
-    // TODO: cross-zone drops (propagate target's macroZone/layer to the
-    // dragged card on stack), drop-target reducer calls, recipe placements.
+  private handleHexDrop(
+    card: Card,
+    up: PointerEventData,
+    offsetX: number,
+    offsetY: number,
+  ): void {
+    // Hex-to-hex stacking not yet implemented — always drop loose in same zone.
+    this.dropLoose(card, up, offsetX, offsetY);
+    // TODO: hex stacking, cross-zone drops
+  }
+
+  private dropLoose(
+    card: Card,
+    up: PointerEventData,
+    offsetX: number,
+    offsetY: number,
+  ): void {
+    // Look the zone surface up fresh (rather than using whatever the card was
+    // parented to at drag start) — for a stacked-source drag that was a
+    // stackHost, not the inventory coord space we need for loose xy.
+    const surface = this.ctx.layout?.surfaceFor(card.zoneId());
+    if (!surface) return;
+    const sg = surface.container.getGlobalPosition();
+    card.setPosition({ kind: "loose", x: up.x - sg.x - offsetX, y: up.y - sg.y - offsetY });
   }
 
   private targetCardFromHit(

@@ -9,6 +9,7 @@ import {
   getStackedState,
   setStackedState,
   STACKED_LOOSE,
+  STACKED_ON_HEX,
   STACKED_ON_RECT_X,
   STACKED_ON_RECT_Y,
 } from "./cardData";
@@ -90,7 +91,18 @@ export class CardManager {
       });
       // Detach this card from its parent so it is no longer part of the chain.
       this.setCardPosition(cardId, { kind: "loose", x: 0, y: 0 });
-      // Cross child left for orphan-detection; state 3 not handled yet.
+      // Cross child left for orphan-detection.
+    } else if (state === STACKED_ON_HEX) {
+      const hexId = row.microLocation;
+      const topId = card.stackedTop;
+      const bottomId = card.stackedBottom;
+      if (topId !== 0) {
+        this.setCardPosition(topId, { kind: "stacked", parentId: hexId, direction: "hex" });
+        if (bottomId !== 0) this.stack(bottomId, topId, "bottom");
+      } else if (bottomId !== 0) {
+        this.setCardPosition(bottomId, { kind: "stacked", parentId: hexId, direction: "hex" });
+      }
+      this.setCardPosition(cardId, { kind: "loose", x: 0, y: 0 });
     }
 
     card.stackedTop = 0;
@@ -172,7 +184,9 @@ export class CardManager {
       };
     } else {
       const stateBits =
-        state.direction === "top" ? STACKED_ON_RECT_X : STACKED_ON_RECT_Y;
+        state.direction === "top" ? STACKED_ON_RECT_X :
+        state.direction === "bottom" ? STACKED_ON_RECT_Y :
+        STACKED_ON_HEX;
       newRow = {
         ...row,
         microLocation: state.parentId,
@@ -419,6 +433,9 @@ export class CardManager {
       } else if (state === STACKED_ON_RECT_Y) {
         const parent = this.cards.get(row.microLocation);
         if (parent) parent.stackedBottom = card.cardId;
+      } else if (state === STACKED_ON_HEX) {
+        const parent = this.cards.get(row.microLocation);
+        if (parent) parent.stackedHex = card.cardId;
       }
     }
   }

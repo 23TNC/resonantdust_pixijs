@@ -13,13 +13,13 @@ import {
 export const Action = __t.object("Action", {
   actionId: __t.u32(),
   cardId: __t.u32(),
-  rootCardId: __t.u32(),
   recipe: __t.u32(),
   ownerId: __t.u32(),
   layer: __t.u8(),
   macroZone: __t.u32(),
   end: __t.u32(),
   participants: __t.u8(),
+  flags: __t.u8(),
 });
 export type Action = __Infer<typeof Action>;
 
@@ -38,6 +38,7 @@ export const Card = __t.object("Card", {
   microLocation: __t.u32(),
   ownerId: __t.u32(),
   packedDefinition: __t.u16(),
+  flags: __t.u8(),
 });
 export type Card = __Infer<typeof Card>;
 
@@ -70,4 +71,11 @@ export const PlayerSession = __t.object("PlayerSession", {
   playerId: __t.u32(),
 });
 export type PlayerSession = __Infer<typeof PlayerSession>;
+
+export const Zone = __t.object("Zone", {
+  macroZone: __t.u32(),
+  packedDefinition: __t.u8(),
+  packedDefinitionIds: __t.array(__t.u64()),
+});
+export type Zone = __Infer<typeof Zone>;
 

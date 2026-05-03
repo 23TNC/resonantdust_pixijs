@@ -34,6 +34,7 @@ import {
 } from "spacetimedb";
 
 // Import all reducer arg schemas
+import BootstrapReducer from "./bootstrap_reducer";
 import ClaimOrLoginReducer from "./claim_or_login_reducer";
 import DebugSpawnReducer from "./debug_spawn_reducer";
 import SubmitInventoryStacksReducer from "./submit_inventory_stacks_reducer";
@@ -44,6 +45,7 @@ import SubmitInventoryStacksReducer from "./submit_inventory_stacks_reducer";
 import ActionsRow from "./actions_table";
 import CardsRow from "./cards_table";
 import PlayersRow from "./players_table";
+import ZonesRow from "./zones_table";
 
 /** Type-only namespace exports for generated type groups. */
 
@@ -104,10 +106,22 @@ const tablesSchema = __schema({
       { name: 'players_player_id_key', constraint: 'unique', columns: ['playerId'] },
     ],
   }, PlayersRow),
+  zones: __table({
+    name: 'zones',
+    indexes: [
+      { accessor: 'macro_zone', name: 'zones_macro_zone_idx_btree', algorithm: 'btree', columns: [
+        'macroZone',
+      ] },
+    ],
+    constraints: [
+      { name: 'zones_macro_zone_key', constraint: 'unique', columns: ['macroZone'] },
+    ],
+  }, ZonesRow),
 });
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
+  __reducerSchema("bootstrap", BootstrapReducer),
   __reducerSchema("claim_or_login", ClaimOrLoginReducer),
   __reducerSchema("debug_spawn", DebugSpawnReducer),
   __reducerSchema("submit_inventory_stacks", SubmitInventoryStacksReducer),

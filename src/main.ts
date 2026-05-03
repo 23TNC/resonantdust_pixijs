@@ -35,7 +35,7 @@ async function main(): Promise<Runtime> {
 
   const scenes = new SceneManager(app);
   const definitions = new DefinitionManager();
-  const recipes = new RecipeManager();
+  const recipes = new RecipeManager(definitions);
   const data = new DataManager();
   const zones = new ZoneManager();
 

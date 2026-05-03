@@ -65,6 +65,14 @@ export abstract class LayoutCard extends LayoutNode {
    */
   readonly stackHost: LayoutNode = new StackHost();
 
+  /**
+   * Front-mount host for a rect card mounted on top of this hex card
+   * (STACKED_ON_HEX). Added to the container *after* the visual so mounted
+   * rects render in front. Only populated by LayoutHexCard; null on all
+   * other card types.
+   */
+  hexMount: LayoutNode | null = null;
+
   // Tween bookkeeping. `display` is what's drawn; `target` is what we're
   // animating toward. First setTarget snaps display=target so newly-spawned
   // cards don't fly in from (0,0).

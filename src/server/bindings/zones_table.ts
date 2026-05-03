@@ -10,7 +10,8 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default {
-  playerId: __t.u32(),
-  cardKey: __t.string(),
-};
+export default __t.row({
+  macroZone: __t.u32().primaryKey().name("macro_zone"),
+  packedDefinition: __t.u8().name("packed_definition"),
+  packedDefinitionIds: __t.array(__t.u64()).name("packed_definition_ids"),
+});

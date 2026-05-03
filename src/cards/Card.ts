@@ -7,6 +7,7 @@ import type { ShadowedChange } from "../state/ShadowedStore";
 import { packZoneId, type ZoneId } from "../zones/zoneId";
 import {
   getStackedState,
+  STACKED_ON_HEX,
   STACKED_ON_RECT_X,
   STACKED_ON_RECT_Y,
 } from "./cardData";
@@ -18,7 +19,7 @@ import { GameRectCard, LayoutRectCard } from "./RectangleCard";
 
 const INVENTORY_LAYER = 1;
 
-export type StackDirection = "top" | "bottom";
+export type StackDirection = "top" | "bottom" | "hex";
 
 /** What `Card.setPosition` accepts. Loose = freely placed inventory xy;
  *  stacked = pinned to another card's stack-host with a direction. */
@@ -53,10 +54,12 @@ export class Card {
   public stackedTop = 0;
   /** Card stacked directly below us (state 2), or 0 if none. Same caveat. */
   public stackedBottom = 0;
+  /** Rect card mounted on top of us (state 3, STACKED_ON_HEX), or 0 if none. */
+  public stackedHex = 0;
 
   private static stackParentOf(row: CardRow): number {
     const state = getStackedState(row.microZone);
-    if (state === STACKED_ON_RECT_X || state === STACKED_ON_RECT_Y) {
+    if (state === STACKED_ON_RECT_X || state === STACKED_ON_RECT_Y || state === STACKED_ON_HEX) {
       return row.microLocation;
     }
     return 0;
@@ -66,6 +69,7 @@ export class Card {
     const state = getStackedState(row.microZone);
     if (state === STACKED_ON_RECT_X) return "top";
     if (state === STACKED_ON_RECT_Y) return "bottom";
+    if (state === STACKED_ON_HEX) return "hex";
     return null;
   }
 
@@ -179,8 +183,10 @@ export class Card {
     if (!parent) return;
     if (direction === "top") {
       if (parent.stackedTop === this.cardId) parent.stackedTop = 0;
-    } else {
+    } else if (direction === "bottom") {
       if (parent.stackedBottom === this.cardId) parent.stackedBottom = 0;
+    } else {
+      if (parent.stackedHex === this.cardId) parent.stackedHex = 0;
     }
   }
 
@@ -188,7 +194,8 @@ export class Card {
     const parent = this.cardManager.get(parentId);
     if (!parent) return;
     if (direction === "top") parent.stackedTop = this.cardId;
-    else parent.stackedBottom = this.cardId;
+    else if (direction === "bottom") parent.stackedBottom = this.cardId;
+    else parent.stackedHex = this.cardId;
   }
 
   /** Attach layoutCard to whichever surface matches our current state. */
@@ -196,7 +203,11 @@ export class Card {
     if (this.currentParentId !== 0) {
       const parent = this.cardManager.get(this.currentParentId);
       if (parent) {
-        this.layoutCard.attachToStack(parent.layoutCard);
+        if (this.currentStackDirection === "hex" && parent.layoutCard.hexMount) {
+          parent.layoutCard.hexMount.addChild(this.layoutCard);
+        } else {
+          this.layoutCard.attachToStack(parent.layoutCard);
+        }
         return;
       }
       // Defensive: parent vanished between routing and attach. Fall through
@@ -335,7 +346,9 @@ export class Card {
             this.fallbackToInventory(row);
             return;
           }
-          nextParent = parent.layoutCard.stackHost;
+          nextParent = (newStackDirection === "hex" && parent.layoutCard.hexMount)
+            ? parent.layoutCard.hexMount
+            : parent.layoutCard.stackHost;
         } else {
           nextParent = this.layoutCard.ctx.layout?.surfaceFor(newZoneId) ?? null;
         }
@@ -376,9 +389,13 @@ export class Card {
       // wasn't a rejected drop or a loose -> loose drop").
       if (parentChanged || directionChanged) {
         const oldRoot =
-          oldParentId !== 0 ? this.cardManager.rootOf(oldParentId) : this.cardId;
+          oldParentId !== 0 && oldDirection !== "hex"
+            ? this.cardManager.rootOf(oldParentId)
+            : this.cardId;
         const newRoot =
-          newParentId !== 0 ? this.cardManager.rootOf(newParentId) : this.cardId;
+          newParentId !== 0 && newStackDirection !== "hex"
+            ? this.cardManager.rootOf(newParentId)
+            : this.cardId;
         this.cardManager.fireStackChange(oldRoot);
         if (newRoot !== oldRoot) this.cardManager.fireStackChange(newRoot);
       }
