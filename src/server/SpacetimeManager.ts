@@ -38,6 +38,9 @@ interface SubscriptionDef {
   queries: string[];
   scopeKey: string;
   clearStore?: () => void;
+  /** Called after onApplied fires. Use to sync SDK cache → DataManager when the
+   *  SDK may not re-fire onInsert for rows already in its local table. */
+  onApplied?: () => void;
 }
 
 interface ActiveSubscription {
@@ -182,6 +185,31 @@ export class SpacetimeManager {
     this.removeSubscription(`actions:${zoneId}`);
   }
 
+  async subscribeWorldZone(macroZone: number): Promise<void> {
+    return this.installSubscription(`zones:${macroZone}`, {
+      queries: [`SELECT * FROM zones WHERE macro_zone = ${macroZone}`],
+      scopeKey: `macroZone:${macroZone}`,
+      clearStore: () => this.clearWorldZone(macroZone),
+      // After onApplied, the SDK may not have re-fired onInsert if the row was
+      // still in its local cache from the previous subscription. Sync explicitly.
+      onApplied: () => {
+        if (this.data.zones.client.has(macroZone)) return;
+        const conn = this.connection;
+        if (!conn) return;
+        for (const zone of conn.db.zones.iter()) {
+          if (zone.macroZone === macroZone) {
+            this.data.applyServerInsert("zones", zone);
+            break;
+          }
+        }
+      },
+    });
+  }
+
+  unsubscribeWorldZone(macroZone: number): void {
+    this.removeSubscription(`zones:${macroZone}`);
+  }
+
   /**
    * Submit inventory stacks to trigger recipe matching on the server.
    * The server runs the upgrade machinery (`process_top_branch` /
@@ -253,6 +281,11 @@ export class SpacetimeManager {
     this.subscriptions.delete(name);
   }
 
+  private clearWorldZone(macroZone: number): void {
+    const row = this.data.zones.client.get(macroZone);
+    if (row) this.data.applyServerDelete("zones", row);
+  }
+
   private clearCardsInZone(zoneId: ZoneId): void {
     for (const key of Array.from(this.data.cards.byIndex("zone", zoneId))) {
       this.data.advanceCardDeath(key as number);
@@ -269,6 +302,7 @@ export class SpacetimeManager {
 
   private async openSubscription(sub: ActiveSubscription): Promise<void> {
     sub.handle = await this.subscribeRaw(sub.def.queries);
+    sub.def.onApplied?.();
   }
 
   private async subscribeRaw(queries: string[]): Promise<AnySubscriptionHandle> {
@@ -375,6 +409,21 @@ export class SpacetimeManager {
       safe("actions", "onDelete", () =>
         this.data.applyServerDelete("actions", row),
       ),
+    );
+
+    conn.db.zones.onInsert((_ctx, row) =>
+      safe("zones", "onInsert", () => {
+        console.log("[spacetime] zones.onInsert macroZone=", row.macroZone);
+        this.data.applyServerInsert("zones", row);
+      }),
+    );
+    conn.db.zones.onUpdate((_ctx, oldRow, newRow) =>
+      safe("zones", "onUpdate", () =>
+        this.data.applyServerUpdate("zones", oldRow, newRow),
+      ),
+    );
+    conn.db.zones.onDelete((_ctx, row) =>
+      safe("zones", "onDelete", () => this.data.applyServerDelete("zones", row)),
     );
   }
 }

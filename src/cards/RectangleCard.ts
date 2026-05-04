@@ -1,7 +1,8 @@
-import { Container, Graphics, Text } from "pixi.js";
+import { Container, Graphics, ParticleContainer, Text } from "pixi.js";
 import type { CardDefinition } from "../definitions/DefinitionManager";
 import type { GameContext } from "../GameContext";
 import type { Card as CardRow } from "../server/bindings/types";
+import { ParticleManager, type ParticleHandle } from "../assets/ParticleManager";
 import {
   decodeLooseXY,
   getStackedState,
@@ -21,8 +22,9 @@ const FALLBACK_NAME = "?";
 const DEATH_FADE_LERP = 0.15;
 const DEATH_ALPHA_SNAP = 0.01;
 
-export const RECT_CARD_WIDTH = 72;
-export const RECT_CARD_HEIGHT = 96;
+export const CARD_SCALE = 1;
+export const RECT_CARD_WIDTH = 72 * CARD_SCALE;
+export const RECT_CARD_HEIGHT = 96 * CARD_SCALE;
 export const RECT_CARD_TITLE_HEIGHT = 24;
 
 export type RectCardTitlePosition = "top" | "bottom";
@@ -62,14 +64,20 @@ export class LayoutRectCard extends LayoutCard {
   private currentPackedDefinition: number | null = null;
   private titlePosition: RectCardTitlePosition = "top";
   private dying = false;
-  private deathAlpha = 1;
+  private deathProgress = 0;
+  private readonly deathMask = new Graphics();
   private unsubDying: (() => void) | null = null;
+  private deathParticleContainer: ParticleContainer | null = null;
+  private deathParticleHandle: ParticleHandle | null = null;
 
   constructor(cardId: number, ctx: GameContext) {
     super(cardId, ctx);
     this.unsubDying = ctx.data.subscribeKey("cards", cardId, (change) => {
       if (change.kind === "dying") {
         this.dying = true;
+        this.deathProgress = 0;
+        this.visual.mask = this.deathMask;
+        this._spawnDeathEffect();
         this.invalidate();
       }
     });
@@ -93,6 +101,7 @@ export class LayoutRectCard extends LayoutCard {
     this.visual.addChild(this.bg);
     this.visual.addChild(this.nameText);
     this.visual.addChild(this.stateOverlay);
+    this.container.addChild(this.deathMask);
     this.container.addChild(this.visual);
     // Card size is constant; position is owned by the tween in layout().
     this.setSize(RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
@@ -237,10 +246,7 @@ export class LayoutRectCard extends LayoutCard {
       .stroke({ color: baseStrokeColor, width: baseStrokeWidth });
 
     // Name centered within the title bar.
-    this.nameText.position.set(
-      this.width / 2,
-      titleY + RECT_CARD_TITLE_HEIGHT / 2,
-    );
+    this.nameText.position.set(this.width / 2, titleY + RECT_CARD_TITLE_HEIGHT / 2);
 
     this.stateOverlay.clear();
     if (this.state.hovered) {
@@ -254,19 +260,31 @@ export class LayoutRectCard extends LayoutCard {
         .fill({ color: 0xff8800 });
     }
     if (this.dying) {
-      this.deathAlpha += (0 - this.deathAlpha) * DEATH_FADE_LERP;
-      if (this.deathAlpha < DEATH_ALPHA_SNAP) {
-        this.deathAlpha = 0;
+      this.deathProgress += (1 - this.deathProgress) * DEATH_FADE_LERP;
+      const maskH = (1 - this.deathProgress) * this.height;
+      this.deathMask.clear().rect(0, 0, this.width, maskH).fill(0xffffff);
+      this.deathParticleContainer?.position.set(this.width / 2, maskH);
+      if (maskH < DEATH_ALPHA_SNAP) {
         this.dying = false;
+        this.visual.mask = null;
+        this.deathMask.clear();
         this.unsubDying?.();
         this.unsubDying = null;
+
+        this.deathParticleHandle?.destroy();
+        this.deathParticleHandle = null;
+        if (this.deathParticleContainer) {
+          this.container.removeChild(this.deathParticleContainer);
+          this.deathParticleContainer.destroy({ children: true });
+          this.deathParticleContainer = null;
+        }
 
         this.ctx.cards?.spliceCard(this.cardId);
 
         queueMicrotask(() => this.ctx.data.advanceCardDeath(this.cardId));
       }
     }
-    this.visual.alpha = (this.state.dragging ? 0.7 : 1) * this.deathAlpha;
+    this.visual.alpha = this.state.dragging ? 0.7 : 1;
 
     // Tween toward the effective target. While dragging the cursor wins
     // (parent surface is the canvas-aligned overlay, so pointer coords map
@@ -286,7 +304,19 @@ export class LayoutRectCard extends LayoutCard {
     return this.state.dragging || moving || this.dying || actionRow !== undefined;
   }
 
+  private _spawnDeathEffect(): void {
+    const pm = ParticleManager.getInstance();
+    if (!pm) return;
+    const pc = new ParticleContainer();
+    pc.position.set(this.width / 2, this.height);
+    this.container.addChild(pc);
+    this.deathParticleContainer = pc;
+    this.deathParticleHandle = pm.createEmitter(pc, "ascend");
+  }
+
   override destroy(): void {
+    this.deathParticleHandle?.destroy();
+    this.deathParticleHandle = null;
     this.unsubDying?.();
     this.unsubDying = null;
     super.destroy();

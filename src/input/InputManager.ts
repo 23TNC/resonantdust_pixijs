@@ -25,6 +25,16 @@ export type InputEvent = DownLikeEvent | UpLikeEvent;
 export type DownListener = (data: PointerEventData) => void;
 export type UpListener = (data: UpEventData) => void;
 
+export interface KeyEventData {
+  /** `KeyboardEvent.key` — e.g. `"e"`, `"Escape"`, `" "`. */
+  key: string;
+  /** `KeyboardEvent.code` — physical key, layout-independent. */
+  code: string;
+}
+
+export type KeyEventName = "key_down" | "key_up";
+export type KeyListener = (data: KeyEventData) => void;
+
 type State = "idle" | "pressed" | "dragging";
 
 /**
@@ -58,11 +68,14 @@ export class InputManager {
   private capturedPointerId: number | null = null;
   private readonly downListeners = new Map<DownLikeEvent, Set<DownListener>>();
   private readonly upListeners = new Map<UpLikeEvent, Set<UpListener>>();
+  private readonly keyListeners = new Map<KeyEventName, Set<KeyListener>>();
 
   private readonly onPointerDown: (e: PointerEvent) => void;
   private readonly onPointerMove: (e: PointerEvent) => void;
   private readonly onPointerUp: (e: PointerEvent) => void;
   private readonly onPointerCancel: (e: PointerEvent) => void;
+  private readonly onKeyDown: (e: KeyboardEvent) => void;
+  private readonly onKeyUp: (e: KeyboardEvent) => void;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -72,11 +85,15 @@ export class InputManager {
     this.onPointerMove = this.handlePointerMove.bind(this);
     this.onPointerUp = this.handlePointerUp.bind(this);
     this.onPointerCancel = this.handlePointerCancel.bind(this);
+    this.onKeyDown = (e: KeyboardEvent) => this.emitKey("key_down", e);
+    this.onKeyUp = (e: KeyboardEvent) => this.emitKey("key_up", e);
 
     canvas.addEventListener("pointerdown", this.onPointerDown);
     canvas.addEventListener("pointermove", this.onPointerMove);
     canvas.addEventListener("pointerup", this.onPointerUp);
     canvas.addEventListener("pointercancel", this.onPointerCancel);
+    window.addEventListener("keydown", this.onKeyDown);
+    window.addEventListener("keyup", this.onKeyUp);
   }
 
   on(event: DownLikeEvent, listener: DownListener): () => void;
@@ -110,11 +127,28 @@ export class InputManager {
     };
   }
 
+  onKey(event: KeyEventName, listener: KeyListener): () => void {
+    let set = this.keyListeners.get(event);
+    if (!set) {
+      set = new Set();
+      this.keyListeners.set(event, set);
+    }
+    set.add(listener);
+    return () => {
+      const s = this.keyListeners.get(event);
+      if (!s) return;
+      s.delete(listener);
+      if (s.size === 0) this.keyListeners.delete(event);
+    };
+  }
+
   dispose(): void {
     this.canvas.removeEventListener("pointerdown", this.onPointerDown);
     this.canvas.removeEventListener("pointermove", this.onPointerMove);
     this.canvas.removeEventListener("pointerup", this.onPointerUp);
     this.canvas.removeEventListener("pointercancel", this.onPointerCancel);
+    window.removeEventListener("keydown", this.onKeyDown);
+    window.removeEventListener("keyup", this.onKeyUp);
     if (this.capturedPointerId !== null) {
       try {
         this.canvas.releasePointerCapture(this.capturedPointerId);
@@ -226,6 +260,19 @@ export class InputManager {
   private emitDown(event: DownLikeEvent, data: PointerEventData): void {
     const set = this.downListeners.get(event);
     if (!set) return;
+    for (const listener of set) {
+      try {
+        listener(data);
+      } catch (err) {
+        console.error(`[InputManager] ${event} listener threw`, err);
+      }
+    }
+  }
+
+  private emitKey(event: KeyEventName, e: KeyboardEvent): void {
+    const set = this.keyListeners.get(event);
+    if (!set) return;
+    const data: KeyEventData = { key: e.key, code: e.code };
     for (const listener of set) {
       try {
         listener(data);

@@ -1,5 +1,6 @@
 import { LayoutNode } from "../../layout/LayoutNode";
 import type { LayoutManager } from "../../layout/LayoutManager";
+import type { GameContext } from "../../GameContext";
 import type { ZoneId } from "../../zones/zoneId";
 import { LayoutInventory } from "./InventoryView";
 import { LayoutWorld } from "./WorldView";
@@ -32,13 +33,14 @@ export class GameLayout extends LayoutNode {
   readonly overlay: LayoutNode;
 
   constructor(
+    ctx: GameContext,
     playerName: string,
     layoutManager: LayoutManager,
     inventoryZoneId: ZoneId,
   ) {
     super();
     this.titleBar = new TitleBar(playerName);
-    this.worldView = new LayoutWorld();
+    this.worldView = new LayoutWorld(ctx);
     this.inventoryView = new LayoutInventory(layoutManager, inventoryZoneId);
     this.overlay = new OverlayNode();
     this.addChild(this.titleBar);

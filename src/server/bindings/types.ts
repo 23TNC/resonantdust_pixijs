@@ -55,6 +55,18 @@ export const InventoryStack = __t.object("InventoryStack", {
 });
 export type InventoryStack = __Infer<typeof InventoryStack>;
 
+export const MagneticInputs = __t.object("MagneticInputs", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+  actionId: __t.u32(),
+  slot1: __t.u32(),
+  slot2: __t.u32(),
+  slot3: __t.u32(),
+  slot4: __t.u32(),
+  slot5: __t.u32(),
+});
+export type MagneticInputs = __Infer<typeof MagneticInputs>;
+
 export const Player = __t.object("Player", {
   playerId: __t.u32(),
   name: __t.string(),
@@ -75,7 +87,14 @@ export type PlayerSession = __Infer<typeof PlayerSession>;
 export const Zone = __t.object("Zone", {
   macroZone: __t.u32(),
   packedDefinition: __t.u8(),
-  packedDefinitionIds: __t.array(__t.u64()),
+  t0: __t.u64(),
+  t1: __t.u64(),
+  t2: __t.u64(),
+  t3: __t.u64(),
+  t4: __t.u64(),
+  t5: __t.u64(),
+  t6: __t.u64(),
+  t7: __t.u64(),
 });
 export type Zone = __Infer<typeof Zone>;
 

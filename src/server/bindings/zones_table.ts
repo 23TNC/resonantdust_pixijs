@@ -13,5 +13,12 @@ import {
 export default __t.row({
   macroZone: __t.u32().primaryKey().name("macro_zone"),
   packedDefinition: __t.u8().name("packed_definition"),
-  packedDefinitionIds: __t.array(__t.u64()).name("packed_definition_ids"),
+  t0: __t.u64().name("t_0"),
+  t1: __t.u64().name("t_1"),
+  t2: __t.u64().name("t_2"),
+  t3: __t.u64().name("t_3"),
+  t4: __t.u64().name("t_4"),
+  t5: __t.u64().name("t_5"),
+  t6: __t.u64().name("t_6"),
+  t7: __t.u64().name("t_7"),
 });

@@ -41,7 +41,7 @@ export class GameInventory {
 
   constructor(
     private readonly ctx: GameContext,
-    zoneId: ZoneId,
+    private readonly zoneId: ZoneId,
   ) {
     if (!ctx.cards) {
       throw new Error("[GameInventory] ctx.cards is null");
@@ -73,6 +73,49 @@ export class GameInventory {
     for (let i = 0; i < arr.length; i++) {
       for (let j = i + 1; j < arr.length; j++) {
         this.tryPush(arr[i], arr[j]);
+      }
+    }
+
+    this.clampToSurface(roots);
+  }
+
+  snapToGrid(): void {
+    const surface = this.ctx.layout?.surfaceFor(this.zoneId);
+    const sw = surface?.width ?? Infinity;
+    const sh = surface?.height ?? Infinity;
+    const seen = new Set<Card>();
+    for (const card of this.cards) {
+      const root = this.findRoot(card);
+      if (!root || !this.cards.has(root) || seen.has(root)) continue;
+      seen.add(root);
+      if (root.isDragging()) continue;
+      const b = this.getBounds(root);
+      if (!b) continue;
+      const cx = b.x + b.w / 2;
+      const cy = b.y + b.h / 2;
+      const halfW = RECT_CARD_WIDTH / 2;
+      const halfH = RECT_CARD_HEIGHT / 2;
+      const tx = Math.round((cx - halfW) / RECT_CARD_WIDTH)  * RECT_CARD_WIDTH  + halfW - b.w / 2;
+      const ty = Math.round((cy - halfH) / RECT_CARD_HEIGHT) * RECT_CARD_HEIGHT + halfH - b.h / 2;
+      const nx = Math.max(0, Math.min(tx, sw - b.w));
+      const ny = Math.max(0, Math.min(ty, sh - b.h));
+      root.setPosition({ kind: "loose", x: nx, y: ny });
+    }
+  }
+
+  private clampToSurface(roots: Set<Card>): void {
+    const surface = this.ctx.layout?.surfaceFor(this.zoneId);
+    if (!surface) return;
+    const sw = surface.width;
+    const sh = surface.height;
+    for (const card of roots) {
+      if (card.isDragging()) continue;
+      const b = this.getBounds(card);
+      if (!b) continue;
+      const cx = Math.max(0, Math.min(b.x, sw - b.w));
+      const cy = Math.max(0, Math.min(b.y, sh - b.h));
+      if (cx !== b.x || cy !== b.y) {
+        card.setPosition({ kind: "loose", x: cx, y: cy });
       }
     }
   }

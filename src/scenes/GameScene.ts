@@ -1,4 +1,5 @@
 import { ActionManager } from "../actions/ActionManager";
+import { ParticleManager } from "../assets/ParticleManager";
 import { CardManager } from "../cards/CardManager";
 import { GameInventory } from "../game/GameInventory";
 import { GameManager } from "../game/GameManager";
@@ -6,6 +7,7 @@ import type { GameContext } from "../GameContext";
 import { DragManager } from "../input/DragManager";
 import { InputManager } from "../input/InputManager";
 import { LayoutManager } from "../layout/LayoutManager";
+import { WorldPanManager } from "../world/WorldPanManager";
 import { packZoneId } from "../zones/zoneId";
 import { GameLayout } from "./game/GameLayout";
 import { Scene } from "./Scene";
@@ -21,7 +23,10 @@ export class GameScene extends Scene {
   private inputManager!: InputManager;
   private dragManager!: DragManager;
   private actionManager!: ActionManager;
+  private worldPanManager!: WorldPanManager;
+  private particleManager!: ParticleManager;
   private releaseCards: (() => void) | null = null;
+  private releaseKeys: (() => void) | null = null;
   private ctxRef: GameContext | null = null;
 
   onEnter(ctx: GameContext): void {
@@ -36,6 +41,7 @@ export class GameScene extends Scene {
 
     const inventoryZoneId = packZoneId(player.playerId, INVENTORY_LAYER);
     this.gameLayout = new GameLayout(
+      ctx,
       player.name,
       this.layoutManager,
       inventoryZoneId,
@@ -61,13 +67,25 @@ export class GameScene extends Scene {
     this.actionManager = new ActionManager(ctx, inventoryZoneId);
     ctx.actions = this.actionManager;
 
+    this.worldPanManager = new WorldPanManager(ctx, this.gameLayout.worldView);
+
+    this.particleManager = new ParticleManager();
+    void this.particleManager.init();
+
     this.releaseCards = ctx.zones.ensure(inventoryZoneId);
+    this.releaseKeys = this.inputManager.onKey("key_down", ({ code }) => {
+      if (code === "KeyE") this.gameInventory.snapToGrid();
+    });
   }
 
   onExit(): void {
+    this.releaseKeys?.();
+    this.releaseKeys = null;
     this.releaseCards?.();
     this.releaseCards = null;
 
+    this.particleManager.destroy();
+    this.worldPanManager.dispose();
     this.actionManager.dispose();
     this.dragManager.dispose();
     this.inputManager.dispose();
@@ -93,6 +111,8 @@ export class GameScene extends Scene {
 
   update(deltaMS: number): void {
     this.gameManager.tick(deltaMS);
+    this.particleManager.tick(deltaMS);
+    this.worldPanManager.update();
     this.gameLayout.titleBar.updateFps(deltaMS);
     this.gameLayout.layoutIfDirty();
   }

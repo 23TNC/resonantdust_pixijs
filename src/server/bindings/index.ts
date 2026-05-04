@@ -80,6 +80,9 @@ const tablesSchema = __schema({
       { accessor: 'macro_zone', name: 'cards_macro_zone_idx_btree', algorithm: 'btree', columns: [
         'macroZone',
       ] },
+      { accessor: 'micro_location', name: 'cards_micro_location_idx_btree', algorithm: 'btree', columns: [
+        'microLocation',
+      ] },
       { accessor: 'owner_id', name: 'cards_owner_id_idx_btree', algorithm: 'btree', columns: [
         'ownerId',
       ] },

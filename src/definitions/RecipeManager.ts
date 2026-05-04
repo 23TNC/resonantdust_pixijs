@@ -96,7 +96,7 @@ interface RawRecipe {
 }
 
 const recipeModules = import.meta.glob<{ default: RawRecipe[] }>(
-  "../data/recipes/*.json",
+  "../data/recipes/[0-9]*.json",
   { eager: true },
 );
 
@@ -287,10 +287,7 @@ export class RecipeManager {
     const seenIds = new Set<string>();
     for (const [path, module] of entries) {
       const arr = module.default;
-      if (!Array.isArray(arr)) {
-        console.warn(`[RecipeManager] ${path}: top-level not an array, skipping`);
-        continue;
-      }
+      if (!Array.isArray(arr)) continue;
       for (const raw of arr) {
         if (typeof raw?.id !== "string") {
           console.warn(`[RecipeManager] ${path}: recipe missing id, skipping`);

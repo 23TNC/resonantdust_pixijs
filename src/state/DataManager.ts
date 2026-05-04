@@ -1,9 +1,10 @@
-import type { Action, Card, Player } from "../server/bindings/types";
+import type { Action, Card, Player, Zone } from "../server/bindings/types";
 import type { SpacetimeManager } from "../server/SpacetimeManager";
 import { getStackedState, STACKED_LOOSE } from "../cards/cardData";
-import { packZoneId, type ZoneId } from "../zones/zoneId";
+import { packZoneId, unpackZoneId, type ZoneId } from "../zones/zoneId";
 import type { ZoneManager } from "../zones/ZoneManager";
 import { ShadowedStore, type ShadowedListener } from "./ShadowedStore";
+import { WORLD_LAYER } from "../world/worldCoords";
 
 /** Card row extended with a client-only death counter. `dead === 0` is live;
  *  `dead === 1` means the server deleted it but it is still playing out its
@@ -15,6 +16,7 @@ export type TableMap = {
   cards: ClientCard;
   players: Player;
   actions: Action;
+  zones: Zone;
 };
 
 export type TableName = keyof TableMap;
@@ -38,6 +40,7 @@ export class DataManager {
     (a) => a.actionId,
     { zone: (a) => packZoneId(a.macroZone, a.layer) },
   );
+  readonly zones = new ShadowedStore<Zone>((z) => z.macroZone);
 
   private spacetime: SpacetimeManager | null = null;
   private zonesUnsub: (() => void) | null = null;
@@ -67,17 +70,29 @@ export class DataManager {
     }
     const onAdded = (zoneId: ZoneId) => {
       const spacetime = this.requireSpacetime();
-      spacetime.subscribeCards(zoneId).catch((err) => {
-        console.error(`[DataManager] subscribeCards(${zoneId}) failed`, err);
-      });
-      spacetime.subscribeActions(zoneId).catch((err) => {
-        console.error(`[DataManager] subscribeActions(${zoneId}) failed`, err);
-      });
+      const { macroZone, layer } = unpackZoneId(zoneId);
+      if (layer >= WORLD_LAYER) {
+        spacetime.subscribeWorldZone(macroZone).catch((err: unknown) => {
+          console.error(`[DataManager] subscribeWorldZone(${macroZone}) failed`, err);
+        });
+      } else {
+        spacetime.subscribeCards(zoneId).catch((err) => {
+          console.error(`[DataManager] subscribeCards(${zoneId}) failed`, err);
+        });
+        spacetime.subscribeActions(zoneId).catch((err) => {
+          console.error(`[DataManager] subscribeActions(${zoneId}) failed`, err);
+        });
+      }
     };
     const onRemoved = (zoneId: ZoneId) => {
       const spacetime = this.requireSpacetime();
-      spacetime.unsubscribeCards(zoneId);
-      spacetime.unsubscribeActions(zoneId);
+      const { macroZone, layer } = unpackZoneId(zoneId);
+      if (layer >= WORLD_LAYER) {
+        spacetime.unsubscribeWorldZone(macroZone);
+      } else {
+        spacetime.unsubscribeCards(zoneId);
+        spacetime.unsubscribeActions(zoneId);
+      }
     };
     const unsubActiveAdd = zones.onAdded("active", onAdded);
     const unsubActiveRemove = zones.onRemoved("active", onRemoved);
@@ -89,6 +104,8 @@ export class DataManager {
       unsubHotAdd();
       unsubHotRemove();
     };
+    for (const zoneId of zones.zonesIn("active")) onAdded(zoneId);
+    for (const zoneId of zones.zonesIn("hot")) onAdded(zoneId);
   }
 
   trackPlayers(): () => void {
@@ -293,6 +310,7 @@ export class DataManager {
     this.cards.clear();
     this.players.clear();
     this.actions.clear();
+    this.zones.clear();
     for (const key of Object.keys(this.keySetListeners) as TableName[]) {
       delete this.keySetListeners[key];
     }
@@ -300,7 +318,13 @@ export class DataManager {
   }
 
   private storeOf<K extends TableName>(table: K): ShadowedStore<TableMap[K]> {
-    return this[table] as unknown as ShadowedStore<TableMap[K]>;
+    const lookup: { [T in TableName]: ShadowedStore<TableMap[T]> } = {
+      cards: this.cards,
+      players: this.players,
+      actions: this.actions,
+      zones: this.zones,
+    };
+    return lookup[table];
   }
 
   private notifyKeySet<K extends TableName>(

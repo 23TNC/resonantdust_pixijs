@@ -1,4 +1,5 @@
-import type { ZoneId } from "./zoneId";
+import { packZoneId, type ZoneId } from "./zoneId";
+import { packMacroZone, WORLD_LAYER, zonesAroundAnchor } from "../world/worldCoords";
 
 export type { ZoneId } from "./zoneId";
 export { packZoneId, unpackZoneId } from "./zoneId";
@@ -6,6 +7,10 @@ export { packZoneId, unpackZoneId } from "./zoneId";
 export type ZoneTier = "active" | "hot" | "cold";
 
 export type ZoneListener = (zoneId: ZoneId) => void;
+
+export type AnchorName = string;
+export interface WorldAnchor { readonly q: number; readonly r: number; }
+export type AnchorListener = (name: AnchorName, q: number, r: number) => void;
 
 const TIERS: readonly ZoneTier[] = ["active", "hot", "cold"];
 
@@ -22,6 +27,20 @@ export class ZoneManager {
     hot: new Set(),
     cold: new Set(),
   };
+
+  // ── World coordinate anchors ─────────────────────────────────────────────
+  private readonly anchors = new Map<AnchorName, WorldAnchor>();
+  private readonly anchorListeners = new Set<AnchorListener>();
+
+  /** How many hex rings around each anchor to keep subscribed. */
+  anchorRadius = 2;
+
+  private prevWorldZones = new Set<ZoneId>();
+
+  constructor() {
+    this.anchors.set("viewport", { q: 0, r: 0 });
+    this.recomputeWorldZones();
+  }
 
   set(zoneId: ZoneId, tier: ZoneTier | null): void {
     const prev = this.entries.get(zoneId);
@@ -99,6 +118,60 @@ export class ZoneManager {
     };
   }
 
+  // ── World coordinate anchor API ──────────────────────────────────────────
+
+  /**
+   * Set or update a named anchor point in world q/r space. No-ops if the
+   * values are unchanged. Common names: `"viewport"`, `"player"`.
+   *
+   * LayoutWorld subscribes to `"viewport"` to know where to center its hex
+   * grid. Other anchors keep their surrounding zones warm even when off-screen.
+   */
+  setAnchor(name: AnchorName, q: number, r: number): void {
+    const prev = this.anchors.get(name);
+    if (prev?.q === q && prev.r === r) return;
+    this.anchors.set(name, { q, r });
+    for (const l of this.anchorListeners) l(name, q, r);
+    this.recomputeWorldZones();
+  }
+
+  getAnchor(name: AnchorName): WorldAnchor | undefined {
+    return this.anchors.get(name);
+  }
+
+  /** The `"viewport"` anchor, defaulting to origin if not yet set. */
+  get viewportAnchor(): WorldAnchor {
+    return this.anchors.get("viewport") ?? { q: 0, r: 0 };
+  }
+
+  /**
+   * Subscribe to anchor changes. Fires immediately for every anchor already
+   * set, then on every subsequent change. Returns an unsubscribe function.
+   */
+  onAnchorChange(listener: AnchorListener): () => void {
+    this.anchorListeners.add(listener);
+    for (const [name, { q, r }] of this.anchors) listener(name, q, r);
+    return () => { this.anchorListeners.delete(listener); };
+  }
+
+  private recomputeWorldZones(): void {
+    const next = new Set<ZoneId>();
+    for (const { q, r } of this.anchors.values()) {
+      for (const { zoneQ, zoneR } of zonesAroundAnchor(q, r, this.anchorRadius)) {
+        next.add(packZoneId(packMacroZone(zoneQ, zoneR), WORLD_LAYER));
+      }
+    }
+    for (const zoneId of this.prevWorldZones) {
+      if (!next.has(zoneId)) this.set(zoneId, null);
+    }
+    for (const zoneId of next) {
+      if (!this.prevWorldZones.has(zoneId)) this.set(zoneId, "active");
+    }
+    this.prevWorldZones = next;
+  }
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
+
   dispose(): void {
     this.entries.clear();
     this.refs.clear();
@@ -106,6 +179,8 @@ export class ZoneManager {
       this.addedListeners[tier].clear();
       this.removedListeners[tier].clear();
     }
+    this.anchors.clear();
+    this.anchorListeners.clear();
   }
 
   private fireAdded(tier: ZoneTier, zoneId: ZoneId): void {

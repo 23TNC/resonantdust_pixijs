@@ -39,7 +39,7 @@ interface CardGroupJson {
 }
 
 const cardModules = import.meta.glob<{ default: CardGroupJson[] }>(
-  "../data/cards/*.json",
+  "../data/cards/[0-9]*.json",
   { eager: true },
 );
 
@@ -142,7 +142,6 @@ export class DefinitionManager {
     const seenGroups = new Map<number, string>();
 
     for (const [path, module] of entries) {
-      if (!Array.isArray(module.default)) continue;
       for (const group of module.default) {
         const typeId = this.typeIdByName.get(group.card_type);
         if (typeId === undefined) {
