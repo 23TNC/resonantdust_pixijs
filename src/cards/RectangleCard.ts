@@ -19,8 +19,7 @@ import { LayoutCard } from "./LayoutCard";
 const FALLBACK_STYLE = ["#3a3a4a", "#7a7a8a", "#0b1426"] as const;
 const FALLBACK_NAME = "?";
 
-const DEATH_FADE_LERP = 0.15;
-const DEATH_ALPHA_SNAP = 0.01;
+const DEATH_SPEED = 0.04;
 
 export const CARD_SCALE = 1;
 export const RECT_CARD_WIDTH = 72 * CARD_SCALE;
@@ -260,14 +259,20 @@ export class LayoutRectCard extends LayoutCard {
         .fill({ color: 0xff8800 });
     }
     if (this.dying) {
-      this.deathProgress += (1 - this.deathProgress) * DEATH_FADE_LERP;
-      const maskH = (1 - this.deathProgress) * this.height;
+      this.deathProgress += DEATH_SPEED;
+      const maskH = Math.max(0, (1 - this.deathProgress) * this.height);
       this.deathMask.clear().rect(0, 0, this.width, maskH).fill(0xffffff);
-      this.deathParticleContainer?.position.set(this.width / 2, maskH);
-      if (maskH < DEATH_ALPHA_SNAP) {
-        this.dying = false;
+      this.deathParticleHandle?.setPosition(this.width / 2, maskH);
+
+      if (this.deathProgress >= 1 && this.visual.visible) {
+        this.visual.visible = false;
         this.visual.mask = null;
         this.deathMask.clear();
+        this.deathParticleHandle?.stop();
+      }
+
+      if (this.deathProgress >= 4) {
+        this.dying = false;
         this.unsubDying?.();
         this.unsubDying = null;
 
@@ -311,7 +316,8 @@ export class LayoutRectCard extends LayoutCard {
     pc.position.set(this.width / 2, this.height);
     this.container.addChild(pc);
     this.deathParticleContainer = pc;
-    this.deathParticleHandle = pm.createEmitter(pc, "ascend");
+    const primary = this.definition?.style[0] ?? FALLBACK_STYLE[0];
+    this.deathParticleHandle = pm.createEmitter(pc, "ascend", { startColor: primary });
   }
 
   override destroy(): void {

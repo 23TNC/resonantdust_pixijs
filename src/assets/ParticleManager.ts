@@ -223,7 +223,7 @@ export class ParticleManager extends LayoutNode {
           ...behavior.config,
           color: {
             ...behavior.config.color,
-            list: list.map((step: { value: string; time: number }) => {
+            list: list.filter(Boolean).map((step: { value: string; time: number }) => {
               if (step.time === 0 && opts.startColor !== undefined)
                 return { ...step, value: opts.startColor.replace(/^#/, "") };
               if (step.time === 1 && opts.endColor !== undefined)

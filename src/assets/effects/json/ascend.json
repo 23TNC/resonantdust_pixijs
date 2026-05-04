@@ -10,10 +10,10 @@
 	},
 	"color": {
 		"start": "#d100d1",
-		"end": "#3f0052"
+		"end": "#0b1426"
 	},
 	"speed": {
-		"start": 1000,
+		"start": 200,
 		"end": 0,
 		"minimumSpeedMultiplier": 0.01
 	},
@@ -47,8 +47,8 @@
 	"spawnType": "rect",
 	"spawnRect": {
 		"x": -36,
-		"y": -48,
+		"y": 0,
 		"w": 72,
-		"h": 96
+		"h": 0
 	}
 }

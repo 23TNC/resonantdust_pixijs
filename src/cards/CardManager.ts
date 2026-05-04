@@ -32,6 +32,8 @@ export class CardManager {
   private readonly listeners = new Map<ZoneId, Set<CardListener>>();
   private readonly stackListeners = new Map<ZoneId, Set<StackChangeListener>>();
   private readonly unsubscribe: () => void;
+  /** Cards currently being spliced out — suppress fireStackChange for these roots. */
+  private readonly splicing = new Set<number>();
 
   constructor(private readonly ctx: GameContext) {
     for (const cardId of ctx.data.keys("cards")) {
@@ -65,6 +67,7 @@ export class CardManager {
     const row = this.ctx.data.get("cards", cardId);
     if (!row) return;
 
+    this.splicing.add(cardId);
     const state = getStackedState(row.microZone);
 
     if (state === STACKED_LOOSE) {
@@ -107,6 +110,7 @@ export class CardManager {
 
     card.stackedTop = 0;
     card.stackedBottom = 0;
+    this.splicing.delete(cardId);
   }
 
   /**
@@ -243,6 +247,7 @@ export class CardManager {
    * that zone hear the event.
    */
   fireStackChange(rootId: number): void {
+    if (this.splicing.has(rootId)) return;
     const root = this.cards.get(rootId);
     if (!root) return;
     const zoneId = root.zoneId();
