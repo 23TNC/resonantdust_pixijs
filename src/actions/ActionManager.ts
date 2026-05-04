@@ -1,14 +1,24 @@
 import type { CardManager } from "../cards/CardManager";
 import type { CardDefinition } from "../definitions/DefinitionManager";
-import {
-  RecipeManager,
-  type ActorMatch,
-  type RecipeType,
-} from "../definitions/RecipeManager";
+import { RecipeManager, type ActorMatch } from "../definitions/RecipeManager";
+import { getStackedState, STACKED_ON_HEX, STACKED_ON_RECT_X, STACKED_ON_RECT_Y } from "../cards/cardData";
 import type { GameContext } from "../GameContext";
+import { debug } from "../debug";
 import type { Action as ActionRow, InventoryStack } from "../server/bindings/types";
+import type { MagneticActionRow } from "../state/DataManager";
 import type { ShadowedChange } from "../state/ShadowedStore";
 import { packZoneId, type ZoneId } from "../zones/zoneId";
+
+export interface CachedMagneticAction {
+  magneticActionId: number;
+  cardId: number;
+  recipe: number;
+  end: number;
+  loopCount: number;
+  receivedAt: number;
+}
+
+export type MagneticActionListener = (action: CachedMagneticAction | null) => void;
 
 export interface CachedAction {
   actionId: number;
@@ -71,8 +81,16 @@ export class ActionManager {
   /** card_id → listeners waiting for that card's action to change. */
   private readonly cardListeners = new Map<number, Set<ActionListener>>();
 
+  /** magnetic_action_id → cached magnetic action. */
+  private readonly magneticById = new Map<number, CachedMagneticAction>();
+  /** card_id → magnetic_action_id. */
+  private readonly magneticByCardId = new Map<number, number>();
+  /** card_id → listeners waiting for that card's magnetic action to change. */
+  private readonly magneticCardListeners = new Map<number, Set<MagneticActionListener>>();
+
   private readonly unsubStackChange: () => void;
   private readonly unsubActionData: () => void;
+  private readonly unsubMagneticData: () => void;
 
   constructor(
     private readonly ctx: GameContext,
@@ -84,15 +102,25 @@ export class ActionManager {
 
     // Pick up any actions already in the store for our zone (if our zone
     // subscription landed before us, rows may already be present).
+    let seedCount = 0;
     for (const row of ctx.data.valuesByIndex("actions", "zone", zoneId)) {
       this.upsert(row as ActionRow);
+      seedCount++;
     }
+    debug.log(["actions"], `[ActionManager] initialized zone=${zoneId} seeded=${seedCount}`, 2);
 
     this.unsubActionData = ctx.data.subscribe("actions", (change) => {
       this.onActionChange(change as ShadowedChange<ActionRow>);
     });
     this.unsubStackChange = ctx.cards.subscribeStackChange(zoneId, (rootId) => {
       this.onStackChange(rootId);
+    });
+
+    for (const row of ctx.data.valuesByIndex("magnetic_actions", "zone", zoneId)) {
+      this.upsertMagnetic(row as MagneticActionRow);
+    }
+    this.unsubMagneticData = ctx.data.subscribe("magnetic_actions", (change) => {
+      this.onMagneticChange(change as ShadowedChange<MagneticActionRow>);
     });
   }
 
@@ -119,12 +147,42 @@ export class ActionManager {
     };
   }
 
+  /** Subscribe to magnetic action changes for a specific card. Fires immediately
+   *  with the current magnetic action if one exists, then on every change.
+   *  Returns an unsubscribe function. */
+  subscribeMagneticCard(cardId: number, listener: MagneticActionListener): () => void {
+    let set = this.magneticCardListeners.get(cardId);
+    if (!set) {
+      set = new Set();
+      this.magneticCardListeners.set(cardId, set);
+    }
+    set.add(listener);
+
+    const magneticActionId = this.magneticByCardId.get(cardId);
+    const current = magneticActionId !== undefined
+      ? this.magneticById.get(magneticActionId) ?? null
+      : null;
+    listener(current);
+
+    return () => {
+      const s = this.magneticCardListeners.get(cardId);
+      if (!s) return;
+      s.delete(listener);
+      if (s.size === 0) this.magneticCardListeners.delete(cardId);
+    };
+  }
+
   dispose(): void {
+    debug.log(["actions"], `[ActionManager] disposed zone=${this.zoneId}`, 3);
     this.unsubStackChange();
     this.unsubActionData();
+    this.unsubMagneticData();
     this.byActionId.clear();
     this.byCardId.clear();
     this.cardListeners.clear();
+    this.magneticById.clear();
+    this.magneticByCardId.clear();
+    this.magneticCardListeners.clear();
   }
 
   private onActionChange(change: ShadowedChange<ActionRow>): void {
@@ -159,6 +217,7 @@ export class ActionManager {
       participantsUp: (row.participants >> 4) & 0x0F,
       participantsDown: row.participants & 0x0F,
     };
+    debug.log(["actions"], `[ActionManager] upsert actionId=${row.actionId} cardId=${row.cardId} recipe=${row.recipe} up=${action.participantsUp} down=${action.participantsDown}`, 2);
     this.byActionId.set(row.actionId, action);
     this.byCardId.set(row.cardId, row.actionId);
     this.emitCard(row.cardId, action);
@@ -167,14 +226,41 @@ export class ActionManager {
   private remove(actionId: number): void {
     const action = this.byActionId.get(actionId);
     if (!action) return;
+    debug.log(["actions"], `[ActionManager] remove actionId=${actionId} cardId=${action.cardId}`, 2);
     this.byActionId.delete(actionId);
     const reverseId = this.byCardId.get(action.cardId);
     if (reverseId === actionId) {
       this.byCardId.delete(action.cardId);
       this.emitCard(action.cardId, null);
+      // Defer re-evaluation to a microtask so all changes in the current
+      // SpacetimeDB transaction batch are applied first. If the card died in
+      // the same transaction, it will be marked dead === 1 by then and we
+      // skip the re-submit. If it's alive (recipe completed normally), we
+      // re-evaluate so the server can restart the recipe immediately.
+      const cardId = action.cardId;
+      queueMicrotask(() => {
+        const cardRow = this.ctx.data.get("cards", cardId);
+        if (cardRow && cardRow.dead === 0) {
+          this.onStackChange(this.findChainRoot(cardId));
+        }
+      });
     }
     // If reverseId !== actionId, a newer action already claimed this card;
-    // don't emit null — that would overwrite a valid currentAction.
+    // don't emit null or re-evaluate — that would clobber a valid running action.
+  }
+
+  /** Walk parent links (STACKED_ON_RECT_X/Y) up to the chain root. Cards that
+   *  are loose or on a hex are already roots and return immediately. */
+  private findChainRoot(cardId: number): number {
+    let id = cardId;
+    for (let i = 0; i < CHAIN_MAX_DEPTH; i++) {
+      const row = this.ctx.data.get("cards", id);
+      if (!row) break;
+      const stacked = getStackedState(row.microZone);
+      if (stacked !== STACKED_ON_RECT_X && stacked !== STACKED_ON_RECT_Y) break;
+      id = row.microLocation;
+    }
+    return id;
   }
 
   private emitCard(cardId: number, action: CachedAction | null): void {
@@ -199,16 +285,31 @@ export class ActionManager {
     const top = this.collectChain(rootId, "top");
     const bottom = this.collectChain(rootId, "bottom");
 
+    debug.log(["actions"], `[ActionManager] onStackChange root=${rootId} up=[${top.join(",")}] down=[${bottom.join(",")}]`, 2);
+
     let needsSubmit = false;
-    if (top.length >= 1) needsSubmit = this.evaluateBranch(top, "top_stack") || needsSubmit;
-    if (bottom.length >= 1) needsSubmit = this.evaluateBranch(bottom, "bottom_stack") || needsSubmit;
+    if (top.length >= 1) needsSubmit = this.evaluateBranch(top, "up") || needsSubmit;
+    if (bottom.length >= 1) needsSubmit = this.evaluateBranch(bottom, "down") || needsSubmit;
 
-    if (!needsSubmit) return;
+    if (!needsSubmit) {
+      debug.log(["actions"], `[ActionManager] root=${rootId} — no change needed, skipping submit`, 2);
+      return;
+    }
 
+    // Pull the hex card_id off the root's local row when it's on a hex.
+    // The server can't read this from its own row (inventory cards
+    // server-side hold `microZone = 0`), so we forward it here.
+    const rootRow = this.ctx.data.get("cards", rootId);
+    const hexCardId =
+      rootRow && getStackedState(rootRow.microZone) === STACKED_ON_HEX
+        ? rootRow.microLocation
+        : undefined;
+    debug.log(["actions"], `[ActionManager] root=${rootId} — submitting stack (hex=${hexCardId ?? "none"})`, 3);
     const stack: InventoryStack = {
       root: rootId,
       stackUp: top.slice(1),
       stackDown: bottom.slice(1),
+      hex: hexCardId,
     };
     void this.ctx.spacetime.submitStacks([stack]);
   }
@@ -220,16 +321,30 @@ export class ActionManager {
    * candidates (not short-circuiting) so a future debug logger can see
    * every decision.
    */
-  private evaluateBranch(chain: readonly number[], type: RecipeType): boolean {
+  private evaluateBranch(chain: readonly number[], direction: "up" | "down"): boolean {
     const defs = this.resolveDefinitions(chain);
-    const claimedBy = this.buildClaimedMap(chain, type);
+    const hexDef = this.resolveHexDef(chain);
+    debug.log(["actions"], `[ActionManager] evaluateBranch direction=${direction} chain=[${chain.join(",")}] defs=[${defs.map(d => d?.key ?? "null").join(",")}] hexDef=${hexDef?.key ?? "none"}`, 1);
+    const claimedBy = this.buildClaimedMap(chain, direction);
     let needsSubmit = false;
     for (let actorIdx = 0; actorIdx < chain.length; actorIdx++) {
-      if (this.evaluateActorCandidate(chain, defs, actorIdx, type, claimedBy)) {
+      if (this.evaluateActorCandidate(chain, defs, actorIdx, direction, claimedBy, hexDef)) {
         needsSubmit = true;
       }
     }
     return needsSubmit;
+  }
+
+  /** Resolve the hex card definition for chain[0] if it is mounted on a hex
+   *  (stackedState == STACKED_ON_HEX). Returns null for loose or rect-stacked roots. */
+  private resolveHexDef(chain: readonly number[]): CardDefinition | null {
+    if (chain.length === 0) return null;
+    const rootRow = this.ctx.data.get("cards", chain[0]);
+    if (!rootRow) return null;
+    if (getStackedState(rootRow.microZone) !== STACKED_ON_HEX) return null;
+    const hexRow = this.ctx.data.get("cards", rootRow.microLocation);
+    if (!hexRow) return null;
+    return this.ctx.definitions.decode(hexRow.packedDefinition) ?? null;
   }
 
   /**
@@ -252,7 +367,7 @@ export class ActionManager {
    */
   private buildClaimedMap(
     chain: readonly number[],
-    type: RecipeType,
+    direction: "up" | "down",
   ): Map<number, number> {
     const map = new Map<number, number>();
     for (let i = 0; i < chain.length; i++) {
@@ -260,7 +375,7 @@ export class ActionManager {
       if (actionId === undefined) continue;
       const action = this.byActionId.get(actionId);
       if (!action) continue;
-      const count = type === "top_stack" ? action.participantsUp : action.participantsDown;
+      const count = direction === "up" ? action.participantsUp : action.participantsDown;
       if (count === 0) continue;
       for (let j = i; j < i + count && j < chain.length; j++) {
         map.set(chain[j], actionId);
@@ -278,8 +393,9 @@ export class ActionManager {
     chain: readonly number[],
     defs: readonly (CardDefinition | null)[],
     actorIdx: number,
-    type: RecipeType,
+    direction: "up" | "down",
     claimedBy: Map<number, number>,
+    hexDef: CardDefinition | null,
   ): boolean {
     const actorId = chain[actorIdx];
     const actorActionId = this.byCardId.get(actorId);
@@ -287,24 +403,19 @@ export class ActionManager {
       ? this.byActionId.get(actorActionId) ?? null
       : null;
 
-    // If this card is a slot filler in someone else's action, leave it.
-    // That action's actor will reach its own decision in its own
-    // iteration step.
-    if (actorAction && actorAction.cardId !== actorId) return false;
-
-    // If the actor's current action is for the *other* branch direction
-    // (e.g. a TopStack action while we're evaluating bottom_stack), leave
-    // it alone — the other branch's iteration owns that action's fate.
-    // Without this guard, a Y-stack root could have one branch's
-    // evaluator unilaterally cancel the other branch's running action.
-    if (actorAction) {
-      const recipeDef = this.ctx.recipes.getByIndex(actorAction.recipe);
-      if (recipeDef && recipeDef.type !== type) return false;
+    if (actorAction && actorAction.cardId !== actorId) {
+      debug.log(["actions"], `[ActionManager] card=${actorId} skip — slot filler in action=${actorActionId}`, 1);
+      return false;
     }
 
-    // Visible window walks outward from the actor and includes free
-    // cards or cards in the actor's own action; stops at the first card
-    // claimed by a different action.
+    if (actorAction) {
+      const recipeDef = this.ctx.recipes.decode(actorAction.recipe);
+      if (recipeDef && (recipeDef.type !== "stack" || recipeDef.direction !== direction)) {
+        debug.log(["actions"], `[ActionManager] card=${actorId} skip — action belongs to other branch (${recipeDef.type}:${recipeDef.direction})`, 1);
+        return false;
+      }
+    }
+
     let visibleEnd = actorIdx;
     for (let j = actorIdx; j < chain.length; j++) {
       const cardActionId = claimedBy.get(chain[j]);
@@ -313,30 +424,33 @@ export class ActionManager {
       else break;
     }
 
-    // Score every recipe of this type, skipping ones whose claim would
-    // conflict with another action. Pick the highest-weight winner;
-    // declaration order breaks ties (handled implicitly by the matcher's
-    // first-wins-on-equal logic).
+    debug.log(["actions"], `[ActionManager] card=${actorId} actorIdx=${actorIdx} direction=${direction} visibleEnd=${visibleEnd} candidateRecipes=${this.ctx.recipes.recipesOfType("stack", direction).length}`, 1);
+
     let best: ActorMatch | null = null;
-    for (const recipe of this.ctx.recipes.recipesOfType(type)) {
-      const m = this.ctx.recipes.scoreRecipeForActor(recipe, chain, defs, actorIdx, visibleEnd);
-      if (!m) continue;
+    for (const recipe of this.ctx.recipes.recipesOfType("stack", direction)) {
+      const m = this.ctx.recipes.scoreRecipeForActor(recipe, chain, defs, actorIdx, visibleEnd, hexDef);
+      if (!m) {
+        debug.log(["actions"], `[ActionManager]   recipe "${recipe.id}" — no match`, 1);
+        continue;
+      }
       const blocked = m.claimed.some((id) => {
         const a = claimedBy.get(id);
         return a !== undefined && a !== actorActionId;
       });
-      if (blocked) continue;
+      if (blocked) {
+        debug.log(["actions"], `[ActionManager]   recipe "${recipe.id}" — blocked by claim conflict`, 1);
+        continue;
+      }
+      debug.log(["actions"], `[ActionManager]   recipe "${recipe.id}" — matched weight={tile:${m.weight.tile} root:${m.weight.root} slot:${m.weight.slot}}`, 1);
       if (!best || RecipeManager.compareWeight(m.weight, best.weight) > 0) best = m;
     }
 
-    // Four-way decision. See class docs for the table.
+    debug.log(["actions"], `[ActionManager] card=${actorId} best=${best?.recipe.id ?? "none"} currentAction=${actorAction?.recipe ?? "none"}`, 1);
+
     if (!actorAction && !best) return false;
-    if (actorAction && !best) return true;     // server would cancel
-    if (!actorAction && best) return true;     // server would start
-    // Both present.
-    if (actorAction!.recipe !== best!.recipe.index) return true; // upgrade
-    // Same recipe at this actor — pre-filter says no-op. Slot-filler
-    // identity changes are checked authoritatively on the server.
+    if (actorAction && !best) return true;
+    if (!actorAction && best) return true;
+    if (actorAction!.recipe !== best!.recipe.packed) return true;
     return false;
   }
 
@@ -353,6 +467,55 @@ export class ActionManager {
       result[i] = this.ctx.definitions.decode(row.packedDefinition) ?? null;
     }
     return result;
+  }
+
+  private onMagneticChange(change: ShadowedChange<MagneticActionRow>): void {
+    if (change.kind === "delete") {
+      const old = change.oldValue;
+      if (old) this.removeMagnetic(old.magneticActionId, old.cardId);
+      return;
+    }
+    const row = change.newValue;
+    if (!row) return;
+    if (packZoneId(row.macroZone, row.layer) !== this.zoneId) {
+      this.removeMagnetic(row.magneticActionId, row.cardId);
+      return;
+    }
+    this.upsertMagnetic(row);
+  }
+
+  private upsertMagnetic(row: MagneticActionRow): void {
+    const cached: CachedMagneticAction = {
+      magneticActionId: row.magneticActionId,
+      cardId: row.cardId,
+      recipe: row.recipe,
+      end: row.end,
+      loopCount: row.loopCount,
+      receivedAt: this.ctx.data.magneticActions.getReceivedAt(row.magneticActionId) ?? Date.now() / 1000,
+    };
+    this.magneticById.set(row.magneticActionId, cached);
+    this.magneticByCardId.set(row.cardId, row.magneticActionId);
+    this.emitMagneticCard(row.cardId, cached);
+  }
+
+  private removeMagnetic(magneticActionId: number, cardId: number): void {
+    this.magneticById.delete(magneticActionId);
+    if (this.magneticByCardId.get(cardId) === magneticActionId) {
+      this.magneticByCardId.delete(cardId);
+      this.emitMagneticCard(cardId, null);
+    }
+  }
+
+  private emitMagneticCard(cardId: number, action: CachedMagneticAction | null): void {
+    const listeners = this.magneticCardListeners.get(cardId);
+    if (!listeners) return;
+    for (const listener of listeners) {
+      try {
+        listener(action);
+      } catch (err) {
+        console.error("[ActionManager] magnetic card listener threw", err);
+      }
+    }
   }
 
   /**

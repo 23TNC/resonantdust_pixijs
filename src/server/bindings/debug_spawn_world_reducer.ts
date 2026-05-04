@@ -10,14 +10,9 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default __t.row({
-  actionId: __t.u32().primaryKey().name("action_id"),
-  cardId: __t.u32().name("card_id"),
-  recipe: __t.u16(),
-  ownerId: __t.u32().name("owner_id"),
-  layer: __t.u8(),
-  macroZone: __t.u32().name("macro_zone"),
-  end: __t.u32(),
-  participants: __t.u8(),
-  flags: __t.u8(),
-});
+export default {
+  playerId: __t.u32(),
+  cardKey: __t.string(),
+  worldQ: __t.i16(),
+  worldR: __t.i16(),
+};

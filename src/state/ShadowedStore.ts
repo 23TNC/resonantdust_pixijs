@@ -30,6 +30,7 @@ const EMPTY_KEY_SET: ReadonlySet<number | string> = new Set();
 export class ShadowedStore<T> {
   readonly server = new Map<number | string, T>();
   readonly client = new Map<number | string, T>();
+  private readonly receivedAt = new Map<number | string, number>();
   private readonly listeners = new Set<ShadowedListener<T>>();
   private readonly keyListeners = new Map<
     number | string,
@@ -78,6 +79,7 @@ export class ShadowedStore<T> {
     const stored = Object.freeze({ ...row }) as T;
     this.server.set(key, stored);
     this.client.set(key, stored);
+    this.receivedAt.set(key, Date.now() / 1000);
     this.updateIndexes(prev, stored, key);
     this.emit({
       kind: wasPresent ? "update" : "insert",
@@ -94,6 +96,7 @@ export class ShadowedStore<T> {
     const stored = Object.freeze({ ...newRow }) as T;
     this.server.set(key, stored);
     this.client.set(key, stored);
+    this.receivedAt.set(key, Date.now() / 1000);
     this.updateIndexes(oldRow, stored, key);
     this.emit({
       kind: "update",
@@ -182,6 +185,10 @@ export class ShadowedStore<T> {
     return this.client.get(key);
   }
 
+  getReceivedAt(key: number | string): number | undefined {
+    return this.receivedAt.get(key);
+  }
+
   has(key: number | string): boolean {
     return this.client.has(key);
   }
@@ -206,6 +213,7 @@ export class ShadowedStore<T> {
   clearRows(): void {
     this.server.clear();
     this.client.clear();
+    this.receivedAt.clear();
     for (const state of this.indexes.values()) state.forward.clear();
   }
 
@@ -213,6 +221,7 @@ export class ShadowedStore<T> {
   clear(): void {
     this.server.clear();
     this.client.clear();
+    this.receivedAt.clear();
     this.listeners.clear();
     this.keyListeners.clear();
     for (const state of this.indexes.values()) state.forward.clear();

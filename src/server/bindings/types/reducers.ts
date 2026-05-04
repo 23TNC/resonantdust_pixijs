@@ -9,10 +9,12 @@ import { type Infer as __Infer } from "spacetimedb";
 import BootstrapReducer from "../bootstrap_reducer";
 import ClaimOrLoginReducer from "../claim_or_login_reducer";
 import DebugSpawnReducer from "../debug_spawn_reducer";
+import DebugSpawnWorldReducer from "../debug_spawn_world_reducer";
 import SubmitInventoryStacksReducer from "../submit_inventory_stacks_reducer";
 
 export type BootstrapParams = __Infer<typeof BootstrapReducer>;
 export type ClaimOrLoginParams = __Infer<typeof ClaimOrLoginReducer>;
 export type DebugSpawnParams = __Infer<typeof DebugSpawnReducer>;
+export type DebugSpawnWorldParams = __Infer<typeof DebugSpawnWorldReducer>;
 export type SubmitInventoryStacksParams = __Infer<typeof SubmitInventoryStacksReducer>;
 

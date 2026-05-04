@@ -1,5 +1,4 @@
-import { Container, Graphics, Text } from "pixi.js";
-import type { CardDefinition } from "../definitions/DefinitionManager";
+import { Container, Graphics, Sprite, Texture } from "pixi.js";
 import type { GameContext } from "../GameContext";
 import { LayoutNode } from "../layout/LayoutNode";
 import type { Card as CardRow } from "../server/bindings/types";
@@ -9,8 +8,17 @@ import {
   STACKED_LOOSE,
   type LooseXY,
 } from "./cardData";
+import type { CachedMagneticAction } from "../actions/ActionManager";
 import { GameCard } from "./GameCard";
+import {
+  hexPoints,
+  HEX_HEIGHT,
+  HEX_RADIUS,
+  HEX_WIDTH,
+} from "./HexCardVisual";
 import { LayoutCard } from "./LayoutCard";
+
+export { HEX_HEIGHT, HEX_RADIUS, HEX_WIDTH } from "./HexCardVisual";
 
 /** Passthrough hit-host for a rect card mounted on top of a hex (STACKED_ON_HEX).
  *  Always recurses into children; never returns itself — so clicks on the
@@ -27,24 +35,13 @@ class HexMount extends LayoutNode {
   }
 }
 
-const FALLBACK_STYLE = ["#3a3a4a", "#7a7a8a", "#0b1426"] as const;
-const FALLBACK_NAME = "?";
-
-const DEATH_FADE_LERP = 0.15;
+const DEATH_FADE_LERP  = 0.15;
 const DEATH_ALPHA_SNAP = 0.01;
 
-export const HEX_RADIUS = 72;
-export const HEX_WIDTH = Math.sqrt(3)*HEX_RADIUS;
-export const HEX_HEIGHT = HEX_RADIUS * 2;
-
-function hexPoints(cx: number, cy: number, radius: number): number[] {
-  const pts: number[] = [];
-  for (let i = 0; i < 6; i++) {
-    const angle = (Math.PI / 3) * i + Math.PI / 6;
-    pts.push(cx + radius * Math.cos(angle), cy + radius * Math.sin(angle));
-  }
-  return pts;
-}
+// Inset ring drawn inside the hex boundary — outer edge sits 5px inside the
+// vertex circle so it never overlaps an adjacent tile's stroke.
+const PROGRESS_RING_WIDTH  = 4;
+const PROGRESS_RING_RADIUS = HEX_RADIUS - 7;
 
 export class GameHexCard extends GameCard {
   private stackedState = 0;
@@ -70,18 +67,19 @@ export class GameHexCard extends GameCard {
 }
 
 export class LayoutHexCard extends LayoutCard {
-  static readonly WIDTH = HEX_WIDTH;
+  static readonly WIDTH  = HEX_WIDTH;
   static readonly HEIGHT = HEX_HEIGHT;
 
-  private readonly visual = new Container();
-  private readonly bg = new Graphics();
+  private readonly visual       = new Container();
+  private readonly hexSprite    = new Sprite(Texture.EMPTY);
+  private readonly progressBar  = new Graphics();
   private readonly stateOverlay = new Graphics();
-  private readonly nameText: Text;
-  private definition: CardDefinition | null = null;
   private currentPackedDefinition: number | null = null;
-  private dying = false;
+  private dying      = false;
   private deathAlpha = 1;
   private unsubDying: (() => void) | null = null;
+  private currentMagneticAction: CachedMagneticAction | null = null;
+  private unsubMagnetic: (() => void) | null = null;
 
   constructor(cardId: number, ctx: GameContext) {
     super(cardId, ctx);
@@ -91,21 +89,14 @@ export class LayoutHexCard extends LayoutCard {
         this.invalidate();
       }
     });
-    this.nameText = new Text({
-      text: FALLBACK_NAME,
-      style: {
-        fill: FALLBACK_STYLE[2],
-        fontFamily: "Segoe UI",
-        fontSize: 11,
-        fontWeight: "700",
-        align: "center",
-        wordWrap: true,
-        wordWrapWidth: HEX_WIDTH - 8,
-      },
-    });
-    this.nameText.anchor.set(0.5);
-    this.visual.addChild(this.bg);
-    this.visual.addChild(this.nameText);
+    if (ctx.actions) {
+      this.unsubMagnetic = ctx.actions.subscribeMagneticCard(cardId, (action) => {
+        this.currentMagneticAction = action;
+        this.invalidate();
+      });
+    }
+    this.visual.addChild(this.hexSprite);
+    this.visual.addChild(this.progressBar);
     this.visual.addChild(this.stateOverlay);
     this.container.addChild(this.visual);
     // hexMount added after visual → mounted rect renders in front of the hex.
@@ -117,10 +108,8 @@ export class LayoutHexCard extends LayoutCard {
   applyData(row: CardRow): void {
     if (row.packedDefinition !== this.currentPackedDefinition) {
       this.currentPackedDefinition = row.packedDefinition;
-      const def = this.ctx.definitions.decode(row.packedDefinition);
-      this.definition = def ?? null;
-      this.nameText.text = def?.name ?? FALLBACK_NAME;
-      this.nameText.style.fill = def?.style[2] ?? FALLBACK_STYLE[2];
+      const def = this.ctx.definitions.decode(row.packedDefinition) ?? null;
+      this.hexSprite.texture = this.ctx.textures.getHexTexture(def, row.packedDefinition);
       this.invalidate();
     }
 
@@ -133,24 +122,47 @@ export class LayoutHexCard extends LayoutCard {
   }
 
   protected override layout(): boolean | void {
-    const style = this.definition?.style ?? FALLBACK_STYLE;
-    const [primary, secondary, outline] = style;
-    const cx = HEX_WIDTH / 2;
+    const cx = HEX_WIDTH  / 2;
     const cy = HEX_HEIGHT / 2;
 
-    const baseStrokeColor = this.state.selected ? 0xffff00 : outline;
-    const baseStrokeWidth = this.state.selected ? 3 : 2;
+    // Progress bar arc — drawn between hexSprite and stateOverlay.
+    // Use the regular action if present; fall back to a magnetic action.
+    const card = this.ctx.cards?.get(this.cardId);
+    const actionRow = card?.currentAction
+      ? this.ctx.data.get("actions", card.currentAction.actionId)
+      : undefined;
+    const activeRecipePacked = actionRow?.recipe ?? this.currentMagneticAction?.recipe;
+    const activeEnd          = actionRow?.end    ?? this.currentMagneticAction?.end;
+    const recipeDef = activeRecipePacked !== undefined
+      ? this.ctx.recipes.decode(activeRecipePacked)
+      : undefined;
+    let progressFill = 0;
+    const now = Date.now() / 1000;
+    if (activeEnd !== undefined && recipeDef) {
+      if (actionRow && recipeDef.duration > 0) {
+        const start = activeEnd - recipeDef.duration;
+        progressFill = Math.min(1, Math.max(0, (now - start) / recipeDef.duration));
+      } else if (this.currentMagneticAction) {
+        const { receivedAt } = this.currentMagneticAction;
+        const duration = activeEnd - receivedAt;
+        if (duration > 0 && now <= activeEnd) {
+          progressFill = Math.min(1, Math.max(0, (now - receivedAt) / duration));
+        }
+      }
+    }
+    const barStyle = recipeDef?.style ?? null;
 
-    const pts = hexPoints(cx, cy, HEX_RADIUS - baseStrokeWidth / 2);
-
-    this.bg.clear();
-    this.bg.poly(pts).fill({ color: primary });
-    this.bg.rect(cx - 36, cy - 48, 72, 96).fill({ color: secondary });
-    this.bg.poly(pts).stroke({ color: baseStrokeColor, width: baseStrokeWidth });
-
-    this.nameText.position.set(cx, cy);
+    this.progressBar.clear();
+    if (barStyle && (actionRow || this.currentMagneticAction)) {
+      const clockwise = barStyle.direction !== "ccw";
+      this._drawHexOutline(progressFill, barStyle.colorLeft, barStyle.colorRight, clockwise);
+    }
 
     this.stateOverlay.clear();
+    if (this.state.selected) {
+      const selPts = hexPoints(cx, cy, HEX_RADIUS);
+      this.stateOverlay.poly(selPts).stroke({ color: 0xffff00, width: 3 });
+    }
     if (this.state.hovered) {
       const hoverPts = hexPoints(cx, cy, HEX_RADIUS + 2);
       this.stateOverlay.poly(hoverPts).stroke({ color: 0xffffff, width: 1, alpha: 0.5 });
@@ -183,12 +195,52 @@ export class LayoutHexCard extends LayoutCard {
       }
     }
     const moving = this.tweenTo(effX, effY);
-    return this.state.dragging || moving || this.dying;
+    return this.state.dragging || moving || this.dying || activeEnd !== undefined;
+  }
+
+  // Vertex 4 = top point. CW order walks right-ward; CCW walks left-ward.
+  // Draws the full hex outline split into a filled arc (colorFilled, from the
+  // top for progressFill fraction) and an empty arc (colorEmpty, the rest).
+  // Exactly one side may carry both colors at the transition point.
+  private _drawHexOutline(progressFill: number, colorFilled: string, colorEmpty: string, clockwise: boolean): void {
+    const cx = HEX_WIDTH  / 2;
+    const cy = HEX_HEIGHT / 2;
+    const pts = hexPoints(cx, cy, PROGRESS_RING_RADIUS);
+    const fill = Math.min(1, Math.max(0, progressFill));
+
+    const order = clockwise ? [4, 5, 0, 1, 2, 3] : [4, 3, 2, 1, 0, 5];
+
+    const px = (i: number) => pts[i * 2];
+    const py = (i: number) => pts[i * 2 + 1];
+    const vx = (step: number) => px(order[step % 6]);
+    const vy = (step: number) => py(order[step % 6]);
+
+    const splitStep    = fill * 6;
+    const splitSideIdx = Math.min(Math.floor(splitStep), 5);
+    const splitT       = splitStep - splitSideIdx;
+
+    const fromV  = order[splitSideIdx];
+    const toV    = order[(splitSideIdx + 1) % 6];
+    const splitX = px(fromV) + (px(toV) - px(fromV)) * splitT;
+    const splitY = py(fromV) + (py(toV) - py(fromV)) * splitT;
+
+    // Filled arc: top vertex → split point.
+    this.progressBar.moveTo(vx(0), vy(0));
+    for (let i = 1; i <= splitSideIdx; i++) this.progressBar.lineTo(vx(i), vy(i));
+    if (splitT > 0) this.progressBar.lineTo(splitX, splitY);
+    this.progressBar.stroke({ color: colorFilled, width: PROGRESS_RING_WIDTH });
+
+    // Empty arc: split point → top vertex (completing the outline).
+    this.progressBar.moveTo(splitX, splitY);
+    for (let i = splitSideIdx + 1; i <= 6; i++) this.progressBar.lineTo(vx(i), vy(i));
+    this.progressBar.stroke({ color: colorEmpty, width: PROGRESS_RING_WIDTH });
   }
 
   override destroy(): void {
     this.unsubDying?.();
     this.unsubDying = null;
+    this.unsubMagnetic?.();
+    this.unsubMagnetic = null;
     super.destroy();
   }
 }

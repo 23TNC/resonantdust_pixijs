@@ -1,4 +1,7 @@
 import { Application } from "pixi.js";
+import { debug } from "./debug";
+import { DrawCallCounter } from "./debug/DrawCallCounter";
+import { TextureManager } from "./assets/TextureManager";
 import { DefinitionManager } from "./definitions/DefinitionManager";
 import { RecipeManager } from "./definitions/RecipeManager";
 import { PlayerSession } from "./features/PlayerSession";
@@ -34,6 +37,9 @@ async function main(): Promise<Runtime> {
   host.appendChild(app.canvas);
 
   const scenes = new SceneManager(app);
+  const textures = new TextureManager(app.renderer);
+  const drawCallCounter = new DrawCallCounter();
+  drawCallCounter.patch(app.renderer);
   const definitions = new DefinitionManager();
   const recipes = new RecipeManager(definitions);
   const data = new DataManager();
@@ -45,14 +51,14 @@ async function main(): Promise<Runtime> {
     builderFactory: () => DbConnection.builder(),
     data,
     onConnected: (_conn, identity) => {
-      console.log("[spacetime] connected as", identity.toHexString());
+      debug.log(["spacetime"], `[spacetime] connected as ${identity.toHexString()}`);
     },
     onConnectError: (error) => {
       console.error("[spacetime] connect error", error);
     },
     onDisconnected: (error) => {
-      if (error) console.warn("[spacetime] disconnected", error);
-      else console.log("[spacetime] disconnected");
+      if (error) debug.warn(["spacetime"], `[spacetime] disconnected ${String(error)}`);
+      else debug.log(["spacetime"], "[spacetime] disconnected");
     },
   });
 
@@ -64,6 +70,8 @@ async function main(): Promise<Runtime> {
   const ctx: GameContext = {
     app,
     scenes,
+    textures,
+    drawCallCounter,
     definitions,
     recipes,
     spacetime,

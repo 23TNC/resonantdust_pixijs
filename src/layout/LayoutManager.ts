@@ -1,5 +1,6 @@
 import type { LayoutNode } from "./LayoutNode";
 import type { ZoneId } from "../zones/zoneId";
+import { debug } from "../debug";
 
 export type SurfaceListener = (zoneId: ZoneId, surface: LayoutNode) => void;
 
@@ -31,9 +32,7 @@ export class LayoutManager {
 
   register(zoneId: ZoneId, surface: LayoutNode): void {
     if (this.surfaces.has(zoneId)) {
-      console.warn(
-        `[LayoutManager] surface for zone ${zoneId} already registered; overwriting`,
-      );
+      debug.warn(["layout"], `[LayoutManager] surface for zone ${zoneId} already registered; overwriting`);
     }
     this.surfaces.set(zoneId, surface);
     for (const listener of this.registerListeners) {

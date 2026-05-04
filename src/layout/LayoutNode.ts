@@ -7,6 +7,9 @@ export class LayoutNode {
   parent: LayoutNode | null = null;
   readonly children: LayoutNode[] = [];
 
+  get zIndex(): number { return this.container.zIndex; }
+  set zIndex(value: number) { this.container.zIndex = value; }
+
   private _x = 0;
   private _y = 0;
   private _width = 0;

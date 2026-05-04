@@ -1,4 +1,15 @@
 import type { Action, Card, Player, Zone } from "../server/bindings/types";
+
+/** Row type for the magnetic_actions table. Mirrors magnetic_actions_table.ts. */
+export interface MagneticActionRow {
+  magneticActionId: number;
+  cardId: number;
+  recipe: number;
+  end: number;
+  layer: number;
+  macroZone: number;
+  loopCount: number;
+}
 import type { SpacetimeManager } from "../server/SpacetimeManager";
 import { getStackedState, STACKED_LOOSE } from "../cards/cardData";
 import { packZoneId, unpackZoneId, type ZoneId } from "../zones/zoneId";
@@ -17,6 +28,7 @@ export type TableMap = {
   players: Player;
   actions: Action;
   zones: Zone;
+  magnetic_actions: MagneticActionRow;
 };
 
 export type TableName = keyof TableMap;
@@ -41,6 +53,13 @@ export class DataManager {
     { zone: (a) => packZoneId(a.macroZone, a.layer) },
   );
   readonly zones = new ShadowedStore<Zone>((z) => z.macroZone);
+  readonly magneticActions = new ShadowedStore<MagneticActionRow>(
+    (m) => m.magneticActionId,
+    {
+      zone: (m) => packZoneId(m.macroZone, m.layer),
+      card: (m) => m.cardId,
+    },
+  );
 
   private spacetime: SpacetimeManager | null = null;
   private zonesUnsub: (() => void) | null = null;
@@ -82,6 +101,9 @@ export class DataManager {
         spacetime.subscribeActions(zoneId).catch((err) => {
           console.error(`[DataManager] subscribeActions(${zoneId}) failed`, err);
         });
+        spacetime.subscribeMagneticActions(zoneId).catch((err) => {
+          console.error(`[DataManager] subscribeMagneticActions(${zoneId}) failed`, err);
+        });
       }
     };
     const onRemoved = (zoneId: ZoneId) => {
@@ -92,6 +114,7 @@ export class DataManager {
       } else {
         spacetime.unsubscribeCards(zoneId);
         spacetime.unsubscribeActions(zoneId);
+        spacetime.unsubscribeMagneticActions(zoneId);
       }
     };
     const unsubActiveAdd = zones.onAdded("active", onAdded);
@@ -231,11 +254,11 @@ export class DataManager {
     if (table === "cards") {
       let merged = newRow as Card;
       const existing = this.cards.get((newRow as Card).cardId);
-      if (existing && existing.layer === 1 && (existing.microZone & 0xE0) === 0) {
+      if (existing && existing.layer && merged.layer === 1 && (merged.microZone & 0xE0) === 0) {
         // Server doesn't track inventory positions — preserve the client's
         // macroZone/microZone/microLocation so local drag state is not overwritten.
-        // Only applies when localQ (bits 5-7) is 0; non-zero means the card is
-        // hex-placed and the server's position is authoritative.
+        // Only applies when BOTH client and server have localQ=0; if the server is
+        // setting localQ≠0 (hex-placed), that placement is authoritative.
         merged = {
           ...merged,
           macroZone: existing.macroZone,
@@ -261,7 +284,7 @@ export class DataManager {
     if (table === "cards") {
       let merged = row as Card;
       const existing = this.cards.get((row as Card).cardId);
-      if (existing && existing.layer === 1 && (existing.microZone & 0xE0) === 0) {
+      if (existing && existing.layer && merged.layer === 1 && (merged.microZone & 0xE0) === 0) {
         merged = {
           ...merged,
           macroZone: existing.macroZone,
@@ -311,6 +334,7 @@ export class DataManager {
     this.players.clear();
     this.actions.clear();
     this.zones.clear();
+    this.magneticActions.clear();
     for (const key of Object.keys(this.keySetListeners) as TableName[]) {
       delete this.keySetListeners[key];
     }
@@ -323,6 +347,7 @@ export class DataManager {
       players: this.players,
       actions: this.actions,
       zones: this.zones,
+      magnetic_actions: this.magneticActions,
     };
     return lookup[table];
   }

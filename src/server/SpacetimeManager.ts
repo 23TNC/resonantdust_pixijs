@@ -3,6 +3,7 @@ import type {
   Identity,
   SubscriptionHandleImpl,
 } from "spacetimedb";
+import { debug } from "../debug";
 import type { DataManager } from "../state/DataManager";
 import { unpackZoneId, type ZoneId } from "../zones/zoneId";
 import type { DbConnection } from "./bindings";
@@ -99,6 +100,8 @@ export class SpacetimeManager {
     if (this.connection) return Promise.resolve(this.connection);
     if (this.connectPromise) return this.connectPromise;
 
+    debug.log(["spacetime"], `[spacetime] connecting to ${this.options.uri} / ${this.options.databaseName}`, 3);
+
     this.connectPromise = new Promise<DbConnection>((resolve, reject) => {
       const builder = this.options
         .builderFactory()
@@ -109,17 +112,20 @@ export class SpacetimeManager {
           this.identity = identity;
           this.token = token;
           this.tokenStore.set(this.tokenKey, token);
+          debug.log(["spacetime"], `[spacetime] connected identity=${identity.toHexString()}`, 3);
           this.bindTableHandlers(conn);
           this.options.onConnected?.(conn, identity);
           resolve(conn);
           void this.reissueAllSubscriptions();
         })
         .onConnectError((_ctx, error) => {
+          debug.log(["spacetime"], `[spacetime] connect error: ${error.message}`, 3);
           this.connectPromise = null;
           this.options.onConnectError?.(error);
           reject(error);
         })
         .onDisconnect((_ctx, error) => {
+          debug.log(["spacetime"], `[spacetime] disconnected${error ? `: ${error.message}` : ""}`, 3);
           this.connection = null;
           this.connectPromise = null;
           for (const sub of this.subscriptions.values()) {
@@ -185,6 +191,21 @@ export class SpacetimeManager {
     this.removeSubscription(`actions:${zoneId}`);
   }
 
+  async subscribeMagneticActions(zoneId: ZoneId): Promise<void> {
+    const { macroZone, layer } = unpackZoneId(zoneId);
+    return this.installSubscription(`magnetic_actions:${zoneId}`, {
+      queries: [
+        `SELECT * FROM magnetic_actions WHERE macro_zone = ${macroZone} AND layer = ${layer}`,
+      ],
+      scopeKey: `zone:${zoneId}`,
+      clearStore: () => this.clearMagneticActionsInZone(zoneId),
+    });
+  }
+
+  unsubscribeMagneticActions(zoneId: ZoneId): void {
+    this.removeSubscription(`magnetic_actions:${zoneId}`);
+  }
+
   async subscribeWorldZone(macroZone: number): Promise<void> {
     return this.installSubscription(`zones:${macroZone}`, {
       queries: [`SELECT * FROM zones WHERE macro_zone = ${macroZone}`],
@@ -220,6 +241,7 @@ export class SpacetimeManager {
    * (or by causing card creation, which fires the on_create matcher).
    */
   async submitStacks(stacks: InventoryStack[]): Promise<void> {
+    debug.log(["spacetime"], `[spacetime] submitStacks count=${stacks.length}`, 2);
     const conn = await this.connect();
     await conn.reducers.submitInventoryStacks({ stacks });
   }
@@ -245,16 +267,25 @@ export class SpacetimeManager {
     const existing = this.subscriptions.get(name);
 
     if (existing && existing.def.scopeKey === def.scopeKey) {
-      if (existing.inFlight) return existing.inFlight;
-      if (existing.handle?.isActive()) return;
+      if (existing.inFlight) {
+        debug.log(["spacetime"], `[spacetime] sub "${name}" already in flight, waiting`, 1);
+        return existing.inFlight;
+      }
+      if (existing.handle?.isActive()) {
+        debug.log(["spacetime"], `[spacetime] sub "${name}" already active, skipping`, 1);
+        return;
+      }
     }
 
     if (existing) {
       if (existing.handle?.isActive()) existing.handle.unsubscribe();
       if (existing.def.scopeKey !== def.scopeKey) {
+        debug.log(["spacetime"], `[spacetime] sub "${name}" scope changed ${existing.def.scopeKey} → ${def.scopeKey}, clearing store`, 2);
         existing.def.clearStore?.();
       }
     }
+
+    debug.log(["spacetime"], `[spacetime] installing sub "${name}" scope=${def.scopeKey}`, 2);
 
     const sub: ActiveSubscription = {
       name,
@@ -276,6 +307,7 @@ export class SpacetimeManager {
   private removeSubscription(name: string): void {
     const sub = this.subscriptions.get(name);
     if (!sub) return;
+    debug.log(["spacetime"], `[spacetime] removing sub "${name}"`, 2);
     if (sub.handle?.isActive()) sub.handle.unsubscribe();
     sub.def.clearStore?.();
     this.subscriptions.delete(name);
@@ -300,8 +332,18 @@ export class SpacetimeManager {
     }
   }
 
+  private clearMagneticActionsInZone(zoneId: ZoneId): void {
+    const keys = Array.from(this.data.magneticActions.byIndex("zone", zoneId));
+    for (const key of keys) {
+      const row = this.data.magneticActions.client.get(key);
+      if (row) this.data.applyServerDelete("magnetic_actions", row);
+    }
+  }
+
   private async openSubscription(sub: ActiveSubscription): Promise<void> {
+    debug.log(["spacetime"], `[spacetime] opening sub "${sub.name}" queries=${sub.def.queries.join(" | ")}`, 1);
     sub.handle = await this.subscribeRaw(sub.def.queries);
+    debug.log(["spacetime"], `[spacetime] sub "${sub.name}" applied`, 2);
     sub.def.onApplied?.();
   }
 
@@ -339,14 +381,17 @@ export class SpacetimeManager {
 
   private async reissueAllSubscriptions(): Promise<void> {
     const subs = Array.from(this.subscriptions.values());
+    debug.log(["spacetime"], `[spacetime] reissuing ${subs.length} subscription(s) after reconnect`, 3);
     await Promise.all(
       subs.map(async (sub) => {
+        debug.log(["spacetime"], `[spacetime] reissuing sub "${sub.name}"`, 1);
         sub.handle = null;
         const inFlight = this.openSubscription(sub);
         sub.inFlight = inFlight;
         try {
           await inFlight;
         } catch (err) {
+          debug.log(["spacetime"], `[spacetime] re-subscribe "${sub.name}" failed: ${err instanceof Error ? err.message : String(err)}`, 3);
           console.error(
             `[spacetime] re-subscribe ${sub.name} failed`,
             err,
@@ -368,62 +413,98 @@ export class SpacetimeManager {
     };
 
     conn.db.cards.onInsert((_ctx, row) =>
-      safe("cards", "onInsert", () => this.data.applyServerInsert("cards", row)),
+      safe("cards", "onInsert", () => {
+        debug.log(["spacetime"], `[spacetime] cards.onInsert id=${row.cardId}`, 2);
+        this.data.applyServerInsert("cards", row);
+      }),
     );
     conn.db.cards.onUpdate((_ctx, oldRow, newRow) =>
-      safe("cards", "onUpdate", () =>
-        this.data.applyServerUpdate("cards", oldRow, newRow),
-      ),
+      safe("cards", "onUpdate", () => {
+        debug.log(["spacetime"], `[spacetime] cards.onUpdate id=${newRow.cardId}`, 1);
+        this.data.applyServerUpdate("cards", oldRow, newRow);
+      }),
     );
     conn.db.cards.onDelete((_ctx, row) =>
-      safe("cards", "onDelete", () => this.data.applyServerDelete("cards", row)),
+      safe("cards", "onDelete", () => {
+        debug.log(["spacetime"], `[spacetime] cards.onDelete id=${row.cardId}`, 2);
+        this.data.applyServerDelete("cards", row);
+      }),
     );
 
     conn.db.players.onInsert((_ctx, row) =>
-      safe("players", "onInsert", () =>
-        this.data.applyServerInsert("players", row),
-      ),
+      safe("players", "onInsert", () => {
+        debug.log(["spacetime"], `[spacetime] players.onInsert id=${row.playerId} name=${row.name}`, 2);
+        this.data.applyServerInsert("players", row);
+      }),
     );
     conn.db.players.onUpdate((_ctx, oldRow, newRow) =>
-      safe("players", "onUpdate", () =>
-        this.data.applyServerUpdate("players", oldRow, newRow),
-      ),
+      safe("players", "onUpdate", () => {
+        debug.log(["spacetime"], `[spacetime] players.onUpdate id=${newRow.playerId} name=${newRow.name}`, 1);
+        this.data.applyServerUpdate("players", oldRow, newRow);
+      }),
     );
     conn.db.players.onDelete((_ctx, row) =>
-      safe("players", "onDelete", () =>
-        this.data.applyServerDelete("players", row),
-      ),
+      safe("players", "onDelete", () => {
+        debug.log(["spacetime"], `[spacetime] players.onDelete id=${row.playerId} name=${row.name}`, 2);
+        this.data.applyServerDelete("players", row);
+      }),
     );
 
     conn.db.actions.onInsert((_ctx, row) =>
-      safe("actions", "onInsert", () =>
-        this.data.applyServerInsert("actions", row),
-      ),
+      safe("actions", "onInsert", () => {
+        debug.log(["spacetime"], `[spacetime] actions.onInsert id=${row.actionId}`, 2);
+        this.data.applyServerInsert("actions", row);
+      }),
     );
     conn.db.actions.onUpdate((_ctx, oldRow, newRow) =>
-      safe("actions", "onUpdate", () =>
-        this.data.applyServerUpdate("actions", oldRow, newRow),
-      ),
+      safe("actions", "onUpdate", () => {
+        debug.log(["spacetime"], `[spacetime] actions.onUpdate id=${newRow.actionId}`, 1);
+        this.data.applyServerUpdate("actions", oldRow, newRow);
+      }),
     );
     conn.db.actions.onDelete((_ctx, row) =>
-      safe("actions", "onDelete", () =>
-        this.data.applyServerDelete("actions", row),
-      ),
+      safe("actions", "onDelete", () => {
+        debug.log(["spacetime"], `[spacetime] actions.onDelete id=${row.actionId}`, 2);
+        this.data.applyServerDelete("actions", row);
+      }),
+    );
+
+    conn.db.magnetic_actions.onInsert((_ctx, row) =>
+      safe("magnetic_actions", "onInsert", () => {
+        debug.log(["actions"], `[spacetime] magnetic_actions.onInsert id=${row.magneticActionId} cardId=${row.cardId}`, 2);
+        this.data.applyServerInsert("magnetic_actions", row);
+      }),
+    );
+    conn.db.magnetic_actions.onUpdate((_ctx, oldRow, newRow) =>
+      safe("magnetic_actions", "onUpdate", () => {
+        debug.log(["actions"], `[spacetime] magnetic_actions.onUpdate id=${newRow.magneticActionId} cardId=${newRow.cardId}`, 1);
+        this.data.applyServerUpdate("magnetic_actions", oldRow, newRow);
+      }),
+    );
+    conn.db.magnetic_actions.onDelete((_ctx, row) =>
+      safe("magnetic_actions", "onDelete", () => {
+        debug.log(["actions"], `[spacetime] magnetic_actions.onDelete id=${row.magneticActionId} cardId=${row.cardId}`, 2);
+        this.data.applyServerDelete("magnetic_actions", row);
+      }),
     );
 
     conn.db.zones.onInsert((_ctx, row) =>
       safe("zones", "onInsert", () => {
-        console.log("[spacetime] zones.onInsert macroZone=", row.macroZone);
+        debug.log(["spacetime"], `[spacetime] zones.onInsert macroZone=${row.macroZone}`, 2);
         this.data.applyServerInsert("zones", row);
       }),
     );
     conn.db.zones.onUpdate((_ctx, oldRow, newRow) =>
-      safe("zones", "onUpdate", () =>
-        this.data.applyServerUpdate("zones", oldRow, newRow),
-      ),
+      safe("zones", "onUpdate", () => {
+        debug.log(["spacetime"], `[spacetime] zones.onUpdate macroZone=${newRow.macroZone}`, 1);
+        this.data.applyServerUpdate("zones", oldRow, newRow);
+      }),
     );
     conn.db.zones.onDelete((_ctx, row) =>
-      safe("zones", "onDelete", () => this.data.applyServerDelete("zones", row)),
+      safe("zones", "onDelete", () => {
+        debug.log(["spacetime"], `[spacetime] zones.onDelete macroZone=${row.macroZone}`, 2);
+        this.data.applyServerDelete("zones", row);
+      }),
     );
   }
 }

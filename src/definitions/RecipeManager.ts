@@ -1,12 +1,28 @@
 import type { CardDefinition, DefinitionManager } from "./DefinitionManager";
+import { debug } from "../debug";
 import recipeIdsData from "../data/recipes/id.json";
+import recipeTypesData from "../data/recipe_types.json";
+
+interface RecipeTypesJson {
+  types: Record<string, { id: number }>;
+  categories: Record<string, { id: number }>;
+}
+
+type RecipeIdsJson = Record<string, Record<string, Record<string, number>>>;
 
 /**
- * What kind of trigger fires the recipe. We only run the matcher on stack
- * changes here, so `top_stack` / `bottom_stack` are the live cases; the
- * `on_create` type is parsed for completeness (server-side trigger only).
+ * Top-level recipe group type from the JSON schema.
+ * `"stack"` recipes fire on stack topology changes; `"on_create"` fires
+ * server-side when a card is created (parsed here for completeness).
  */
-export type RecipeType = "top_stack" | "bottom_stack" | "on_create";
+export type RecipeCategory = "stack" | "on_create";
+
+/**
+ * Direction key within a recipe group.
+ * `"up"` / `"down"` are the two stack branches evaluated by the client
+ * pre-filter; `"self"` is the `on_create` target (server-side only).
+ */
+export type RecipeDirection = "up" | "down" | "self";
 
 /**
  * Parsed entity grammar (see `data/recipes/AGENT.md`). Discriminated union;
@@ -46,17 +62,20 @@ export interface MatchWeight {
  *  the sentinel `"default"`, which tells the renderer to use the card's own
  *  title-bar color. `direction` controls which end fills first. */
 export interface RecipeProgressStyle {
-  readonly direction: "ltr" | "rtl";
+  readonly direction: "ltr" | "rtl" | "cw" | "ccw";
   readonly colorLeft: string;
   readonly colorRight: string;
 }
 
 export interface RecipeDef {
-  /** Stable integer ID from `data/recipes/id.json`. Matches `Action.recipe`
-   *  on the wire. Used as the priority tiebreak too — declaration order. */
-  readonly index: number;
+  /** Packed integer ID: u3 typeId | u3 categoryId | u10 recipeId.
+   *  Matches `Action.recipe` on the wire. */
+  readonly packed: number;
   readonly id: string;
-  readonly type: RecipeType;
+  /** Group type from the JSON schema (`"stack"` or `"on_create"`). */
+  readonly type: RecipeCategory;
+  /** Direction key within the group (`"up"`, `"down"`, or `"self"`). */
+  readonly direction: RecipeDirection;
   /** Optional precondition on the chain root (`chain[0]`). When set, the
    *  actor must start at `chain[1]+`. */
   readonly root: RecipeEntity | null;
@@ -67,6 +86,10 @@ export interface RecipeDef {
   readonly duration: number;
   /** Progress bar style, or null if the recipe has no style entry. */
   readonly style: RecipeProgressStyle | null;
+  /** Optional condition on the hex card that chain[0] is mounted on.
+   *  Only evaluated when chain[0] has stackedState == STACKED_ON_HEX (3).
+   *  When null the recipe has no hex precondition. */
+  readonly hex: RecipeEntity | null;
 }
 
 /**
@@ -84,18 +107,27 @@ export interface ActorMatch {
   readonly actorIdx: number;
 }
 
-interface RawRecipe {
-  id: string;
-  type: string;
-  slots?: unknown[];
-  root?: unknown;
-  reagents?: unknown;
-  products?: unknown;
-  duration?: unknown;
-  style?: unknown;
+interface RawRecipeGroup {
+  type?: unknown;
+  up?: unknown[];
+  down?: unknown[];
+  self?: unknown[];
 }
 
-const recipeModules = import.meta.glob<{ default: RawRecipe[] }>(
+/** Extract a usable duration number from a value that may be a plain number
+ *  or a tiered array `[[dur, conditions], ..., fallback]`. Returns the last
+ *  numeric element found, or 0 if none. */
+function parseDuration(d: unknown): number {
+  if (typeof d === "number") return d;
+  if (Array.isArray(d)) {
+    for (let i = d.length - 1; i >= 0; i--) {
+      if (typeof d[i] === "number") return d[i] as number;
+    }
+  }
+  return 0;
+}
+
+const recipeModules = import.meta.glob<{ default: RawRecipeGroup[] }>(
   "../data/recipes/[0-9]*.json",
   { eager: true },
 );
@@ -119,12 +151,12 @@ const recipeModules = import.meta.glob<{ default: RawRecipe[] }>(
  */
 export class RecipeManager {
   private readonly all: RecipeDef[] = [];
-  private readonly byType: Record<RecipeType, RecipeDef[]> = {
-    top_stack: [],
-    bottom_stack: [],
-    on_create: [],
-  };
-  private readonly byIndex = new Map<number, RecipeDef>();
+  private readonly byType = new Map<string, RecipeDef[]>([
+    ["stack:up", []],
+    ["stack:down", []],
+    ["on_create:self", []],
+  ]);
+  private readonly byPacked = new Map<number, RecipeDef>();
 
   constructor(private readonly definitions: DefinitionManager) {
     this.load();
@@ -135,15 +167,28 @@ export class RecipeManager {
     return this.all;
   }
 
-  /** All recipes of one type, in declaration order. Used by the matcher
-   *  loop in ActionManager. */
-  recipesOfType(type: RecipeType): readonly RecipeDef[] {
-    return this.byType[type];
+  /** All recipes for a category + direction, in declaration order. Used by
+   *  the matcher loop in ActionManager. */
+  recipesOfType(category: RecipeCategory, direction: RecipeDirection): readonly RecipeDef[] {
+    return this.byType.get(`${category}:${direction}`) ?? [];
   }
 
-  /** Look up a recipe by its stable ID (matches `ActionRow.recipe`). */
-  getByIndex(index: number): RecipeDef | undefined {
-    return this.byIndex.get(index);
+  /** Look up a recipe by its packed ID (matches `ActionRow.recipe` on the wire). */
+  decode(packed: number): RecipeDef | undefined {
+    return this.byPacked.get(packed);
+  }
+
+  /** Pack typeId (u3), categoryId (u3), and recipeId (u10) into one integer. */
+  static pack(typeId: number, categoryId: number, recipeId: number): number {
+    return ((typeId & 0x7) << 13) | ((categoryId & 0x7) << 10) | (recipeId & 0x3ff);
+  }
+
+  static unpack(packed: number): { typeId: number; categoryId: number; recipeId: number } {
+    return {
+      typeId:     (packed >>> 13) & 0x7,
+      categoryId: (packed >>> 10) & 0x7,
+      recipeId:    packed         & 0x3ff,
+    };
   }
 
   /**
@@ -206,11 +251,22 @@ export class RecipeManager {
     defs: readonly (CardDefinition | null)[],
     actorIdx: number,
     visibleEnd: number,
+    hexDef: CardDefinition | null,
   ): ActorMatch | null {
     const slotCount = recipe.slots.length;
     if (slotCount === 0) return null;
     if (actorIdx + slotCount > visibleEnd) return null;
     if (recipe.root !== null && actorIdx === 0) return null;
+
+    // Hex precondition: chain[0] must be mounted on a matching hex card.
+    // hexDef is null when chain[0] is not on a hex (loose or on rect).
+    let tileWeight = 0;
+    if (recipe.hex !== null) {
+      if (hexDef === null) return null;
+      const w = RecipeManager.entityMatchWeight(recipe.hex, hexDef);
+      if (w === 0) return null;
+      tileWeight = w;
+    }
 
     let rootWeight = 0;
     if (recipe.root !== null) {
@@ -239,7 +295,7 @@ export class RecipeManager {
 
     return {
       recipe,
-      weight: { tile: 0, root: rootWeight, slot: slotWeight },
+      weight: { tile: tileWeight, root: rootWeight, slot: slotWeight },
       claimed,
       actorIdx,
     };
@@ -252,20 +308,22 @@ export class RecipeManager {
    * wins), matching the server.
    *
    * Callers needing to filter out claim conflicts (e.g. a slot filler
-   * already held by another action) should iterate `recipesOfType(type)`
-   * and call `scoreRecipeForActor` directly so they can drop conflicting
-   * candidates before picking the winner.
+   * already held by another action) should iterate
+   * `recipesOfType(category, direction)` and call `scoreRecipeForActor`
+   * directly so they can drop conflicting candidates before picking the winner.
    */
   findBestForActor(
     chain: readonly number[],
     defs: readonly (CardDefinition | null)[],
     actorIdx: number,
     visibleEnd: number,
-    type: RecipeType,
+    category: RecipeCategory,
+    direction: RecipeDirection,
+    hexDef: CardDefinition | null,
   ): ActorMatch | null {
     let best: ActorMatch | null = null;
-    for (const recipe of this.byType[type]) {
-      const m = this.scoreRecipeForActor(recipe, chain, defs, actorIdx, visibleEnd);
+    for (const recipe of this.recipesOfType(category, direction)) {
+      const m = this.scoreRecipeForActor(recipe, chain, defs, actorIdx, visibleEnd, hexDef);
       if (!m) continue;
       if (!best || RecipeManager.compareWeight(m.weight, best.weight) > 0) best = m;
     }
@@ -275,72 +333,121 @@ export class RecipeManager {
   private load(): void {
     const entries = Object.entries(recipeModules);
     if (entries.length === 0) {
-      console.warn(
-        "[RecipeManager] no recipe files matched ../data/recipes/*.json — symlink missing?",
-      );
+      debug.warn(["recipes"], "[RecipeManager] no recipe files matched ../data/recipes/*.json — symlink missing?");
       return;
     }
-    // Sort by path so the load order is deterministic across hot-reload.
     entries.sort(([a], [b]) => a.localeCompare(b));
 
-    const recipeIds = recipeIdsData as Record<string, number>;
+    const types = recipeTypesData as unknown as RecipeTypesJson;
+    const typeIdByName = new Map<string, number>();
+    const categoryIdByName = new Map<string, number>();
+    for (const [name, entry] of Object.entries(types.types)) typeIdByName.set(name, entry.id);
+    for (const [name, entry] of Object.entries(types.categories)) categoryIdByName.set(name, entry.id);
+
+    const recipeIds = recipeIdsData as unknown as RecipeIdsJson;
     const seenIds = new Set<string>();
+
+    debug.log(["recipes"], `[RecipeManager] loading from ${entries.length} file(s): ${entries.map(([p]) => p).join(", ")}`);
+
     for (const [path, module] of entries) {
-      const arr = module.default;
-      if (!Array.isArray(arr)) continue;
-      for (const raw of arr) {
-        if (typeof raw?.id !== "string") {
-          console.warn(`[RecipeManager] ${path}: recipe missing id, skipping`);
-          continue;
+      const groups = module.default;
+      if (!Array.isArray(groups)) {
+        debug.warn(["recipes"], `[RecipeManager] ${path}: default export is not an array, skipping`);
+        continue;
+      }
+      debug.log(["recipes"], `[RecipeManager] ${path}: ${groups.length} group(s) found`);
+
+      for (const group of groups) {
+        const groupType = group.type;
+        if (groupType === "stack") {
+          const typeId = typeIdByName.get("stack")!;
+          const directions: [RecipeDirection, unknown[]][] = [
+            ["up",   Array.isArray(group.up)   ? group.up   : []],
+            ["down", Array.isArray(group.down) ? group.down : []],
+          ];
+          for (const [dir, entries_] of directions) {
+            const categoryId = categoryIdByName.get(dir)!;
+            debug.log(["recipes"], `[RecipeManager] ${path}: stack:${dir} — ${entries_.length} recipe(s)`);
+            for (const raw of entries_) {
+              this.loadEntry(raw, "stack", dir, typeId, categoryId, path, recipeIds, seenIds);
+            }
+          }
+        } else if (groupType === "on_create") {
+          const typeId = typeIdByName.get("on_create")!;
+          const categoryId = categoryIdByName.get("self")!;
+          const selfEntries = Array.isArray(group.self) ? group.self : [];
+          debug.log(["recipes"], `[RecipeManager] ${path}: on_create:self — ${selfEntries.length} recipe(s)`);
+          for (const raw of selfEntries) {
+            this.loadEntry(raw, "on_create", "self", typeId, categoryId, path, recipeIds, seenIds);
+          }
+        } else {
+          debug.warn(["recipes"], `[RecipeManager] ${path}: unknown group type "${String(groupType)}", skipping`);
         }
-        const index = recipeIds[raw.id];
-        if (index === undefined) {
-          throw new Error(`[RecipeManager] ${path}: recipe "${raw.id}" missing from data/recipes/id.json`);
-        }
-        const def = this.parseRecipe(raw, path, index);
-        if (!def) continue;
-        if (seenIds.has(def.id)) {
-          console.warn(
-            `[RecipeManager] ${path}: duplicate recipe id "${def.id}", keeping first`,
-          );
-          continue;
-        }
-        seenIds.add(def.id);
-        this.all.push(def);
-        this.byType[def.type].push(def);
-        this.byIndex.set(def.index, def);
       }
     }
+
+    debug.log(["recipes"], `[RecipeManager] done — ${this.all.length} total recipe(s): ${[...this.byType.entries()].map(([k, v]) => `${k}=${v.length}`).join(", ")}`);
+  }
+
+  private loadEntry(
+    raw: unknown,
+    category: RecipeCategory,
+    direction: RecipeDirection,
+    typeId: number,
+    categoryId: number,
+    path: string,
+    recipeIds: RecipeIdsJson,
+    seenIds: Set<string>,
+  ): void {
+    const entry = raw as Record<string, unknown>;
+    if (typeof entry?.id !== "string") {
+      debug.warn(["recipes"], `[RecipeManager] ${path}: recipe entry missing id, skipping`);
+      return;
+    }
+    const id = entry.id;
+    const recipeId = recipeIds[category]?.[direction]?.[id];
+    if (recipeId === undefined) {
+      throw new Error(`[RecipeManager] ${path}: recipe "${id}" missing from data/recipes/id.json under ${category}/${direction}`);
+    }
+    const packed = RecipeManager.pack(typeId, categoryId, recipeId);
+    const def = this.parseRecipe(entry, category, direction, path, packed);
+    if (!def) return;
+    if (seenIds.has(def.id)) {
+      debug.warn(["recipes"], `[RecipeManager] ${path}: duplicate recipe id "${def.id}", keeping first`);
+      return;
+    }
+    seenIds.add(def.id);
+    this.all.push(def);
+    this.byType.get(`${category}:${direction}`)!.push(def);
+    this.byPacked.set(def.packed, def);
+    debug.log(["recipes"], `[RecipeManager] registered "${id}" [${category}:${direction}] packed=0x${packed.toString(16)} slots=${def.slots.length} root=${def.root !== null} hex=${def.hex !== null}`);
   }
 
   private parseRecipe(
-    raw: RawRecipe,
+    raw: Record<string, unknown>,
+    category: RecipeCategory,
+    direction: RecipeDirection,
     path: string,
-    index: number,
+    packed: number,
   ): RecipeDef | null {
-    if (typeof raw?.id !== "string") {
-      console.warn(`[RecipeManager] ${path}: recipe missing id, skipping`);
-      return null;
-    }
-    const id = raw.id;
-    if (
-      raw.type !== "top_stack" &&
-      raw.type !== "bottom_stack" &&
-      raw.type !== "on_create"
-    ) {
-      console.warn(
-        `[RecipeManager] ${path}: recipe "${id}" has unknown type "${raw.type}", skipping`,
-      );
-      return null;
-    }
-    const type: RecipeType = raw.type;
+    const id = raw.id as string;
 
     let root: RecipeEntity | null = null;
     if (raw.root !== undefined) {
       try {
         root = this.parseEntity(raw.root, `${id}.root`);
       } catch (err) {
-        console.warn(`[RecipeManager] ${path}: ${(err as Error).message}`);
+        debug.warn(["recipes"], `[RecipeManager] ${path}: ${(err as Error).message}`);
+        return null;
+      }
+    }
+
+    let hex: RecipeEntity | null = null;
+    if (raw.hex !== undefined) {
+      try {
+        hex = this.parseEntity(raw.hex, `${id}.hex`);
+      } catch (err) {
+        debug.warn(["recipes"], `[RecipeManager] ${path}: ${(err as Error).message}`);
         return null;
       }
     }
@@ -351,18 +458,18 @@ export class RecipeManager {
       try {
         slots.push(this.parseEntity(slotsRaw[i], `${id}.slots[${i}]`));
       } catch (err) {
-        console.warn(`[RecipeManager] ${path}: ${(err as Error).message}`);
+        debug.warn(["recipes"], `[RecipeManager] ${path}: ${(err as Error).message}`);
         return null;
       }
     }
 
-    const duration = typeof raw.duration === "number" ? raw.duration : 0;
+    const duration = parseDuration(raw.duration);
 
     let style: RecipeProgressStyle | null = null;
     if (Array.isArray(raw.style) && raw.style.length === 3) {
       const [dir, left, right] = raw.style;
       if (
-        (dir === "ltr" || dir === "rtl") &&
+        (dir === "ltr" || dir === "rtl" || dir === "cw" || dir === "ccw") &&
         typeof left === "string" &&
         typeof right === "string"
       ) {
@@ -370,7 +477,7 @@ export class RecipeManager {
       }
     }
 
-    return { index, id, type, root, slots, duration, style };
+    return { packed, id, type: category, direction, root, slots, duration, style, hex };
   }
 
   /**

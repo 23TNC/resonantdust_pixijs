@@ -11,13 +11,11 @@ import {
 } from "spacetimedb";
 
 export default __t.row({
-  actionId: __t.u32().primaryKey().name("action_id"),
+  magneticActionId: __t.u32().primaryKey().name("magnetic_action_id"),
   cardId: __t.u32().name("card_id"),
   recipe: __t.u16(),
-  ownerId: __t.u32().name("owner_id"),
+  end: __t.u32(),
   layer: __t.u8(),
   macroZone: __t.u32().name("macro_zone"),
-  end: __t.u32(),
-  participants: __t.u8(),
-  flags: __t.u8(),
+  loopCount: __t.u8().name("loop_count"),
 });

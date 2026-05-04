@@ -37,6 +37,7 @@ import {
 import BootstrapReducer from "./bootstrap_reducer";
 import ClaimOrLoginReducer from "./claim_or_login_reducer";
 import DebugSpawnReducer from "./debug_spawn_reducer";
+import DebugSpawnWorldReducer from "./debug_spawn_world_reducer";
 import SubmitInventoryStacksReducer from "./submit_inventory_stacks_reducer";
 
 // Import all procedure arg schemas
@@ -44,6 +45,7 @@ import SubmitInventoryStacksReducer from "./submit_inventory_stacks_reducer";
 // Import all table schema definitions
 import ActionsRow from "./actions_table";
 import CardsRow from "./cards_table";
+import MagneticActionsRow from "./magnetic_actions_table";
 import PlayersRow from "./players_table";
 import ZonesRow from "./zones_table";
 
@@ -91,6 +93,23 @@ const tablesSchema = __schema({
       { name: 'cards_card_id_key', constraint: 'unique', columns: ['cardId'] },
     ],
   }, CardsRow),
+  magnetic_actions: __table({
+    name: 'magnetic_actions',
+    indexes: [
+      { accessor: 'card_id', name: 'magnetic_actions_card_id_idx_btree', algorithm: 'btree', columns: [
+        'cardId',
+      ] },
+      { accessor: 'macro_zone', name: 'magnetic_actions_macro_zone_idx_btree', algorithm: 'btree', columns: [
+        'macroZone',
+      ] },
+      { accessor: 'magnetic_action_id', name: 'magnetic_actions_magnetic_action_id_idx_btree', algorithm: 'btree', columns: [
+        'magneticActionId',
+      ] },
+    ],
+    constraints: [
+      { name: 'magnetic_actions_magnetic_action_id_key', constraint: 'unique', columns: ['magneticActionId'] },
+    ],
+  }, MagneticActionsRow),
   players: __table({
     name: 'players',
     indexes: [
@@ -127,6 +146,7 @@ const reducersSchema = __reducers(
   __reducerSchema("bootstrap", BootstrapReducer),
   __reducerSchema("claim_or_login", ClaimOrLoginReducer),
   __reducerSchema("debug_spawn", DebugSpawnReducer),
+  __reducerSchema("debug_spawn_world", DebugSpawnWorldReducer),
   __reducerSchema("submit_inventory_stacks", SubmitInventoryStacksReducer),
 );
 

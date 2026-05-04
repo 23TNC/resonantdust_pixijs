@@ -1,5 +1,6 @@
 import type { Zone } from "../server/bindings/types";
 import { DefinitionManager, type CardDefinition } from "../definitions/DefinitionManager";
+import { debug } from "../debug";
 
 /**
  * Each Zone covers an 8×8 block of hex positions.
@@ -61,7 +62,7 @@ export function decodeZoneTiles(
   const ts: bigint[] = [zone.t0, zone.t1, zone.t2, zone.t3,
                         zone.t4, zone.t5, zone.t6, zone.t7];
 
-  console.log(
+  debug.log(["zone"],
     `[decodeZoneTiles] macroZone=${zone.macroZone} → zoneQ=${zoneQ} zoneR=${zoneR}` +
     ` packedDef=0x${zone.packedDefinition.toString(16).padStart(2,"0")}` +
     ` typeId=${typeId} categoryId=${categoryId}` +
@@ -79,7 +80,7 @@ export function decodeZoneTiles(
       const packed = DefinitionManager.pack(typeId, categoryId, definitionId);
       const def = definitions.decode(packed);
       if (!def) {
-        console.warn(
+        debug.warn(["zone"],
           `[decodeZoneTiles] no def for packed=0x${packed.toString(16)}` +
           ` (typeId=${typeId} categoryId=${categoryId} definitionId=${definitionId})` +
           ` at tIndex=${tIndex} byteIndex=${byteIndex}`,
@@ -91,9 +92,7 @@ export function decodeZoneTiles(
     }
   }
 
-  console.log(
-    `[decodeZoneTiles] → ${result.length} tiles decoded, ${missCount} definition misses`,
-  );
+  debug.log(["zone"], `[decodeZoneTiles] → ${result.length} tiles decoded, ${missCount} definition misses`);
   return result;
 }
 

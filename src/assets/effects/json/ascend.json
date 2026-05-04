@@ -4,18 +4,18 @@
 		"end": 1
 	},
 	"scale": {
-		"start": 0.5,
-		"end": 0.01,
-		"minimumScaleMultiplier": 0.1
+		"start": 0.7,
+		"end": 0.005,
+		"minimumScaleMultiplier": 0.2
 	},
 	"color": {
 		"start": "#d100d1",
 		"end": "#0b1426"
 	},
 	"speed": {
-		"start": 200,
+		"start": 500,
 		"end": 0,
-		"minimumSpeedMultiplier": 0.01
+		"minimumSpeedMultiplier": 0.1
 	},
 	"acceleration": {
 		"x": 0,
@@ -38,7 +38,7 @@
 	"blendMode": "normal",
 	"frequency": 0.001,
 	"emitterLifetime": 0.4,
-	"maxParticles": 200,
+	"maxParticles": 20,
 	"pos": {
 		"x": 0,
 		"y": 0
@@ -47,7 +47,7 @@
 	"spawnType": "rect",
 	"spawnRect": {
 		"x": -36,
-		"y": 0,
+		"y": 18,
 		"w": 72,
 		"h": 0
 	}

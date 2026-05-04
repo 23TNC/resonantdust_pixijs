@@ -1,39 +1,32 @@
-import { Graphics, Text } from "pixi.js";
-import type { CardDefinition } from "../definitions/DefinitionManager";
+import { Container, Graphics, Sprite, Text, Texture } from "pixi.js";
 import type { GameContext } from "../GameContext";
 import { LayoutNode } from "../layout/LayoutNode";
-import { decodeZoneTiles, TILE_SIZE, unpackMacroZone } from "./worldCoords";
+import { debug } from "../debug";
+import { HEX_RADIUS, HEX_WIDTH, HEX_HEIGHT } from "../cards/HexCardVisual";
+import { EMPTY_TILE_PACKED } from "../assets/TextureManager";
+import { decodeZoneTiles, unpackMacroZone } from "./worldCoords";
 
 const BG_COLOR    = "#0d1218";
-const TILE_FILL   = "#141e28";
-const TILE_STROKE = "#243040";
-const TILE_STROKE_WIDTH = 1;
 const LABEL_COLOR = "#3a4a5a";
-
-function hexCorners(cx: number, cy: number, size: number): number[] {
-  const pts: number[] = [];
-  for (let i = 0; i < 6; i++) {
-    const a = (Math.PI / 3) * i + Math.PI / 6; // pointy-top
-    pts.push(cx + size * Math.cos(a), cy + size * Math.sin(a));
-  }
-  return pts;
-}
 
 /**
  * Renders the world as a pointy-top hex tile grid.
  *
  * The "viewport" anchor from ZoneManager maps to the center of this node.
- * Tiles are drawn empty by default; when zone data arrives from DataManager
- * they are coloured using their CardDefinition's style palette.
+ * All tiles are rendered as sprites from the shared TextureManager atlas.
+ * Empty tiles (definition_id 0 / unknown zones) use the EMPTY_TILE_PACKED
+ * texture and show a coordinate label for debugging.
  */
 export class LayoutWorld extends LayoutNode {
   private readonly bg = new Graphics();
-  private readonly tiles = new Graphics();
+  private readonly tileLayer = new Container();
   private readonly labelPool: Text[] = [];
   private readonly clipMask = new Graphics();
+  private readonly spritePool: Sprite[] = [];
+  private readonly activeSprites: Sprite[] = [];
 
-  /** Flat tile cache keyed by "${q},${r}". Populated from zone insert/update. */
-  private readonly tileData = new Map<string, CardDefinition>();
+  /** Flat tile cache keyed by "${q},${r}". Stores packed definition id. */
+  private readonly tileData = new Map<string, number>();
 
   private viewQ = 0;
   private viewR = 0;
@@ -44,7 +37,7 @@ export class LayoutWorld extends LayoutNode {
   constructor(ctx: GameContext) {
     super();
     this.container.addChild(this.bg);
-    this.container.addChild(this.tiles);
+    this.container.addChild(this.tileLayer);
     this.container.addChild(this.clipMask);
     this.container.mask = this.clipMask;
 
@@ -56,7 +49,7 @@ export class LayoutWorld extends LayoutNode {
     });
 
     this.unsubZones = ctx.data.subscribe("zones", (change) => {
-      console.log(`[LayoutWorld] zone change kind=${change.kind} key=${change.key}`);
+      debug.log(["zone"], `[LayoutWorld] zone change kind=${change.kind} key=${change.key}`);
       const zone = change.kind === "delete" ? change.oldValue : change.newValue;
       if (!zone) { this.invalidate(); return; }
 
@@ -69,7 +62,7 @@ export class LayoutWorld extends LayoutNode {
 
       if (change.kind !== "delete") {
         for (const tile of decodeZoneTiles(zone, ctx.definitions)) {
-          this.tileData.set(`${tile.q},${tile.r}`, tile.definition);
+          this.tileData.set(`${tile.q},${tile.r}`, tile.definition.packed);
         }
       }
 
@@ -79,7 +72,7 @@ export class LayoutWorld extends LayoutNode {
     // Hydrate from zones already in the store.
     for (const zone of ctx.data.values("zones")) {
       for (const tile of decodeZoneTiles(zone, ctx.definitions)) {
-        this.tileData.set(`${tile.q},${tile.r}`, tile.definition);
+        this.tileData.set(`${tile.q},${tile.r}`, tile.definition.packed);
       }
     }
   }
@@ -92,9 +85,26 @@ export class LayoutWorld extends LayoutNode {
     const dq = q - this.viewQ;
     const dr = r - this.viewR;
     return {
-      x: this.width  / 2 + TILE_SIZE * (Math.sqrt(3) * dq + Math.sqrt(3) / 2 * dr),
-      y: this.height / 2 + TILE_SIZE * (3 / 2 * dr),
+      x: this.width  / 2 + HEX_RADIUS * (Math.sqrt(3) * dq + Math.sqrt(3) / 2 * dr),
+      y: this.height / 2 + HEX_RADIUS * (3 / 2 * dr),
     };
+  }
+
+  private _acquireSprite(): Sprite {
+    const s = this.spritePool.pop() ?? new Sprite(Texture.EMPTY);
+    s.visible = true;
+    this.tileLayer.addChild(s);
+    this.activeSprites.push(s);
+    return s;
+  }
+
+  private _releaseActiveSprites(): void {
+    for (const s of this.activeSprites) {
+      s.visible = false;
+      this.tileLayer.removeChild(s);
+      this.spritePool.push(s);
+    }
+    this.activeSprites.length = 0;
   }
 
   protected override layout(): void {
@@ -113,8 +123,9 @@ export class LayoutWorld extends LayoutNode {
     }
     this.labelPool.length = 0;
 
-    this.tiles.clear();
-    const range = Math.ceil(Math.max(w, h) / (TILE_SIZE * Math.sqrt(3))) + 2;
+    this._releaseActiveSprites();
+
+    const range = Math.ceil(Math.max(w, h) / (HEX_RADIUS * Math.sqrt(3))) + 2;
 
     // Round to nearest integer tile so lookups always hit integer keys,
     // while the float viewQ/viewR is still used inside toScreen() for
@@ -128,38 +139,36 @@ export class LayoutWorld extends LayoutNode {
         const r = baseR + dr;
         const { x, y } = this.toScreen(q, r);
 
-        if (x + TILE_SIZE < 0 || x - TILE_SIZE > w) continue;
-        if (y + TILE_SIZE < 0 || y - TILE_SIZE > h) continue;
+        if (x + HEX_WIDTH  / 2 < 0 || x - HEX_WIDTH  / 2 > w) continue;
+        if (y + HEX_HEIGHT / 2 < 0 || y - HEX_HEIGHT / 2 > h) continue;
 
-        const def = this.tileData.get(`${q},${r}`);
-        const fill   = def ? def.style[0] : TILE_FILL;
-        const stroke = def ? def.style[2] : TILE_STROKE;
+        const packed = this.tileData.get(`${q},${r}`);
 
-        const pts = hexCorners(x, y, TILE_SIZE - 1);
-        this.tiles
-          .poly(pts).fill({ color: fill })
-          .poly(pts).stroke({ color: stroke, width: TILE_STROKE_WIDTH });
-
-        const labelText = def ? def.name : `${q},${r}`;
-        const labelFill = def ? def.style[1] : LABEL_COLOR;
-        const label = new Text({
-          text: labelText,
-          style: {
-            fill: labelFill,
-            fontFamily: "Segoe UI",
-            fontSize: def ? 12 : 10,
-            fontWeight: def ? "700" : "400",
-            align: "center",
-            wordWrap: true,
-            wordWrapWidth: TILE_SIZE * Math.sqrt(3) - 8,
-          },
-        });
-        label.anchor.set(0.5);
-        // Defined tiles: title sits in the upper shoulder of the hex.
-        // Empty tiles: coordinate label stays centered.
-        label.position.set(x, def ? y - TILE_SIZE * 0.45 : y);
-        this.container.addChild(label);
-        this.labelPool.push(label);
+        const sprite = this._acquireSprite();
+        if (packed !== undefined) {
+          const def = this.ctx.definitions.decode(packed) ?? null;
+          sprite.texture = this.ctx.textures.getHexTexture(def, packed);
+        } else {
+          sprite.texture = this.ctx.textures.getHexTexture(null, EMPTY_TILE_PACKED);
+          /*
+          const label = new Text({
+            text: `${q},${r}`,
+            style: {
+              fill: LABEL_COLOR,
+              fontFamily: "Segoe UI",
+              fontSize: 10,
+              fontWeight: "400",
+              align: "center",
+              wordWrap: true,
+              wordWrapWidth: HEX_WIDTH - 8,
+            },
+          });
+          label.anchor.set(0.5);
+          label.position.set(x, y);
+          this.container.addChild(label);
+          this.labelPool.push(label);*/
+        }
+        sprite.position.set(x - HEX_WIDTH / 2, y - HEX_HEIGHT / 2);
       }
     }
   }
@@ -169,6 +178,10 @@ export class LayoutWorld extends LayoutNode {
     this.unsubZones();
     for (const t of this.labelPool) t.destroy();
     this.labelPool.length = 0;
+    for (const s of this.activeSprites) s.destroy();
+    this.activeSprites.length = 0;
+    for (const s of this.spritePool) s.destroy();
+    this.spritePool.length = 0;
     super.destroy();
   }
 }

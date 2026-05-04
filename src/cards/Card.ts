@@ -1,5 +1,6 @@
 import type { CachedAction } from "../actions/ActionManager";
 import { DefinitionManager } from "../definitions/DefinitionManager";
+import { debug } from "../debug";
 import type { GameContext } from "../GameContext";
 import type { LayoutNode } from "../layout/LayoutNode";
 import type { Card as CardRow } from "../server/bindings/types";
@@ -80,15 +81,13 @@ export class Card {
   ): Card | null {
     const row = ctx.data.get("cards", cardId);
     if (!row) {
-      console.warn(`[Card] no row for card ${cardId}, skipping spawn`);
+      debug.warn(["cards"], `[Card] no row for card ${cardId}, skipping spawn`);
       return null;
     }
     const { typeId } = DefinitionManager.unpack(row.packedDefinition);
     const shape = ctx.definitions.shape(typeId);
     if (shape === undefined) {
-      console.warn(
-        `[Card] unknown shape for typeId=${typeId} (card ${cardId}); defaulting to rect`,
-      );
+      debug.warn(["cards"], `[Card] unknown shape for typeId=${typeId} (card ${cardId}); defaulting to rect`);
     }
     if (shape === "hex") {
       return new Card(
@@ -206,7 +205,10 @@ export class Card {
         if (this.currentStackDirection === "hex" && parent.layoutCard.hexMount) {
           parent.layoutCard.hexMount.addChild(this.layoutCard);
         } else {
-          this.layoutCard.attachToStack(parent.layoutCard);
+          this.layoutCard.attachToStack(
+            parent.layoutCard,
+            this.currentStackDirection === "bottom" ? "bottom" : "top",
+          );
         }
         return;
       }
@@ -348,7 +350,9 @@ export class Card {
           }
           nextParent = (newStackDirection === "hex" && parent.layoutCard.hexMount)
             ? parent.layoutCard.hexMount
-            : parent.layoutCard.stackHost;
+            : newStackDirection === "bottom"
+              ? parent.layoutCard.stackBottomHost
+              : parent.layoutCard.stackTopHost;
         } else {
           nextParent = this.layoutCard.ctx.layout?.surfaceFor(newZoneId) ?? null;
         }

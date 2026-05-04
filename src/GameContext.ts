@@ -1,6 +1,8 @@
 import type { Application } from "pixi.js";
 import type { ActionManager } from "./actions/ActionManager";
+import type { TextureManager } from "./assets/TextureManager";
 import type { CardManager } from "./cards/CardManager";
+import type { DrawCallCounter } from "./debug/DrawCallCounter";
 import type { DefinitionManager } from "./definitions/DefinitionManager";
 import type { RecipeManager } from "./definitions/RecipeManager";
 import type { PlayerSession } from "./features/PlayerSession";
@@ -14,6 +16,8 @@ import type { ZoneManager } from "./zones/ZoneManager";
 
 export interface GameContext {
   readonly app: Application;
+  readonly textures: TextureManager;
+  readonly drawCallCounter: DrawCallCounter;
   readonly scenes: SceneManager;
   readonly definitions: DefinitionManager;
   readonly recipes: RecipeManager;

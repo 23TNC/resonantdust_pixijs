@@ -73,9 +73,16 @@ export class GameScene extends Scene {
     void this.particleManager.init();
 
     this.releaseCards = ctx.zones.ensure(inventoryZoneId);
-    this.releaseKeys = this.inputManager.onKey("key_down", ({ code }) => {
-      if (code === "KeyE") this.gameInventory.snapToGrid();
+    const releaseKeyDown = this.inputManager.onKey("key_down", ({ code }) => {
+      if (code === "KeyE") {
+        this.gameInventory.snapToGrid();
+        this.gameLayout.inventoryView.showGrid(true);
+      }
     });
+    const releaseKeyUp = this.inputManager.onKey("key_up", ({ code }) => {
+      if (code === "KeyE") this.gameLayout.inventoryView.showGrid(false);
+    });
+    this.releaseKeys = () => { releaseKeyDown(); releaseKeyUp(); };
   }
 
   onExit(): void {
@@ -113,7 +120,8 @@ export class GameScene extends Scene {
     this.gameManager.tick(deltaMS);
     this.particleManager.tick(deltaMS);
     this.worldPanManager.update();
-    this.gameLayout.titleBar.updateFps(deltaMS);
+    const drawCalls = this.ctxRef?.drawCallCounter.readAndReset() ?? 0;
+    this.gameLayout.titleBar.updateStats(deltaMS, drawCalls);
     this.gameLayout.layoutIfDirty();
   }
 }

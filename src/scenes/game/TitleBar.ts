@@ -11,6 +11,7 @@ export class TitleBar extends LayoutNode {
 
   private readonly bg = new Graphics();
   private readonly nameText: Text;
+  private readonly drawCallsText: Text;
   private readonly fpsText: Text;
   private fps = 60;
 
@@ -26,6 +27,16 @@ export class TitleBar extends LayoutNode {
     });
     this.nameText.anchor.set(0, 0.5);
 
+    this.drawCallsText = new Text({
+      text: "-- dc",
+      style: {
+        fill: 0x999999,
+        fontFamily: "ui-monospace, monospace",
+        fontSize: FONT_SIZE,
+      },
+    });
+    this.drawCallsText.anchor.set(1, 0.5);
+
     this.fpsText = new Text({
       text: "-- fps",
       style: {
@@ -38,13 +49,15 @@ export class TitleBar extends LayoutNode {
 
     this.container.addChild(this.bg);
     this.container.addChild(this.nameText);
+    this.container.addChild(this.drawCallsText);
     this.container.addChild(this.fpsText);
   }
 
-  updateFps(deltaMS: number): void {
+  updateStats(deltaMS: number, drawCalls: number): void {
     if (deltaMS <= 0) return;
     const instant = 1000 / deltaMS;
     this.fps = this.fps * (1 - FPS_SMOOTHING) + instant * FPS_SMOOTHING;
+    this.drawCallsText.text = `${drawCalls} dc`;
     this.fpsText.text = `${Math.round(this.fps)} fps`;
   }
 
@@ -55,5 +68,6 @@ export class TitleBar extends LayoutNode {
     const cy = this.height / 2;
     this.nameText.position.set(PADDING, cy);
     this.fpsText.position.set(this.width - PADDING, cy);
+    this.drawCallsText.position.set(this.fpsText.x - this.fpsText.width - PADDING, cy);
   }
 }

@@ -1,4 +1,5 @@
 import type { GameContext } from "../GameContext";
+import { debug } from "../debug";
 import { LayoutNode } from "../layout/LayoutNode";
 import type { Card as CardRow } from "../server/bindings/types";
 import type { ZoneId } from "../zones/zoneId";
@@ -56,14 +57,17 @@ export abstract class LayoutCard extends LayoutNode {
   protected readonly state: CardVisualState = { ...DEFAULT_STATE };
 
   /**
-   * Host for stacked-child LayoutCards. A stacked card re-parents into its
-   * parent's stackHost rather than the zone surface, so the parent's
-   * transform automatically carries it (drag, tween, all free). Subclasses
-   * own when/how to attach it to their own container so they can pick the
-   * z-order (usually after bg/title so children cover the parent's body)
-   * and the local position (e.g. (0, titleHeight) for top-stack).
+   * Host for top-stacked children (STACKED_ON_RECT_X). Drawn above
+   * stackBottomHost so top-stack titlebars render over bottom-stack ones
+   * if they ever overlap. Both hosts sit behind the card's own visual
+   * layers so stacked children peek out from behind the parent.
    */
-  readonly stackHost: LayoutNode = new StackHost();
+  readonly stackTopHost: LayoutNode = new StackHost();
+  /**
+   * Host for bottom-stacked children (STACKED_ON_RECT_Y). Drawn below
+   * stackTopHost — bottom stacks are always under top stacks in z-order.
+   */
+  readonly stackBottomHost: LayoutNode = new StackHost();
 
   /**
    * Front-mount host for a rect card mounted on top of this hex card
@@ -94,10 +98,10 @@ export abstract class LayoutCard extends LayoutNode {
     super();
     this.cardId = cardId;
     this.setContext(ctx);
-    // stackHost is the FIRST child so it draws *behind* whatever the
-    // subclass paints (bg/title/overlay). Stacked children live in here;
-    // they peek out from behind their parent on the appropriate edge.
-    this.addChild(this.stackHost);
+    // Both stack hosts draw *behind* whatever the subclass paints
+    // (bg/title/overlay). Bottom host first so top-stack always wins z-order.
+    this.addChild(this.stackBottomHost);
+    this.addChild(this.stackTopHost);
   }
 
   /**
@@ -176,22 +180,19 @@ export abstract class LayoutCard extends LayoutNode {
   attach(zoneId: ZoneId): void {
     const surface = this.ctx.layout?.surfaceFor(zoneId);
     if (!surface) {
-      console.warn(
-        `[LayoutCard] no surface for zone ${zoneId}; card ${this.cardId} not attached`,
-      );
+      debug.warn(["cards"], `[LayoutCard] no surface for zone ${zoneId}; card ${this.cardId} not attached`);
       return;
     }
     surface.addChild(this);
   }
 
   /**
-   * Self-attach to a parent card's stackHost. Stacked cards live inside their
-   * parent's container — the parent's transform carries them for drag/tween,
-   * so the child needs no special drag or position handling beyond a
-   * (0, 0) tween target inside stackHost.
+   * Self-attach to a parent card's top or bottom stack host. The parent's
+   * transform carries this card for drag/tween automatically.
    */
-  attachToStack(parent: LayoutCard): void {
-    parent.stackHost.addChild(this);
+  attachToStack(parent: LayoutCard, direction: "top" | "bottom"): void {
+    if (direction === "bottom") parent.stackBottomHost.addChild(this);
+    else parent.stackTopHost.addChild(this);
   }
 
   detach(): void {
@@ -250,6 +251,11 @@ export abstract class LayoutCard extends LayoutNode {
     this.displayY += dy * TWEEN_LERP;
     this.setBounds(this.displayX, this.displayY, this.width, this.height);
     return true;
+  }
+
+  override setBounds(x: number, y: number, width: number, height: number): void {
+    super.setBounds(x, y, width, height);
+    this.zIndex = Math.round(y + height);
   }
 
   /** Resize without disturbing the tween target / display. */

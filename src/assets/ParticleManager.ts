@@ -1,6 +1,7 @@
 import { Assets, ParticleContainer, Texture } from "pixi.js";
 import { type EmitterConfigV3, Emitter, upgradeConfig } from "@spd789562/particle-emitter";
 import { LayoutNode } from "../layout/LayoutNode";
+import { debug } from "../debug";
 
 // Eagerly load all effect JSON configs from the effects folder.
 // Any new .json file added to assets/effects/json/ is picked up automatically
@@ -239,7 +240,7 @@ export class ParticleManager extends LayoutNode {
         return;
       }
     }
-    console.warn("ParticleManager._patchColors: no color or colorStatic behavior found — startColor/endColor overrides ignored.");
+    debug.warn(["particles"], "ParticleManager._patchColors: no color or colorStatic behavior found — startColor/endColor overrides ignored.");
   }
 
   private _createHandle(

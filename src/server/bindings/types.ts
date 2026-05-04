@@ -13,7 +13,7 @@ import {
 export const Action = __t.object("Action", {
   actionId: __t.u32(),
   cardId: __t.u32(),
-  recipe: __t.u32(),
+  recipe: __t.u16(),
   ownerId: __t.u32(),
   layer: __t.u8(),
   macroZone: __t.u32(),
@@ -27,6 +27,7 @@ export const ActionScheduler = __t.object("ActionScheduler", {
   scheduledId: __t.u64(),
   scheduledAt: __t.scheduleAt(),
   actionId: __t.u32(),
+  hexCardId: __t.u32(),
 });
 export type ActionScheduler = __Infer<typeof ActionScheduler>;
 
@@ -52,20 +53,34 @@ export const InventoryStack = __t.object("InventoryStack", {
   root: __t.u32(),
   stackUp: __t.array(__t.u32()),
   stackDown: __t.array(__t.u32()),
+  hex: __t.option(__t.u32()),
 });
 export type InventoryStack = __Infer<typeof InventoryStack>;
 
-export const MagneticInputs = __t.object("MagneticInputs", {
+export const MagneticAction = __t.object("MagneticAction", {
+  magneticActionId: __t.u32(),
+  cardId: __t.u32(),
+  recipe: __t.u16(),
+  end: __t.u32(),
+  layer: __t.u8(),
+  macroZone: __t.u32(),
+  loopCount: __t.u8(),
+});
+export type MagneticAction = __Infer<typeof MagneticAction>;
+
+export const MagneticActionScheduler = __t.object("MagneticActionScheduler", {
   scheduledId: __t.u64(),
   scheduledAt: __t.scheduleAt(),
-  actionId: __t.u32(),
+  magneticActionId: __t.u32(),
+  ownerId: __t.u32(),
+  flags: __t.u8(),
   slot1: __t.u32(),
   slot2: __t.u32(),
   slot3: __t.u32(),
   slot4: __t.u32(),
   slot5: __t.u32(),
 });
-export type MagneticInputs = __Infer<typeof MagneticInputs>;
+export type MagneticActionScheduler = __Infer<typeof MagneticActionScheduler>;
 
 export const Player = __t.object("Player", {
   playerId: __t.u32(),

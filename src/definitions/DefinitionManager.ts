@@ -1,5 +1,6 @@
 import cardTypesData from "../data/card_types.json";
 import cardIdsData from "../data/cards/id.json";
+import { debug } from "../debug";
 
 export type ColorTriple = readonly [string, string, string];
 export type AspectEntry = readonly [name: string, value: number];
@@ -133,9 +134,7 @@ export class DefinitionManager {
   private loadCards(): void {
     const entries = Object.entries(cardModules);
     if (entries.length === 0) {
-      console.warn(
-        "[DefinitionManager] no card files matched ../data/cards/*.json — symlink missing?",
-      );
+      debug.warn(["definitions"], "[DefinitionManager] no card files matched ../data/cards/*.json — symlink missing?");
       return;
     }
 
@@ -145,16 +144,12 @@ export class DefinitionManager {
       for (const group of module.default) {
         const typeId = this.typeIdByName.get(group.card_type);
         if (typeId === undefined) {
-          console.warn(
-            `[DefinitionManager] ${path}: unknown card_type "${group.card_type}", skipping group`,
-          );
+          debug.warn(["definitions"], `[DefinitionManager] ${path}: unknown card_type "${group.card_type}", skipping group`);
           continue;
         }
         const categoryId = this.categoryIdByName.get(group.category);
         if (categoryId === undefined) {
-          console.warn(
-            `[DefinitionManager] ${path}: unknown category "${group.category}", skipping group`,
-          );
+          debug.warn(["definitions"], `[DefinitionManager] ${path}: unknown category "${group.category}", skipping group`);
           continue;
         }
 
