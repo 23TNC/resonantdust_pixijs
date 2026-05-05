@@ -59,6 +59,7 @@ export class ShadowedStore<T> {
     indexes: IndexMap<T> = {},
     readonly delayMs = 0,
     private readonly delayForRow?: (row: T) => number,
+    private readonly flushTransform?: (pending: T, current: T | undefined) => T,
   ) {
     for (const [name, fn] of Object.entries(indexes)) {
       this.indexes.set(name, { keyOf: fn, forward: new Map() });
@@ -220,15 +221,16 @@ export class ShadowedStore<T> {
       } else {
         const prev = this.client.get(key);
         const wasPresent = prev !== undefined;
+        const row = this.flushTransform ? this.flushTransform(entry.row, prev) : entry.row;
         this.flushedAt.set(key, now / 1000);
-        this.client.set(key, entry.row);
-        this.updateIndexes(prev, entry.row, key);
+        this.client.set(key, row);
+        this.updateIndexes(prev, row, key);
         this.emit({
           kind: wasPresent ? "update" : "insert",
           source: "server",
           key,
           oldValue: prev,
-          newValue: entry.row,
+          newValue: row,
         });
         if (!wasPresent) inserted.push(key);
       }
@@ -243,6 +245,20 @@ export class ShadowedStore<T> {
    *  is still in the delay window). */
   hasPending(key: number | string): boolean {
     return this.pending.has(key);
+  }
+
+  /** Returns 0-1 progress toward the pending insert/update entry flushing into
+   *  the client map, or null if there is no such entry. Used to show immediate
+   *  visual feedback while the display delay is counting down. */
+  getPendingFlushProgress(key: number | string, nowMs: number): number | null {
+    const entry = this.pending.get(key);
+    if (!entry || (entry.kind !== "insert" && entry.kind !== "update")) return null;
+    const received = this.receivedAt.get(key);
+    if (received === undefined) return null;
+    const receivedMs = received * 1000;
+    const total = entry.applyAt - receivedMs;
+    if (total <= 0) return 1;
+    return Math.min(1, Math.max(0, (nowMs - receivedMs) / total));
   }
 
   /** Queues a dying transition for `row` to fire after `delayMs`. Until then

@@ -67,6 +67,12 @@ export class DataManager {
     { zone: (c) => packZoneId(c.macroZone, c.layer) },
     DataManager.ACTION_DISPLAY_DELAY_MS,
     (c) => DataManager.rowDelay(c as { deltaT?: number }),
+    (pending, current) => {
+      if (current && current.layer === 1 && pending.layer === 1 && (pending.microZone & 0xE0) === 0) {
+        return { ...pending, layer: current.layer, macroZone: current.macroZone, microZone: current.microZone, microLocation: current.microLocation };
+      }
+      return pending;
+    },
   );
   readonly players = new ShadowedStore<Player>(
     (p) => p.playerId,
@@ -294,7 +300,17 @@ export class DataManager {
   applyServerInsert<K extends Exclude<TableName, "cards">>(table: K, row: TableMap[K]): void;
   applyServerInsert(table: TableName, row: Card | TableMap[TableName]): void {
     if (table === "cards") {
-      const clientCard: ClientCard = { ...(row as Card), dead: 0 };
+      let clientCard: ClientCard = { ...(row as Card), dead: 0 };
+      const existing = this.cards.get(clientCard.cardId);
+      if (existing && existing.layer === 1 && clientCard.layer === 1 && (clientCard.microZone & 0xE0) === 0) {
+        clientCard = {
+          ...clientCard,
+          layer: existing.layer,
+          macroZone: existing.macroZone,
+          microZone: existing.microZone,
+          microLocation: existing.microLocation,
+        };
+      }
       const { key, wasPresent, deferred } = this.cards.applyServerInsert(clientCard);
       if (!wasPresent && !deferred) this.notifyKeySet("cards", "added", key);
       return;
@@ -320,13 +336,14 @@ export class DataManager {
         return;
       }
       let merged = newCard;
-      if (existing && existing.layer && merged.layer === 1 && (merged.microZone & 0xE0) === 0) {
+      if (existing && existing.layer === 1 && merged.layer === 1 && (merged.microZone & 0xE0) === 0) {
         // Server doesn't track inventory positions — preserve the client's
-        // macroZone/microZone/microLocation so local drag state is not overwritten.
-        // Only applies when BOTH client and server have localQ=0; if the server is
-        // setting localQ≠0 (hex-placed), that placement is authoritative.
+        // layer/macroZone/microZone/microLocation so local drag state is not overwritten.
+        // Only applies when BOTH client and server are in inventory (layer=1) with localQ=0;
+        // if the server is setting localQ≠0 (hex-placed), that placement is authoritative.
         merged = {
           ...merged,
+          layer: existing.layer,
           macroZone: existing.macroZone,
           microZone: existing.microZone,
           microLocation: existing.microLocation,
@@ -338,10 +355,13 @@ export class DataManager {
     if (table === "actions") {
       const actionRow = newRow as Action;
       if (hasFlag(actionRow.flags, ACTION_FLAG_DYING)) {
-        // Server marked action dying via flag UPDATE (carries precise deltaT).
-        // Route through the delete path so the action disappears after the delay.
-        const { key, wasPresent, deferred } = this.actions.applyServerDelete(actionRow);
-        if (wasPresent && !deferred) this.notifyKeySet("actions", "removed", key);
+        // Update the server map with the dying-flag row first so that
+        // subscribeServerDelete fires with a row that has ACTION_FLAG_DYING set.
+        // ActionManager reads that flag to distinguish natural completion from
+        // cancellation, and only enables the trailing progress bar for completions.
+        this.actions.applyServerUpdate(oldRow as Action, actionRow);
+        const { key, wasPresent } = this.actions.applyServerDelete(actionRow);
+        if (wasPresent) this.notifyKeySet("actions", "removed", key);
         return;
       }
       this.actions.applyServerUpdate(oldRow as Action, actionRow);

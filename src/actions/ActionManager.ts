@@ -9,7 +9,7 @@ import type { MagneticActionRow } from "../state/DataManager";
 import type { ShadowedChange } from "../state/ShadowedStore";
 import { packZoneId, type ZoneId } from "../zones/zoneId";
 import { WORLD_LAYER } from "../world/worldCoords";
-import { hasFlag, CARD_FLAG_DYING } from "../state/flags";
+import { hasFlag, ACTION_FLAG_DYING, CARD_FLAG_DYING } from "../state/flags";
 
 export interface CachedMagneticAction {
   magneticActionId: number;
@@ -37,7 +37,7 @@ export interface CachedAction {
   participantsDown: number;
 }
 
-export type ActionListener = (action: CachedAction | null) => void;
+export type ActionListener = (action: CachedAction | null, completed?: boolean) => void;
 
 type StackDirection = "top" | "bottom";
 
@@ -82,6 +82,8 @@ export class ActionManager {
   private readonly byCardId = new Map<number, number>();
   /** card_id → listeners waiting for that card's action to change. */
   private readonly cardListeners = new Map<number, Set<ActionListener>>();
+  /** card_id → listeners for the server-authoritative action (fires before the display delay). */
+  private readonly serverCardListeners = new Map<number, Set<ActionListener>>();
 
   /** magnetic_action_id → cached magnetic action. */
   private readonly magneticById = new Map<number, CachedMagneticAction>();
@@ -163,6 +165,28 @@ export class ActionManager {
     });
   }
 
+  /** Subscribe to server-authoritative action changes for a specific card.
+   *  Fires immediately with the current server action (if any), then on every
+   *  server write or delete — bypassing the client display delay. Use this to
+   *  show immediate visual feedback (e.g. a pending-flush progress bar) before
+   *  the action becomes visible in the delayed client map. */
+  subscribeServerCard(cardId: number, listener: ActionListener): () => void {
+    let set = this.serverCardListeners.get(cardId);
+    if (!set) {
+      set = new Set();
+      this.serverCardListeners.set(cardId, set);
+    }
+    set.add(listener);
+    const actionId = this.serverByCardId.get(cardId);
+    listener(actionId !== undefined ? this.serverByActionId.get(actionId) ?? null : null);
+    return () => {
+      const s = this.serverCardListeners.get(cardId);
+      if (!s) return;
+      s.delete(listener);
+      if (s.size === 0) this.serverCardListeners.delete(cardId);
+    };
+  }
+
   /** Subscribe to action changes for a specific card. Fires immediately with
    *  the current action if one exists, then on every upsert or removal.
    *  Returns an unsubscribe function. */
@@ -223,6 +247,7 @@ export class ActionManager {
     this.serverByActionId.clear();
     this.serverByCardId.clear();
     this.cardListeners.clear();
+    this.serverCardListeners.clear();
     this.magneticById.clear();
     this.magneticByCardId.clear();
     this.magneticCardListeners.clear();
@@ -289,6 +314,7 @@ export class ActionManager {
     };
     this.serverByActionId.set(row.actionId, action);
     this.serverByCardId.set(row.cardId, row.actionId);
+    this.emitServerCard(row.cardId, action);
   }
 
   private removeServer(row: ActionRow): void {
@@ -298,6 +324,7 @@ export class ActionManager {
     const reverseId = this.serverByCardId.get(action.cardId);
     if (reverseId !== row.actionId) return;
     this.serverByCardId.delete(action.cardId);
+    this.emitServerCard(action.cardId, null, hasFlag(row.flags, ACTION_FLAG_DYING));
     // Defer re-evaluation so all changes in the current SpacetimeDB transaction
     // batch are applied first. Check the server card map (not the delayed client
     // map) so a card marked dying in the same transaction is seen immediately.
@@ -322,6 +349,18 @@ export class ActionManager {
       id = row.microLocation;
     }
     return id;
+  }
+
+  private emitServerCard(cardId: number, action: CachedAction | null, completed?: boolean): void {
+    const listeners = this.serverCardListeners.get(cardId);
+    if (!listeners) return;
+    for (const listener of listeners) {
+      try {
+        listener(action, completed);
+      } catch (err) {
+        console.error("[ActionManager] serverCard listener threw", err);
+      }
+    }
   }
 
   private emitCard(cardId: number, action: CachedAction | null): void {

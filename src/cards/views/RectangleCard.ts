@@ -1,6 +1,7 @@
 import { Container, Graphics, ParticleContainer } from "pixi.js";
 import type { GameContext } from "../../GameContext";
 import type { Card as CardRow } from "../../server/bindings/types";
+import type { CachedAction } from "../../actions/ActionManager";
 import { ParticleManager, type ParticleHandle } from "../../assets/ParticleManager";
 import {
   decodeLooseXY,
@@ -19,6 +20,16 @@ import { RectCardVisual } from "./RectCardVisual";
 import { unpackMacroZone } from "../../world/worldCoords";
 
 const DEATH_SPEED = 0.04;
+
+function lightenHex(hex: string, t: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const lr = Math.round(r + (255 - r) * t).toString(16).padStart(2, "0");
+  const lg = Math.round(g + (255 - g) * t).toString(16).padStart(2, "0");
+  const lb = Math.round(b + (255 - b) * t).toString(16).padStart(2, "0");
+  return `#${lr}${lg}${lb}`;
+}
 
 export const CARD_SCALE = 1;
 export const RECT_CARD_WIDTH        = 72 * CARD_SCALE;
@@ -64,6 +75,11 @@ export class LayoutRectCard extends LayoutCard {
   private deathProgress = 0;
   private readonly deathMask = new Graphics();
   private unsubDying: (() => void) | null = null;
+  private serverAction: CachedAction | null = null;
+  private unsubServerAction: (() => void) | null = null;
+  private trailingStart = 0;
+  private trailingDisplayEnd = 0;
+  private trailingRecipePacked: number | null = null;
   private deathParticleContainer: ParticleContainer | null = null;
   private deathParticleHandle: ParticleHandle | null = null;
 
@@ -78,6 +94,13 @@ export class LayoutRectCard extends LayoutCard {
         this.invalidate();
       }
     });
+    if (ctx.actions) {
+      this.unsubServerAction = ctx.actions.subscribeServerCard(cardId, (action, completed) => {
+        if (action === null && !completed) this.trailingRecipePacked = null;
+        this.serverAction = action;
+        this.invalidate();
+      });
+    }
     // rectVisual owns body fill + title bar fill + outline.
     // progressBar draws on top of the title bar fill.
     // nameText is re-parented here so it floats above the progress bar.
@@ -183,20 +206,54 @@ export class LayoutRectCard extends LayoutCard {
     const recipeDef = actionRow
       ? this.ctx.recipes.decode(actionRow.recipe)
       : undefined;
+    const now = Date.now() / 1000;
     let progressFill = 0;
+    let isPendingBar = false;
     if (actionRow && recipeDef) {
-      const now = Date.now() / 1000;
+      // Action is visible in client map — show recipe progress and refresh trailing cache.
       const displayEnd = actionRow.end + DataManager.ACTION_DISPLAY_DELAY_MS / 1000;
       const start = this.ctx.data.actions.getFlushedAt(actionRow.actionId) ?? now;
+      this.trailingStart       = start;
+      this.trailingDisplayEnd  = displayEnd;
+      this.trailingRecipePacked = actionRow.recipe;
       const duration = displayEnd - start;
       if (duration > 0) {
         progressFill = Math.min(1, Math.max(0, (now - start) / duration));
       }
+    } else if (this.trailingRecipePacked !== null && now < this.trailingDisplayEnd) {
+      // Action was just deleted but display window hasn't expired — complete the bar.
+      const duration = this.trailingDisplayEnd - this.trailingStart;
+      if (duration > 0) {
+        progressFill = Math.min(1, Math.max(0, (now - this.trailingStart) / duration));
+      }
+    } else {
+      this.trailingRecipePacked = null;
+      if (this.serverAction) {
+        // Action is pending flush — show progress toward the delay expiring.
+        const flushProgress = this.ctx.data.actions.getPendingFlushProgress(this.serverAction.actionId, Date.now());
+        if (flushProgress !== null) {
+          progressFill = flushProgress;
+          isPendingBar = true;
+        }
+      }
     }
-    const barStyle = recipeDef?.style ?? null;
+    const trailingRecipeDef = this.trailingRecipePacked !== null
+      ? this.ctx.recipes.decode(this.trailingRecipePacked)
+      : undefined;
+    const barStyle = (recipeDef ?? trailingRecipeDef)?.style ?? null;
 
     this.progressBar.clear();
-    if (barStyle && progressFill > 0) {
+    if (isPendingBar && progressFill > 0) {
+      const base  = def?.style[1] ?? "#4a4a6a";
+      const light = lightenHex(base, 0.4);
+      const splitX = progressFill * this.width;
+      if (splitX > 0) {
+        this.progressBar.rect(0, titleY, splitX, RECT_CARD_TITLE_HEIGHT).fill({ color: base });
+      }
+      if (splitX < this.width) {
+        this.progressBar.rect(splitX, titleY, this.width - splitX, RECT_CARD_TITLE_HEIGHT).fill({ color: light });
+      }
+    } else if (barStyle && progressFill > 0) {
       const secondary = def?.style[1] ?? "#7a7a8a";
       const resolveColor = (c: string) => (c === "default" ? secondary : c);
       const left   = resolveColor(barStyle.colorLeft);
@@ -272,7 +329,8 @@ export class LayoutRectCard extends LayoutCard {
       }
     }
     const moving = this.tweenTo(effX, effY);
-    return this.state.dragging || moving || this.dying || actionRow !== undefined;
+    const hasTrailing = this.trailingRecipePacked !== null && now < this.trailingDisplayEnd;
+    return this.state.dragging || moving || this.dying || actionRow !== undefined || hasTrailing || (this.serverAction !== null && !actionRow);
   }
 
   private _spawnDeathEffect(): void {
@@ -294,6 +352,8 @@ export class LayoutRectCard extends LayoutCard {
     this.deathParticleHandle = null;
     this.unsubDying?.();
     this.unsubDying = null;
+    this.unsubServerAction?.();
+    this.unsubServerAction = null;
     super.destroy();
   }
 }

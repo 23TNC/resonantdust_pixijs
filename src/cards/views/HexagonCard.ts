@@ -8,7 +8,7 @@ import {
   STACKED_LOOSE,
   type LooseXY,
 } from "../cardData";
-import type { CachedMagneticAction } from "../../actions/ActionManager";
+import type { CachedAction, CachedMagneticAction } from "../../actions/ActionManager";
 import { GameCard } from "../GameCard";
 import {
   hexPoints,
@@ -44,6 +44,16 @@ const DEATH_ALPHA_SNAP = 0.01;
 // vertex circle so it never overlaps an adjacent tile's stroke.
 const PROGRESS_RING_WIDTH  = 4;
 const PROGRESS_RING_RADIUS = HEX_RADIUS - 7;
+
+function lightenHex(hex: string, t: number): string {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  const lr = Math.round(r + (255 - r) * t).toString(16).padStart(2, "0");
+  const lg = Math.round(g + (255 - g) * t).toString(16).padStart(2, "0");
+  const lb = Math.round(b + (255 - b) * t).toString(16).padStart(2, "0");
+  return `#${lr}${lg}${lb}`;
+}
 
 export class GameHexCard extends GameCard {
   private stackedState = 0;
@@ -82,6 +92,11 @@ export class LayoutHexCard extends LayoutCard {
   private unsubDying: (() => void) | null = null;
   private currentMagneticAction: CachedMagneticAction | null = null;
   private unsubMagnetic: (() => void) | null = null;
+  private serverAction: CachedAction | null = null;
+  private unsubServerAction: (() => void) | null = null;
+  private trailingStart = 0;
+  private trailingDisplayEnd = 0;
+  private trailingRecipePacked: number | null = null;
 
   constructor(cardId: number, ctx: GameContext) {
     super(cardId, ctx);
@@ -94,6 +109,11 @@ export class LayoutHexCard extends LayoutCard {
     if (ctx.actions) {
       this.unsubMagnetic = ctx.actions.subscribeMagneticCard(cardId, (action) => {
         this.currentMagneticAction = action;
+        this.invalidate();
+      });
+      this.unsubServerAction = ctx.actions.subscribeServerCard(cardId, (action, completed) => {
+        if (action === null && !completed) this.trailingRecipePacked = null;
+        this.serverAction = action;
         this.invalidate();
       });
     }
@@ -149,21 +169,53 @@ export class LayoutHexCard extends LayoutCard {
       ? this.ctx.recipes.decode(activeRecipePacked)
       : undefined;
     let progressFill = 0;
+    let isPendingBar = false;
     const now = Date.now() / 1000;
     if (activeEnd !== undefined && recipeDef) {
+      // Action or magnetic action is visible in client map — show recipe progress and refresh trailing cache.
       const displayEnd = activeEnd + DataManager.ACTION_DISPLAY_DELAY_MS / 1000;
       const start = actionRow
         ? (this.ctx.data.actions.getFlushedAt(card!.currentAction!.actionId) ?? now)
         : (this.ctx.data.magneticActions.getFlushedAt(this.currentMagneticAction!.magneticActionId) ?? now);
+      if (actionRow) {
+        this.trailingStart        = start;
+        this.trailingDisplayEnd   = displayEnd;
+        this.trailingRecipePacked = actionRow.recipe;
+      }
       const duration = displayEnd - start;
       if (duration > 0) {
         progressFill = Math.min(1, Math.max(0, (now - start) / duration));
       }
+    } else if (this.trailingRecipePacked !== null && now < this.trailingDisplayEnd) {
+      // Action was just deleted but display window hasn't expired — complete the bar.
+      const duration = this.trailingDisplayEnd - this.trailingStart;
+      if (duration > 0) {
+        progressFill = Math.min(1, Math.max(0, (now - this.trailingStart) / duration));
+      }
+    } else {
+      this.trailingRecipePacked = null;
+      if (this.serverAction) {
+        // Action is pending flush — show progress toward the delay expiring.
+        const flushProgress = this.ctx.data.actions.getPendingFlushProgress(this.serverAction.actionId, Date.now());
+        if (flushProgress !== null) {
+          progressFill = flushProgress;
+          isPendingBar = true;
+        }
+      }
     }
-    const barStyle = recipeDef?.style ?? null;
+    const trailingRecipeDef = this.trailingRecipePacked !== null
+      ? this.ctx.recipes.decode(this.trailingRecipePacked)
+      : undefined;
+    const barStyle = (recipeDef ?? trailingRecipeDef)?.style ?? null;
 
     this.progressBar.clear();
-    if (barStyle && (actionRow || this.currentMagneticAction)) {
+    if (isPendingBar && progressFill > 0) {
+      const hexDef = this.currentPackedDefinition !== null
+        ? this.ctx.definitions.decode(this.currentPackedDefinition) ?? null
+        : null;
+      const base = hexDef?.style[0] ?? "#4a4a6a";
+      this._drawHexOutline(progressFill, base, lightenHex(base, 0.4), true);
+    } else if (barStyle && (actionRow || this.currentMagneticAction || this.trailingRecipePacked !== null)) {
       const clockwise = barStyle.direction !== "ccw";
       this._drawHexOutline(progressFill, barStyle.colorLeft, barStyle.colorRight, clockwise);
     }
@@ -205,7 +257,8 @@ export class LayoutHexCard extends LayoutCard {
       }
     }
     const moving = this.tweenTo(effX, effY);
-    return this.state.dragging || moving || this.dying || activeEnd !== undefined;
+    const hasTrailing = this.trailingRecipePacked !== null && now < this.trailingDisplayEnd;
+    return this.state.dragging || moving || this.dying || activeEnd !== undefined || hasTrailing || (this.serverAction !== null && activeEnd === undefined);
   }
 
   // Vertex 4 = top point. CW order walks right-ward; CCW walks left-ward.
@@ -251,6 +304,8 @@ export class LayoutHexCard extends LayoutCard {
     this.unsubDying = null;
     this.unsubMagnetic?.();
     this.unsubMagnetic = null;
+    this.unsubServerAction?.();
+    this.unsubServerAction = null;
     super.destroy();
   }
 }
