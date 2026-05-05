@@ -7,7 +7,7 @@
  * Edit `config` here to toggle subsystems.
  */
 const config: readonly (readonly [string, number])[] = [
-  ["actions",     3],
+  ["actions",     5],
   ["spacetime",   3],
   ["zone",        3],
   ["vite",        3],

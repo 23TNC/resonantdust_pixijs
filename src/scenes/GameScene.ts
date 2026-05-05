@@ -1,8 +1,8 @@
 import { ActionManager } from "../actions/ActionManager";
 import { ParticleManager } from "../assets/ParticleManager";
 import { CardManager } from "../cards/CardManager";
-import { GameInventory } from "../game/GameInventory";
-import { GameManager } from "../game/GameManager";
+import { GameInventory } from "../systems/GameInventory";
+import { GameManager } from "../systems/GameManager";
 import type { GameContext } from "../GameContext";
 import { DragManager } from "../input/DragManager";
 import { InputManager } from "../input/InputManager";
@@ -119,6 +119,7 @@ export class GameScene extends Scene {
   }
 
   update(deltaMS: number): void {
+    this.ctxRef?.data.tick(Date.now());
     this.gameManager.tick(deltaMS);
     this.particleManager.tick(deltaMS);
     this.worldPanManager.update();

@@ -9,6 +9,7 @@ import type { MagneticActionRow } from "../state/DataManager";
 import type { ShadowedChange } from "../state/ShadowedStore";
 import { packZoneId, type ZoneId } from "../zones/zoneId";
 import { WORLD_LAYER } from "../world/worldCoords";
+import { hasFlag, CARD_FLAG_DYING } from "../state/flags";
 
 export interface CachedMagneticAction {
   magneticActionId: number;
@@ -91,7 +92,15 @@ export class ActionManager {
 
   private readonly unsubStackChange: () => void;
   private readonly unsubActionData: () => void;
+  private readonly unsubActionServerWrite: () => void;
+  private readonly unsubActionServerDelete: () => void;
   private readonly unsubMagneticData: () => void;
+
+  /** Server-authoritative action maps — updated immediately on server writes/deletes,
+   *  bypassing the client display delay. Used by the upgrade pre-filter so we compare
+   *  against what the server currently knows, not the delayed client view. */
+  private readonly serverByActionId = new Map<number, CachedAction>();
+  private readonly serverByCardId   = new Map<number, number>();
 
   constructor(
     private readonly ctx: GameContext,
@@ -101,7 +110,15 @@ export class ActionManager {
       throw new Error("[ActionManager] ctx.cards is null");
     }
 
-    // Pick up any actions already in the store (inventory zone + any world zones).
+    // Seed server-authoritative maps from the server map (no display delay).
+    for (const row of ctx.data.actions.server.values()) {
+      const rowZoneId = packZoneId(row.macroZone, row.layer);
+      if (rowZoneId === zoneId || row.layer >= WORLD_LAYER) {
+        this.upsertServer(row);
+      }
+    }
+
+    // Seed client-delayed maps for visual display (subscribeCard / emitCard).
     let seedCount = 0;
     for (const row of ctx.data.values("actions")) {
       const rowZoneId = packZoneId((row as ActionRow).macroZone, (row as ActionRow).layer);
@@ -111,6 +128,22 @@ export class ActionManager {
       }
     }
     debug.log(["actions"], `[ActionManager] initialized zone=${zoneId} seeded=${seedCount}`, 2);
+
+    // Server writes: update server maps immediately so the pre-filter sees fresh state.
+    this.unsubActionServerWrite = ctx.data.actions.subscribeServerWrite((row) => {
+      const rowZoneId = packZoneId(row.macroZone, row.layer);
+      if (rowZoneId === zoneId || row.layer >= WORLD_LAYER) {
+        this.upsertServer(row);
+      }
+    });
+    // Server deletes: update server maps immediately and trigger re-evaluation now
+    // (rather than waiting for the display delay) so the server can restart recipes ASAP.
+    this.unsubActionServerDelete = ctx.data.actions.subscribeServerDelete((_key, row) => {
+      const rowZoneId = packZoneId(row.macroZone, row.layer);
+      if (rowZoneId === zoneId || row.layer >= WORLD_LAYER) {
+        this.removeServer(row);
+      }
+    });
 
     this.unsubActionData = ctx.data.subscribe("actions", (change) => {
       this.onActionChange(change as ShadowedChange<ActionRow>);
@@ -182,9 +215,13 @@ export class ActionManager {
     debug.log(["actions"], `[ActionManager] disposed zone=${this.zoneId}`, 3);
     this.unsubStackChange();
     this.unsubActionData();
+    this.unsubActionServerWrite();
+    this.unsubActionServerDelete();
     this.unsubMagneticData();
     this.byActionId.clear();
     this.byCardId.clear();
+    this.serverByActionId.clear();
+    this.serverByCardId.clear();
     this.cardListeners.clear();
     this.magneticById.clear();
     this.magneticByCardId.clear();
@@ -231,21 +268,46 @@ export class ActionManager {
     if (reverseId === actionId) {
       this.byCardId.delete(action.cardId);
       this.emitCard(action.cardId, null);
-      // Defer re-evaluation to a microtask so all changes in the current
-      // SpacetimeDB transaction batch are applied first. If the card died in
-      // the same transaction, it will be marked dead === 1 by then and we
-      // skip the re-submit. If it's alive (recipe completed normally), we
-      // re-evaluate so the server can restart the recipe immediately.
-      const cardId = action.cardId;
-      queueMicrotask(() => {
-        const cardRow = this.ctx.data.get("cards", cardId);
-        if (cardRow && cardRow.dead === 0) {
-          this.onStackChange(this.findChainRoot(cardId));
-        }
-      });
     }
+    // Re-evaluation is triggered by removeServer (server delete), not here.
     // If reverseId !== actionId, a newer action already claimed this card;
-    // don't emit null or re-evaluate — that would clobber a valid running action.
+    // don't emit null — that would clobber a valid running action.
+  }
+
+  private upsertServer(row: ActionRow): void {
+    const previous = this.serverByActionId.get(row.actionId);
+    if (previous && previous.cardId !== row.cardId) {
+      const reverseId = this.serverByCardId.get(previous.cardId);
+      if (reverseId === row.actionId) this.serverByCardId.delete(previous.cardId);
+    }
+    const action: CachedAction = {
+      actionId: row.actionId,
+      cardId: row.cardId,
+      recipe: row.recipe,
+      participantsUp: (row.participants >> 4) & 0x0F,
+      participantsDown: row.participants & 0x0F,
+    };
+    this.serverByActionId.set(row.actionId, action);
+    this.serverByCardId.set(row.cardId, row.actionId);
+  }
+
+  private removeServer(row: ActionRow): void {
+    const action = this.serverByActionId.get(row.actionId);
+    if (!action) return;
+    this.serverByActionId.delete(row.actionId);
+    const reverseId = this.serverByCardId.get(action.cardId);
+    if (reverseId !== row.actionId) return;
+    this.serverByCardId.delete(action.cardId);
+    // Defer re-evaluation so all changes in the current SpacetimeDB transaction
+    // batch are applied first. Check the server card map (not the delayed client
+    // map) so a card marked dying in the same transaction is seen immediately.
+    const cardId = action.cardId;
+    queueMicrotask(() => {
+      const cardRow = this.ctx.data.cards.server.get(cardId);
+      if (cardRow && !hasFlag(cardRow.flags, CARD_FLAG_DYING)) {
+        this.onStackChange(this.findChainRoot(cardId));
+      }
+    });
   }
 
   /** Walk parent links (STACKED_ON_RECT_X/Y) up to the chain root. Cards that
@@ -386,9 +448,9 @@ export class ActionManager {
   ): Map<number, number> {
     const map = new Map<number, number>();
     for (let i = 0; i < chain.length; i++) {
-      const actionId = this.byCardId.get(chain[i]);
+      const actionId = this.serverByCardId.get(chain[i]);
       if (actionId === undefined) continue;
-      const action = this.byActionId.get(actionId);
+      const action = this.serverByActionId.get(actionId);
       if (!action) continue;
       const count = direction === "up" ? action.participantsUp : action.participantsDown;
       if (count === 0) continue;
@@ -413,9 +475,9 @@ export class ActionManager {
     hexDef: CardDefinition | null,
   ): boolean {
     const actorId = chain[actorIdx];
-    const actorActionId = this.byCardId.get(actorId);
+    const actorActionId = this.serverByCardId.get(actorId);
     const actorAction = actorActionId !== undefined
-      ? this.byActionId.get(actorActionId) ?? null
+      ? this.serverByActionId.get(actorActionId) ?? null
       : null;
 
     if (actorAction && actorAction.cardId !== actorId) {

@@ -58,7 +58,7 @@ export class PlayerSession {
   }
 
   private findPlayerByName(name: string): Player | null {
-    for (const row of this.data.players.values()) {
+    for (const row of this.data.players.server.values()) {
       if (row.name === name) return row;
     }
     return null;
@@ -66,12 +66,13 @@ export class PlayerSession {
 
   private waitForPlayer(name: string): Promise<Player> {
     return new Promise<Player>((resolve, reject) => {
-      const unsub = this.data.subscribe("players", (change) => {
-        if (change.kind === "delete") return;
-        if (change.newValue?.name !== name) return;
+      // Read from the server map directly so the display delay on the players
+      // store does not block login — the row lands in server immediately.
+      const unsub = this.data.players.subscribeServerWrite((row) => {
+        if (row.name !== name) return;
         unsub();
         clearTimeout(timer);
-        resolve(change.newValue);
+        resolve(row);
       });
       const timer = setTimeout(() => {
         unsub();

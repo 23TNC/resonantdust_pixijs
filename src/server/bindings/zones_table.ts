@@ -23,4 +23,5 @@ export default __t.row({
   t5: __t.u64().name("t_5"),
   t6: __t.u64().name("t_6"),
   t7: __t.u64().name("t_7"),
+  deltaT: __t.u8().name("delta_t"),
 });

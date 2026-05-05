@@ -3,7 +3,7 @@ import type { LayoutManager } from "../../layout/LayoutManager";
 import type { GameContext } from "../../GameContext";
 import type { ZoneId } from "../../zones/zoneId";
 import { LayoutInventory } from "./InventoryView";
-import { LayoutWorld } from "./WorldView";
+import { LayoutWorld } from "../../world/LayoutWorld";
 import { TitleBar } from "./TitleBar";
 
 /**

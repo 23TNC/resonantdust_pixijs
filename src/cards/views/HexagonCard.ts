@@ -1,15 +1,15 @@
 import { Container, Graphics, Sprite, Texture } from "pixi.js";
-import type { GameContext } from "../GameContext";
-import { LayoutNode } from "../layout/LayoutNode";
-import type { Card as CardRow } from "../server/bindings/types";
+import type { GameContext } from "../../GameContext";
+import { LayoutNode } from "../../layout/LayoutNode";
+import type { Card as CardRow } from "../../server/bindings/types";
 import {
   decodeLooseXY,
   getStackedState,
   STACKED_LOOSE,
   type LooseXY,
-} from "./cardData";
-import type { CachedMagneticAction } from "../actions/ActionManager";
-import { GameCard } from "./GameCard";
+} from "../cardData";
+import type { CachedMagneticAction } from "../../actions/ActionManager";
+import { GameCard } from "../GameCard";
 import {
   hexPoints,
   HEX_HEIGHT,
@@ -17,7 +17,8 @@ import {
   HEX_WIDTH,
 } from "./HexCardVisual";
 import { LayoutCard } from "./LayoutCard";
-import { unpackMacroZone, WORLD_LAYER } from "../world/worldCoords";
+import { DataManager } from "../../state/DataManager";
+import { unpackMacroZone, WORLD_LAYER } from "../../world/worldCoords";
 
 export { HEX_HEIGHT, HEX_RADIUS, HEX_WIDTH } from "./HexCardVisual";
 
@@ -150,15 +151,13 @@ export class LayoutHexCard extends LayoutCard {
     let progressFill = 0;
     const now = Date.now() / 1000;
     if (activeEnd !== undefined && recipeDef) {
-      if (actionRow && recipeDef.duration > 0) {
-        const start = activeEnd - recipeDef.duration;
-        progressFill = Math.min(1, Math.max(0, (now - start) / recipeDef.duration));
-      } else if (this.currentMagneticAction) {
-        const { receivedAt } = this.currentMagneticAction;
-        const duration = activeEnd - receivedAt;
-        if (duration > 0 && now <= activeEnd) {
-          progressFill = Math.min(1, Math.max(0, (now - receivedAt) / duration));
-        }
+      const displayEnd = activeEnd + DataManager.ACTION_DISPLAY_DELAY_MS / 1000;
+      const start = actionRow
+        ? (this.ctx.data.actions.getFlushedAt(card!.currentAction!.actionId) ?? now)
+        : (this.ctx.data.magneticActions.getFlushedAt(this.currentMagneticAction!.magneticActionId) ?? now);
+      const duration = displayEnd - start;
+      if (duration > 0) {
+        progressFill = Math.min(1, Math.max(0, (now - start) / duration));
       }
     }
     const barStyle = recipeDef?.style ?? null;

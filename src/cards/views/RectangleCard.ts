@@ -1,7 +1,7 @@
 import { Container, Graphics, ParticleContainer } from "pixi.js";
-import type { GameContext } from "../GameContext";
-import type { Card as CardRow } from "../server/bindings/types";
-import { ParticleManager, type ParticleHandle } from "../assets/ParticleManager";
+import type { GameContext } from "../../GameContext";
+import type { Card as CardRow } from "../../server/bindings/types";
+import { ParticleManager, type ParticleHandle } from "../../assets/ParticleManager";
 import {
   decodeLooseXY,
   getStackedState,
@@ -10,12 +10,13 @@ import {
   STACKED_ON_RECT_X,
   STACKED_ON_RECT_Y,
   type LooseXY,
-} from "./cardData";
+} from "../cardData";
 import { HEX_HEIGHT, HEX_RADIUS, HEX_WIDTH } from "./HexCardVisual";
-import { GameCard } from "./GameCard";
+import { GameCard } from "../GameCard";
 import { LayoutCard } from "./LayoutCard";
+import { DataManager } from "../../state/DataManager";
 import { RectCardVisual } from "./RectCardVisual";
-import { unpackMacroZone } from "../world/worldCoords";
+import { unpackMacroZone } from "../../world/worldCoords";
 
 const DEATH_SPEED = 0.04;
 
@@ -185,15 +186,11 @@ export class LayoutRectCard extends LayoutCard {
     let progressFill = 0;
     if (actionRow && recipeDef) {
       const now = Date.now() / 1000;
-      if (recipeDef.duration > 0) {
-        const start = actionRow.end - recipeDef.duration;
-        progressFill = Math.min(1, Math.max(0, (now - start) / recipeDef.duration));
-      } else {
-        const receivedAt = this.ctx.data.actions.getReceivedAt(actionRow.actionId) ?? now;
-        const duration = actionRow.end - receivedAt;
-        if (duration > 0 && now <= actionRow.end) {
-          progressFill = Math.min(1, Math.max(0, (now - receivedAt) / duration));
-        }
+      const displayEnd = actionRow.end + DataManager.ACTION_DISPLAY_DELAY_MS / 1000;
+      const start = this.ctx.data.actions.getFlushedAt(actionRow.actionId) ?? now;
+      const duration = displayEnd - start;
+      if (duration > 0) {
+        progressFill = Math.min(1, Math.max(0, (now - start) / duration));
       }
     }
     const barStyle = recipeDef?.style ?? null;

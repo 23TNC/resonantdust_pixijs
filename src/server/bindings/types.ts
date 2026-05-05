@@ -20,6 +20,7 @@ export const Action = __t.object("Action", {
   end: __t.u32(),
   participants: __t.u8(),
   flags: __t.u8(),
+  deltaT: __t.u8(),
 });
 export type Action = __Infer<typeof Action>;
 
@@ -40,6 +41,7 @@ export const Card = __t.object("Card", {
   ownerId: __t.u32(),
   packedDefinition: __t.u16(),
   flags: __t.u8(),
+  deltaT: __t.u8(),
 });
 export type Card = __Infer<typeof Card>;
 
@@ -68,6 +70,8 @@ export const MagneticAction = __t.object("MagneticAction", {
   layer: __t.u8(),
   macroZone: __t.u32(),
   loopCount: __t.u8(),
+  flags: __t.u8(),
+  deltaT: __t.u8(),
 });
 export type MagneticAction = __Infer<typeof MagneticAction>;
 
@@ -76,7 +80,6 @@ export const MagneticActionScheduler = __t.object("MagneticActionScheduler", {
   scheduledAt: __t.scheduleAt(),
   magneticActionId: __t.u32(),
   ownerId: __t.u32(),
-  flags: __t.u8(),
   slot1: __t.u32(),
   slot2: __t.u32(),
   slot3: __t.u32(),
@@ -84,6 +87,14 @@ export const MagneticActionScheduler = __t.object("MagneticActionScheduler", {
   slot5: __t.u32(),
 });
 export type MagneticActionScheduler = __Infer<typeof MagneticActionScheduler>;
+
+export const PendingDeletion = __t.object("PendingDeletion", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+  targetKind: __t.u8(),
+  targetId: __t.u32(),
+});
+export type PendingDeletion = __Infer<typeof PendingDeletion>;
 
 export const Player = __t.object("Player", {
   playerId: __t.u32(),
@@ -93,6 +104,7 @@ export const Player = __t.object("Player", {
   macroZone: __t.u32(),
   microZone: __t.u8(),
   microLocation: __t.u32(),
+  deltaT: __t.u8(),
 });
 export type Player = __Infer<typeof Player>;
 
@@ -115,6 +127,7 @@ export const Zone = __t.object("Zone", {
   t5: __t.u64(),
   t6: __t.u64(),
   t7: __t.u64(),
+  deltaT: __t.u8(),
 });
 export type Zone = __Infer<typeof Zone>;
 

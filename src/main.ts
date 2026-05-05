@@ -4,7 +4,7 @@ import { DrawCallCounter } from "./debug/DrawCallCounter";
 import { TextureManager } from "./assets/TextureManager";
 import { DefinitionManager } from "./definitions/DefinitionManager";
 import { RecipeManager } from "./definitions/RecipeManager";
-import { PlayerSession } from "./features/PlayerSession";
+import { PlayerSession } from "./server/PlayerSession";
 import type { GameContext } from "./GameContext";
 import { LoginScene } from "./scenes/LoginScene";
 import { SceneManager } from "./scenes/SceneManager";

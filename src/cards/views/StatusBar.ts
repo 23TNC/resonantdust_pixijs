@@ -1,5 +1,5 @@
 import { Text } from "pixi.js";
-import type { AspectEntry } from "../definitions/DefinitionManager";
+import type { AspectEntry } from "../../definitions/DefinitionManager";
 
 /** One character (or short sequence) shown per aspect when that aspect is
  *  present on a card.  Edit this table to change what appears in the bar. */

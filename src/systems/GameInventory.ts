@@ -5,13 +5,13 @@ import {
   STACKED_ON_RECT_X,
   STACKED_ON_RECT_Y,
 } from "../cards/cardData";
-import { GameHexCard, HEX_HEIGHT, HEX_WIDTH } from "../cards/HexagonCard";
+import { GameHexCard, HEX_HEIGHT, HEX_WIDTH } from "../cards/views/HexagonCard";
 import {
   GameRectCard,
   RECT_CARD_HEIGHT,
   RECT_CARD_TITLE_HEIGHT,
   RECT_CARD_WIDTH,
-} from "../cards/RectangleCard";
+} from "../cards/views/RectangleCard";
 import type { GameContext } from "../GameContext";
 import type { ZoneId } from "../zones/zoneId";
 

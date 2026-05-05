@@ -14,9 +14,9 @@ import {
 } from "./cardData";
 import type { CardManager } from "./CardManager";
 import type { GameCard } from "./GameCard";
-import { GameHexCard, LayoutHexCard } from "./HexagonCard";
-import type { LayoutCard } from "./LayoutCard";
-import { GameRectCard, LayoutRectCard } from "./RectangleCard";
+import { GameHexCard, LayoutHexCard } from "./views/HexagonCard";
+import type { LayoutCard } from "./views/LayoutCard";
+import { GameRectCard, LayoutRectCard } from "./views/RectangleCard";
 
 const INVENTORY_LAYER = 1;
 

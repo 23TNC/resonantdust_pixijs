@@ -3,7 +3,7 @@ import type { GameContext } from "../GameContext";
 import { LayoutNode } from "../layout/LayoutNode";
 import type { LayoutManager } from "../layout/LayoutManager";
 import { debug } from "../debug";
-import { HEX_RADIUS, HEX_WIDTH, HEX_HEIGHT } from "../cards/HexCardVisual";
+import { HEX_RADIUS, HEX_WIDTH, HEX_HEIGHT } from "../cards/views/HexCardVisual";
 import { EMPTY_TILE_PACKED } from "../assets/TextureManager";
 import { decodeZoneTiles, unpackMacroZone, WORLD_LAYER } from "./worldCoords";
 import { unpackZoneId } from "../zones/zoneId";

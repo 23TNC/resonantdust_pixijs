@@ -1,5 +1,5 @@
 import { Graphics, Text } from "pixi.js";
-import { GRID_W, GRID_H } from "../../game/GameInventory";
+import { GRID_W, GRID_H } from "../../systems/GameInventory";
 import { LayoutNode } from "../../layout/LayoutNode";
 import type { LayoutManager } from "../../layout/LayoutManager";
 import type { ZoneId } from "../../zones/zoneId";

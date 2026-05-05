@@ -1,5 +1,5 @@
 import { Container, Graphics, Text } from "pixi.js";
-import type { CardDefinition } from "../definitions/DefinitionManager";
+import type { CardDefinition } from "../../definitions/DefinitionManager";
 import {
   RECT_CARD_HEIGHT,
   RECT_CARD_TITLE_HEIGHT,

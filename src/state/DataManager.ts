@@ -9,13 +9,16 @@ export interface MagneticActionRow {
   layer: number;
   macroZone: number;
   loopCount: number;
+  deltaT: number;
 }
+import { debug } from "../debug";
 import type { SpacetimeManager } from "../server/SpacetimeManager";
 import { getStackedState, STACKED_LOOSE } from "../cards/cardData";
 import { packZoneId, unpackZoneId, type ZoneId } from "../zones/zoneId";
 import type { ZoneManager } from "../zones/ZoneManager";
 import { ShadowedStore, type ShadowedListener } from "./ShadowedStore";
 import { WORLD_LAYER } from "../world/worldCoords";
+import { hasFlag, CARD_FLAG_DYING, ACTION_FLAG_DYING } from "./flags";
 
 /** Card row extended with a client-only death counter. `dead === 0` is live;
  *  `dead === 1` means the server deleted it but it is still playing out its
@@ -43,21 +46,45 @@ export interface KeySetChange {
 export type KeySetListener = (change: KeySetChange) => void;
 
 export class DataManager {
+  /** Server completes actions this many ms before the client expects them,
+   *  so the progress bar fills naturally before the row disappears. */
+  static readonly ACTION_DISPLAY_DELAY_MS = 2000;
+  /** Size of one deltaT unit in milliseconds (matches server-side 16 ms tick). */
+  static readonly DELTA_T_STEP_MS = 16;
+
+  /** Remaining display delay after accounting for how early the server finished.
+   *  deltaT encodes (serverEarlyMs / DELTA_T_STEP_MS) as a u8. */
+  private static rowDelay(row: { deltaT?: number }, maxDelayMs = DataManager.ACTION_DISPLAY_DELAY_MS): number {
+    const elapsed = (row.deltaT ?? 0) * DataManager.DELTA_T_STEP_MS;
+    if (elapsed > maxDelayMs) {
+      debug.log(["actions"], `[DataManager] deltaT overrun: server took ${elapsed}ms, buffer is ${maxDelayMs}ms — client received update late`, 1);
+    }
+    return Math.max(0, maxDelayMs - elapsed);
+  }
+
   readonly cards = new ShadowedStore<ClientCard>(
     (c) => c.cardId,
     { zone: (c) => packZoneId(c.macroZone, c.layer) },
+    DataManager.ACTION_DISPLAY_DELAY_MS,
+    (c) => DataManager.rowDelay(c as { deltaT?: number }),
   );
   readonly players = new ShadowedStore<Player>(
     (p) => p.playerId,
     { zone: (p) => packZoneId(p.macroZone, p.layer) },
+    1000,
+    (p) => DataManager.rowDelay(p as { deltaT?: number }, 1000),
   );
   readonly actions = new ShadowedStore<Action>(
     (a) => a.actionId,
     { zone: (a) => packZoneId(a.macroZone, a.layer) },
+    DataManager.ACTION_DISPLAY_DELAY_MS,
+    (a) => DataManager.rowDelay(a as { deltaT?: number }),
   );
   readonly zones = new ShadowedStore<Zone>(
     (z) => z.zoneId,
     { zone: (z) => packZoneId(z.macroZone, z.layer) },
+    DataManager.ACTION_DISPLAY_DELAY_MS,
+    (z) => DataManager.rowDelay(z as { deltaT?: number }),
   );
   readonly magneticActions = new ShadowedStore<MagneticActionRow>(
     (m) => m.magneticActionId,
@@ -65,6 +92,8 @@ export class DataManager {
       zone: (m) => packZoneId(m.macroZone, m.layer),
       card: (m) => m.cardId,
     },
+    DataManager.ACTION_DISPLAY_DELAY_MS,
+    (m) => DataManager.rowDelay(m),
   );
 
   private spacetime: SpacetimeManager | null = null;
@@ -266,20 +295,31 @@ export class DataManager {
   applyServerInsert(table: TableName, row: Card | TableMap[TableName]): void {
     if (table === "cards") {
       const clientCard: ClientCard = { ...(row as Card), dead: 0 };
-      const { key, wasPresent } = this.cards.applyServerInsert(clientCard);
-      if (!wasPresent) this.notifyKeySet("cards", "added", key);
+      const { key, wasPresent, deferred } = this.cards.applyServerInsert(clientCard);
+      if (!wasPresent && !deferred) this.notifyKeySet("cards", "added", key);
       return;
     }
-    const { key, wasPresent } = this.storeOf(table).applyServerInsert(row as TableMap[typeof table]);
-    if (!wasPresent) this.notifyKeySet(table, "added", key);
+    const { key, wasPresent, deferred } = this.storeOf(table).applyServerInsert(row as TableMap[typeof table]);
+    if (!wasPresent && !deferred) this.notifyKeySet(table, "added", key);
   }
 
   applyServerUpdate(table: "cards", oldRow: Card, newRow: Card): void;
   applyServerUpdate<K extends Exclude<TableName, "cards">>(table: K, oldRow: TableMap[K], newRow: TableMap[K]): void;
   applyServerUpdate(table: TableName, oldRow: Card | TableMap[TableName], newRow: Card | TableMap[TableName]): void {
     if (table === "cards") {
-      let merged = newRow as Card;
-      const existing = this.cards.get((newRow as Card).cardId);
+      const newCard = newRow as Card;
+      const existing = this.cards.get(newCard.cardId);
+      if (hasFlag(newCard.flags, CARD_FLAG_DYING)) {
+        // Server marked card dying via flag UPDATE (carries precise deltaT).
+        // Preserve client position so the card dies where it visually sits.
+        let merged: Card = newCard;
+        if (existing) {
+          merged = { ...newCard, macroZone: existing.macroZone, microZone: existing.microZone, microLocation: existing.microLocation };
+        }
+        this.cards.queueDying({ ...merged, dead: 1 } as ClientCard, DataManager.rowDelay(newCard));
+        return;
+      }
+      let merged = newCard;
       if (existing && existing.layer && merged.layer === 1 && (merged.microZone & 0xE0) === 0) {
         // Server doesn't track inventory positions — preserve the client's
         // macroZone/microZone/microLocation so local drag state is not overwritten.
@@ -295,30 +335,31 @@ export class DataManager {
       this.cards.applyServerUpdate(oldRow as ClientCard, merged as ClientCard);
       return;
     }
+    if (table === "actions") {
+      const actionRow = newRow as Action;
+      if (hasFlag(actionRow.flags, ACTION_FLAG_DYING)) {
+        // Server marked action dying via flag UPDATE (carries precise deltaT).
+        // Route through the delete path so the action disappears after the delay.
+        const { key, wasPresent, deferred } = this.actions.applyServerDelete(actionRow);
+        if (wasPresent && !deferred) this.notifyKeySet("actions", "removed", key);
+        return;
+      }
+      this.actions.applyServerUpdate(oldRow as Action, actionRow);
+      return;
+    }
     this.storeOf(table).applyServerUpdate(
       oldRow as TableMap[typeof table],
       newRow as TableMap[typeof table],
     );
   }
 
-  /** For cards: marks the row dying (`dead === 1`) and emits `"dying"` — the
-   *  row stays in the store until `advanceCardDeath` is called. For all other
-   *  tables: immediate removal with `"delete"` as before. */
   applyServerDelete(table: "cards", row: Card): void;
   applyServerDelete<K extends Exclude<TableName, "cards">>(table: K, row: TableMap[K]): void;
   applyServerDelete(table: TableName, row: Card | TableMap[TableName]): void {
     if (table === "cards") {
-      let merged = row as Card;
-      const existing = this.cards.get((row as Card).cardId);
-      if (existing) {
-        merged = {
-          ...merged,
-          macroZone: existing.macroZone,
-          microZone: existing.microZone,
-          microLocation: existing.microLocation,
-        };
-      }
-      this.cards.markDying({ ...merged, dead: 1 });
+      const clientCard = { ...(row as Card), dead: 0 } as ClientCard;
+      const { key, wasPresent } = this.cards.applyServerDelete(clientCard);
+      if (wasPresent) this.notifyKeySet("cards", "removed", key);
       return;
     }
     const { key, wasPresent } = this.storeOf(table).applyServerDelete(row as TableMap[typeof table]);
@@ -350,6 +391,23 @@ export class DataManager {
     for (const row of rows) {
       const { key, wasPresent } = store.applyServerDelete(row);
       if (wasPresent) this.notifyKeySet(table, "removed", key);
+    }
+  }
+
+  /** Returns true if the given row has a queued server change not yet visible
+   *  to the client. Use this to reject player interactions on stale-visible
+   *  data (e.g. an action whose server delete is still in the delay window). */
+  hasPendingData<K extends TableName>(table: K, key: number | string): boolean {
+    return this.storeOf(table).hasPending(key);
+  }
+
+  /** Call once per frame. Promotes delayed server changes into the client maps
+   *  and fires the corresponding change events and keyset notifications. */
+  tick(now: number): void {
+    for (const table of ["cards", "players", "actions", "zones", "magnetic_actions"] as const) {
+      const { inserted, removed } = this.storeOf(table).flush(now);
+      for (const key of inserted) this.notifyKeySet(table, "added", key);
+      for (const key of removed) this.notifyKeySet(table, "removed", key);
     }
   }
 

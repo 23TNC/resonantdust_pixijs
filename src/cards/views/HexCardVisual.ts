@@ -1,5 +1,5 @@
 import { Container, Graphics, Text } from "pixi.js";
-import type { CardDefinition } from "../definitions/DefinitionManager";
+import type { CardDefinition } from "../../definitions/DefinitionManager";
 
 export const HEX_RADIUS = 72;
 export const HEX_WIDTH  = Math.sqrt(3) * HEX_RADIUS;

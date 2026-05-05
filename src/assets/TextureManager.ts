@@ -1,12 +1,12 @@
 import { Container, Rectangle, RenderTexture, Texture, type Renderer } from "pixi.js";
 import type { CardDefinition } from "../definitions/DefinitionManager";
-import { RectCardVisual } from "../cards/RectCardVisual";
-import { HexCardVisual, HEX_WIDTH, HEX_HEIGHT } from "../cards/HexCardVisual";
+import { RectCardVisual } from "../cards/views/RectCardVisual";
+import { HexCardVisual, HEX_WIDTH, HEX_HEIGHT } from "../cards/views/HexCardVisual";
 import {
   RECT_CARD_WIDTH,
   RECT_CARD_HEIGHT,
   type RectCardTitlePosition,
-} from "../cards/RectangleCard";
+} from "../cards/views/RectangleCard";
 
 // Sentinel key for cards whose definition is unknown (fallback card style).
 // Packed values are at most 16-bit (0x0000–0xFFFF) so values above are safely out of range.

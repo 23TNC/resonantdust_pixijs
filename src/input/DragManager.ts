@@ -1,7 +1,7 @@
 import type { Card, StackDirection } from "../cards/Card";
-import { GameHexCard } from "../cards/HexagonCard";
-import { LayoutCard } from "../cards/LayoutCard";
-import { GameRectCard } from "../cards/RectangleCard";
+import { GameHexCard } from "../cards/views/HexagonCard";
+import { LayoutCard } from "../cards/views/LayoutCard";
+import { GameRectCard } from "../cards/views/RectangleCard";
 import type { GameContext } from "../GameContext";
 import type { LayoutNode } from "../layout/LayoutNode";
 import { WORLD_LAYER } from "../world/worldCoords";
@@ -63,6 +63,7 @@ export class DragManager {
     const card = this.ctx.cards?.get(data.hit.cardId);
     if (!card) return;
     if (!(card.gameCard instanceof GameRectCard) && !(card.gameCard instanceof GameHexCard)) return;
+    if (this.cardHasPendingAction(card.cardId)) return;
 
     // Stacked cards are draggable too — dropping them on another card
     // re-stacks, dropping on empty space converts to loose (unstack). Both
@@ -185,6 +186,16 @@ export class DragManager {
     if (!surface) return;
     const sg = surface.container.getGlobalPosition();
     card.setPosition({ kind: "loose", x: up.x - sg.x - offsetX, y: up.y - sg.y - offsetY });
+  }
+
+  private cardHasPendingAction(cardId: number): boolean {
+    const card = this.ctx.cards?.get(cardId);
+    const actionId = card?.currentAction?.actionId;
+    if (actionId !== undefined && this.ctx.data.hasPendingData("actions", actionId)) return true;
+    for (const key of this.ctx.data.keysByIndex("magnetic_actions", "card", cardId)) {
+      if (this.ctx.data.hasPendingData("magnetic_actions", key)) return true;
+    }
+    return false;
   }
 
   private targetCardFromHit(

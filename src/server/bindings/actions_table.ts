@@ -20,4 +20,5 @@ export default __t.row({
   end: __t.u32(),
   participants: __t.u8(),
   flags: __t.u8(),
+  deltaT: __t.u8().name("delta_t"),
 });

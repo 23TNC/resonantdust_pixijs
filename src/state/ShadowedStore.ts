@@ -14,6 +14,12 @@ export type ShadowedListener<T> = (change: ShadowedChange<T>) => void;
 export interface ApplyResult {
   key: number | string;
   wasPresent: boolean;
+  deferred: boolean;
+}
+
+export interface FlushResult {
+  inserted: (number | string)[];
+  removed: (number | string)[];
 }
 
 export type IndexMap<T> = {
@@ -25,22 +31,34 @@ interface IndexState<T> {
   forward: Map<number | string, Set<number | string>>;
 }
 
+interface PendingEntry<T> {
+  kind: "insert" | "update" | "delete" | "dying";
+  row: T;
+  applyAt: number;
+}
+
 const EMPTY_KEY_SET: ReadonlySet<number | string> = new Set();
 
 export class ShadowedStore<T> {
   readonly server = new Map<number | string, T>();
   readonly client = new Map<number | string, T>();
   private readonly receivedAt = new Map<number | string, number>();
+  private readonly flushedAt  = new Map<number | string, number>();
   private readonly listeners = new Set<ShadowedListener<T>>();
+  private readonly serverWriteListeners = new Set<(row: T) => void>();
+  private readonly serverDeleteListeners = new Set<(key: number | string, row: T) => void>();
   private readonly keyListeners = new Map<
     number | string,
     Set<ShadowedListener<T>>
   >();
   private readonly indexes = new Map<string, IndexState<T>>();
+  private readonly pending = new Map<number | string, PendingEntry<T>>();
 
   constructor(
     readonly keyOf: (row: T) => number | string,
     indexes: IndexMap<T> = {},
+    readonly delayMs = 0,
+    private readonly delayForRow?: (row: T) => number,
   ) {
     for (const [name, fn] of Object.entries(indexes)) {
       this.indexes.set(name, { keyOf: fn, forward: new Map() });
@@ -72,14 +90,44 @@ export class ShadowedStore<T> {
     };
   }
 
+  /** Fires synchronously whenever the server map is written, before any pending
+   *  delay. Use this to react to server state immediately regardless of the
+   *  store's display delay (e.g. login flows that must not be blocked). */
+  subscribeServerWrite(listener: (row: T) => void): () => void {
+    this.serverWriteListeners.add(listener);
+    return () => { this.serverWriteListeners.delete(listener); };
+  }
+
+  /** Fires synchronously the first time a key is removed from the server map
+   *  (delete, dying, or markDying). Fires at most once per key — duplicate
+   *  server deletes for the same key are silently ignored. Use this to react
+   *  to server state immediately, bypassing the client display delay. */
+  subscribeServerDelete(listener: (key: number | string, row: T) => void): () => void {
+    this.serverDeleteListeners.add(listener);
+    return () => { this.serverDeleteListeners.delete(listener); };
+  }
+
   applyServerInsert(row: T): ApplyResult {
     const key = this.keyOf(row);
     const prev = this.client.get(key);
     const wasPresent = prev !== undefined;
     const stored = Object.freeze({ ...row }) as T;
     this.server.set(key, stored);
-    this.client.set(key, stored);
     this.receivedAt.set(key, Date.now() / 1000);
+    for (const l of this.serverWriteListeners) l(stored);
+
+    if (this.delayMs > 0) {
+      this.pending.set(key, {
+        kind: wasPresent ? "update" : "insert",
+        row: stored,
+        applyAt: Date.now() + this.computeDelay(stored),
+      });
+      return { key, wasPresent, deferred: true };
+    }
+
+    this.pending.delete(key);
+    this.flushedAt.set(key, Date.now() / 1000);
+    this.client.set(key, stored);
     this.updateIndexes(prev, stored, key);
     this.emit({
       kind: wasPresent ? "update" : "insert",
@@ -88,15 +136,29 @@ export class ShadowedStore<T> {
       oldValue: prev,
       newValue: stored,
     });
-    return { key, wasPresent };
+    return { key, wasPresent, deferred: false };
   }
 
   applyServerUpdate(oldRow: T, newRow: T): { key: number | string } {
     const key = this.keyOf(newRow);
     const stored = Object.freeze({ ...newRow }) as T;
     this.server.set(key, stored);
-    this.client.set(key, stored);
     this.receivedAt.set(key, Date.now() / 1000);
+    for (const l of this.serverWriteListeners) l(stored);
+
+    if (this.delayMs > 0) {
+      const inClient = this.client.has(key);
+      this.pending.set(key, {
+        kind: inClient ? "update" : "insert",
+        row: stored,
+        applyAt: Date.now() + this.computeDelay(stored),
+      });
+      return { key };
+    }
+
+    this.pending.delete(key);
+    this.flushedAt.set(key, Date.now() / 1000);
+    this.client.set(key, stored);
     this.updateIndexes(oldRow, stored, key);
     this.emit({
       kind: "update",
@@ -112,13 +174,87 @@ export class ShadowedStore<T> {
     const key = this.keyOf(row);
     const prev = this.client.get(key);
     const wasPresent = prev !== undefined;
+    const serverRow = this.server.get(key);
     this.server.delete(key);
+    if (serverRow !== undefined) this.fireServerDelete(key, serverRow);
+    // Clear any pending entry (dying animation is driven by the dying-flag UPDATE,
+    // not by the reaper DELETE — apply the delete immediately).
+    this.pending.delete(key);
     this.client.delete(key);
     if (wasPresent) {
       this.updateIndexes(prev, undefined, key);
       this.emit({ kind: "delete", source: "server", key, oldValue: prev });
     }
-    return { key, wasPresent };
+    return { key, wasPresent, deferred: false };
+  }
+
+  /**
+   * Promotes any pending entries whose `applyAt` has passed into the client
+   * map and fires their change events. Returns keys that were added to or
+   * removed from the client map so DataManager can fire keyset notifications.
+   * Safe to call every frame — O(pending.size), which is 0 when delayMs=0.
+   */
+  flush(now: number): FlushResult {
+    if (this.pending.size === 0) return { inserted: [], removed: [] };
+
+    const inserted: (number | string)[] = [];
+    const removed: (number | string)[] = [];
+
+    for (const [key, entry] of this.pending) {
+      if (now < entry.applyAt) continue;
+      this.pending.delete(key);
+
+      if (entry.kind === "delete") {
+        const prev = this.client.get(key);
+        if (prev !== undefined) {
+          this.client.delete(key);
+          this.updateIndexes(prev, undefined, key);
+          this.emit({ kind: "delete", source: "server", key, oldValue: prev });
+          removed.push(key);
+        }
+      } else if (entry.kind === "dying") {
+        const prev = this.client.get(key);
+        this.client.set(key, entry.row);
+        this.updateIndexes(prev, entry.row, key);
+        this.emit({ kind: "dying", source: "server", key, oldValue: prev, newValue: entry.row });
+      } else {
+        const prev = this.client.get(key);
+        const wasPresent = prev !== undefined;
+        this.flushedAt.set(key, now / 1000);
+        this.client.set(key, entry.row);
+        this.updateIndexes(prev, entry.row, key);
+        this.emit({
+          kind: wasPresent ? "update" : "insert",
+          source: "server",
+          key,
+          oldValue: prev,
+          newValue: entry.row,
+        });
+        if (!wasPresent) inserted.push(key);
+      }
+    }
+
+    return { inserted, removed };
+  }
+
+  /** Returns true if `key` has a queued server change that has not yet been
+   *  promoted to the client map. Useful for rejecting player interactions on
+   *  data the server has already modified (e.g. a completed action whose delete
+   *  is still in the delay window). */
+  hasPending(key: number | string): boolean {
+    return this.pending.has(key);
+  }
+
+  /** Queues a dying transition for `row` to fire after `delayMs`. Until then
+   *  the row remains in the client map unchanged. A subsequent server insert
+   *  or update for the same key cancels the queued death. */
+  queueDying(row: T, delayMs: number): void {
+    const key = this.keyOf(row);
+    const stored = Object.freeze({ ...row }) as T;
+    const wasInServer = this.server.has(key);
+    this.server.delete(key);
+    if (wasInServer) this.fireServerDelete(key, stored);
+    this.pending.set(key, { kind: "dying", row: stored, applyAt: Date.now() + delayMs });
   }
 
   /**
@@ -130,7 +266,9 @@ export class ShadowedStore<T> {
     const key = this.keyOf(row);
     const prev = this.client.get(key);
     const stored = Object.freeze({ ...row }) as T;
+    const wasInServer = this.server.has(key);
     this.server.delete(key);
+    if (wasInServer) this.fireServerDelete(key, stored);
     this.client.set(key, stored);
     this.updateIndexes(prev, stored, key);
     this.emit({ kind: "dying", source: "server", key, oldValue: prev, newValue: stored });
@@ -148,7 +286,7 @@ export class ShadowedStore<T> {
       this.updateIndexes(prev, undefined, key);
       this.emit({ kind: "dead", source: "client", key, oldValue: prev });
     }
-    return { key, wasPresent };
+    return { key, wasPresent, deferred: false };
   }
 
   setClient(row: T): void {
@@ -189,6 +327,10 @@ export class ShadowedStore<T> {
     return this.receivedAt.get(key);
   }
 
+  getFlushedAt(key: number | string): number | undefined {
+    return this.flushedAt.get(key);
+  }
+
   has(key: number | string): boolean {
     return this.client.has(key);
   }
@@ -214,6 +356,8 @@ export class ShadowedStore<T> {
     this.server.clear();
     this.client.clear();
     this.receivedAt.clear();
+    this.flushedAt.clear();
+    this.pending.clear();
     for (const state of this.indexes.values()) state.forward.clear();
   }
 
@@ -222,9 +366,17 @@ export class ShadowedStore<T> {
     this.server.clear();
     this.client.clear();
     this.receivedAt.clear();
+    this.flushedAt.clear();
+    this.pending.clear();
     this.listeners.clear();
     this.keyListeners.clear();
+    this.serverWriteListeners.clear();
+    this.serverDeleteListeners.clear();
     for (const state of this.indexes.values()) state.forward.clear();
+  }
+
+  private computeDelay(row: T): number {
+    return this.delayForRow ? this.delayForRow(row) : this.delayMs;
   }
 
   private updateIndexes(
@@ -250,6 +402,16 @@ export class ShadowedStore<T> {
           state.forward.set(nextIndexKey, set);
         }
         set.add(primaryKey);
+      }
+    }
+  }
+
+  private fireServerDelete(key: number | string, row: T): void {
+    for (const listener of this.serverDeleteListeners) {
+      try {
+        listener(key, row);
+      } catch (err) {
+        console.error("[ShadowedStore] serverDelete listener threw", err);
       }
     }
   }
