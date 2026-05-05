@@ -18,6 +18,5 @@ export default __t.row({
   layer: __t.u8(),
   macroZone: __t.u32().name("macro_zone"),
   loopCount: __t.u8().name("loop_count"),
-  flags: __t.u8(),
   deltaT: __t.u8().name("delta_t"),
 });

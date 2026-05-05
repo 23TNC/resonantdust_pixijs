@@ -70,7 +70,6 @@ export const MagneticAction = __t.object("MagneticAction", {
   layer: __t.u8(),
   macroZone: __t.u32(),
   loopCount: __t.u8(),
-  flags: __t.u8(),
   deltaT: __t.u8(),
 });
 export type MagneticAction = __Infer<typeof MagneticAction>;

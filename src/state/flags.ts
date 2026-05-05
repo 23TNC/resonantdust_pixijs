@@ -5,8 +5,6 @@
  */
 
 export const CARD_FLAG_DYING            = 1 << 7;  // cards.dying           bit 7
-export const ACTION_FLAG_DYING          = 1 << 7;  // actions.dying         bit 7
-export const MAGNETIC_ACTION_FLAG_DYING = 1 << 7;  // magnetic_actions.dying bit 7
 
 export const CARD_FLAG_POSITION_HOLD    = 1 << 0;
 export const CARD_FLAG_POSITION_LOCKED  = 1 << 1;

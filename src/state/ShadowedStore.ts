@@ -59,6 +59,10 @@ export class ShadowedStore<T> {
     indexes: IndexMap<T> = {},
     readonly delayMs = 0,
     private readonly delayForRow?: (row: T) => number,
+    /** Called at flush time just before writing to the client map. Lets callers
+     *  re-apply merge logic against the *current* client row (e.g. preserving
+     *  locally-driven position that changed after the pending entry was queued). */
+    private readonly flushTransform?: (pending: T, current: T | undefined) => T,
   ) {
     for (const [name, fn] of Object.entries(indexes)) {
       this.indexes.set(name, { keyOf: fn, forward: new Map() });
@@ -220,15 +224,16 @@ export class ShadowedStore<T> {
       } else {
         const prev = this.client.get(key);
         const wasPresent = prev !== undefined;
+        const row = this.flushTransform ? this.flushTransform(entry.row, prev) : entry.row;
         this.flushedAt.set(key, now / 1000);
-        this.client.set(key, entry.row);
-        this.updateIndexes(prev, entry.row, key);
+        this.client.set(key, row);
+        this.updateIndexes(prev, row, key);
         this.emit({
           kind: wasPresent ? "update" : "insert",
           source: "server",
           key,
           oldValue: prev,
-          newValue: entry.row,
+          newValue: row,
         });
         if (!wasPresent) inserted.push(key);
       }
