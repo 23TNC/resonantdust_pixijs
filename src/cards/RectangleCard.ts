@@ -11,10 +11,11 @@ import {
   STACKED_ON_RECT_Y,
   type LooseXY,
 } from "./cardData";
-import { HEX_HEIGHT, HEX_WIDTH } from "./HexCardVisual";
+import { HEX_HEIGHT, HEX_RADIUS, HEX_WIDTH } from "./HexCardVisual";
 import { GameCard } from "./GameCard";
 import { LayoutCard } from "./LayoutCard";
 import { RectCardVisual } from "./RectCardVisual";
+import { unpackMacroZone } from "../world/worldCoords";
 
 const DEATH_SPEED = 0.04;
 
@@ -102,6 +103,7 @@ export class LayoutRectCard extends LayoutCard {
     }
 
     const stacked = getStackedState(row.microZone);
+
     if (stacked === STACKED_LOOSE) {
       this.setTitlePosition("top");
       const { x, y } = decodeLooseXY(row.microLocation);
@@ -124,20 +126,31 @@ export class LayoutRectCard extends LayoutCard {
         this.setTarget(0, +RECT_CARD_TITLE_HEIGHT);
       }
     } else if (stacked === STACKED_ON_HEX) {
-      const parentId = row.microLocation;
-      if (!this.ctx.data.get("cards", parentId)) {
-        this.ctx.cards?.get(this.cardId)?.setPosition({
-          kind: "loose",
-          x: this.targetX,
-          y: this.targetY,
-        });
-        return;
+      if (row.microLocation === 0) {
+        // No parent card — position is encoded in macroZone + microZone bit fields.
+        const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
+        const q = zoneQ + ((row.microZone >> 5) & 0x7);
+        const r = zoneR + ((row.microZone >> 2) & 0x7);
+        const x = HEX_RADIUS * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r);
+        const y = HEX_RADIUS * (3 / 2 * r);
+        this.setTitlePosition("top");
+        this.setTarget(x - RECT_CARD_WIDTH / 2, y - RECT_CARD_HEIGHT / 2);
+      } else {
+        const parentId = row.microLocation;
+        if (!this.ctx.data.get("cards", parentId)) {
+          this.ctx.cards?.get(this.cardId)?.setPosition({
+            kind: "loose",
+            x: this.targetX,
+            y: this.targetY,
+          });
+          return;
+        }
+        this.setTitlePosition("top");
+        this.setTarget(
+          (HEX_WIDTH  - RECT_CARD_WIDTH)  / 2,
+          (HEX_HEIGHT - RECT_CARD_HEIGHT) / 2,
+        );
       }
-      this.setTitlePosition("top");
-      this.setTarget(
-        (HEX_WIDTH  - RECT_CARD_WIDTH)  / 2,
-        (HEX_HEIGHT - RECT_CARD_HEIGHT) / 2,
-      );
     }
   }
 

@@ -47,12 +47,18 @@ export class DataManager {
     (c) => c.cardId,
     { zone: (c) => packZoneId(c.macroZone, c.layer) },
   );
-  readonly players = new ShadowedStore<Player>((p) => p.playerId);
+  readonly players = new ShadowedStore<Player>(
+    (p) => p.playerId,
+    { zone: (p) => packZoneId(p.macroZone, p.layer) },
+  );
   readonly actions = new ShadowedStore<Action>(
     (a) => a.actionId,
     { zone: (a) => packZoneId(a.macroZone, a.layer) },
   );
-  readonly zones = new ShadowedStore<Zone>((z) => z.macroZone);
+  readonly zones = new ShadowedStore<Zone>(
+    (z) => z.zoneId,
+    { zone: (z) => packZoneId(z.macroZone, z.layer) },
+  );
   readonly magneticActions = new ShadowedStore<MagneticActionRow>(
     (m) => m.magneticActionId,
     {
@@ -94,6 +100,15 @@ export class DataManager {
         spacetime.subscribeWorldZone(macroZone).catch((err: unknown) => {
           console.error(`[DataManager] subscribeWorldZone(${macroZone}) failed`, err);
         });
+        spacetime.subscribeActions(zoneId).catch((err: unknown) => {
+          console.error(`[DataManager] subscribeActions(world:${zoneId}) failed`, err);
+        });
+        spacetime.subscribeMagneticActions(zoneId).catch((err: unknown) => {
+          console.error(`[DataManager] subscribeMagneticActions(world:${zoneId}) failed`, err);
+        });
+        spacetime.subscribeWorldPlayers(macroZone).catch((err: unknown) => {
+          console.error(`[DataManager] subscribeWorldPlayers(${macroZone}) failed`, err);
+        });
       } else {
         spacetime.subscribeCards(zoneId).catch((err) => {
           console.error(`[DataManager] subscribeCards(${zoneId}) failed`, err);
@@ -111,6 +126,9 @@ export class DataManager {
       const { macroZone, layer } = unpackZoneId(zoneId);
       if (layer >= WORLD_LAYER) {
         spacetime.unsubscribeWorldZone(macroZone);
+        spacetime.unsubscribeActions(zoneId);
+        spacetime.unsubscribeMagneticActions(zoneId);
+        spacetime.unsubscribeWorldPlayers(macroZone);
       } else {
         spacetime.unsubscribeCards(zoneId);
         spacetime.unsubscribeActions(zoneId);
@@ -228,6 +246,14 @@ export class DataManager {
     }
   }
 
+  /** Returns the card row as last received from the server, bypassing any
+   *  client-side shadow (drag state, optimistic updates, etc.).
+   *  Returns undefined if the server has no record of the card (not yet
+   *  received, already deleted, or currently in the dying phase). */
+  getServerCard(cardId: number): ClientCard | undefined {
+    return this.cards.server.get(cardId);
+  }
+
   /** Client-side card position update (drag, orphan fallback, etc.).
    *  Preserves the existing `dead` value so dying cards stay dying. */
   setClientCard(row: Card): void {
@@ -284,7 +310,7 @@ export class DataManager {
     if (table === "cards") {
       let merged = row as Card;
       const existing = this.cards.get((row as Card).cardId);
-      if (existing && existing.layer && merged.layer === 1 && (merged.microZone & 0xE0) === 0) {
+      if (existing) {
         merged = {
           ...merged,
           macroZone: existing.macroZone,

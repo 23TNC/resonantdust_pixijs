@@ -5,9 +5,10 @@ import type {
 } from "spacetimedb";
 import { debug } from "../debug";
 import type { DataManager } from "../state/DataManager";
-import { unpackZoneId, type ZoneId } from "../zones/zoneId";
+import { WORLD_LAYER } from "../world/worldCoords";
+import { packZoneId, unpackZoneId, type ZoneId } from "../zones/zoneId";
 import type { DbConnection } from "./bindings";
-import type { InventoryStack } from "./bindings/types";
+import type { InventoryStack, Zone } from "./bindings/types";
 
 type AnySubscriptionHandle = SubscriptionHandleImpl<any>;
 
@@ -208,19 +209,34 @@ export class SpacetimeManager {
 
   async subscribeWorldZone(macroZone: number): Promise<void> {
     return this.installSubscription(`zones:${macroZone}`, {
-      queries: [`SELECT * FROM zones WHERE macro_zone = ${macroZone}`],
+      queries: [
+        `SELECT * FROM zones WHERE macro_zone = ${macroZone}`,
+        `SELECT * FROM cards WHERE macro_zone = ${macroZone} AND layer = ${WORLD_LAYER}`,
+      ],
       scopeKey: `macroZone:${macroZone}`,
-      clearStore: () => this.clearWorldZone(macroZone),
-      // After onApplied, the SDK may not have re-fired onInsert if the row was
-      // still in its local cache from the previous subscription. Sync explicitly.
+      clearStore: () => {
+        this.clearWorldZone(macroZone);
+        this.clearWorldCards(macroZone);
+      },
+      // After onApplied, the SDK may not have re-fired onInsert for rows already
+      // in its local cache. Sync zones and world cards independently.
       onApplied: () => {
-        if (this.data.zones.client.has(macroZone)) return;
         const conn = this.connection;
         if (!conn) return;
-        for (const zone of conn.db.zones.iter()) {
-          if (zone.macroZone === macroZone) {
-            this.data.applyServerInsert("zones", zone);
-            break;
+        const hasZone = [...this.data.zones.client.values()].some(z => z.macroZone === macroZone);
+        if (!hasZone) {
+          for (const zone of conn.db.zones.iter()) {
+            if (zone.macroZone === macroZone) {
+              this.data.applyServerInsert("zones", zone);
+            }
+          }
+        }
+        const hasCard = [...this.data.cards.client.values()].some(c => c.macroZone === macroZone && c.layer === WORLD_LAYER);
+        if (!hasCard) {
+          for (const card of conn.db.cards.iter()) {
+            if (card.macroZone === macroZone && card.layer === WORLD_LAYER) {
+              this.data.applyServerInsert("cards", card);
+            }
           }
         }
       },
@@ -229,6 +245,19 @@ export class SpacetimeManager {
 
   unsubscribeWorldZone(macroZone: number): void {
     this.removeSubscription(`zones:${macroZone}`);
+  }
+
+  async subscribeWorldPlayers(macroZone: number): Promise<void> {
+    const zoneId = packZoneId(macroZone, WORLD_LAYER);
+    return this.installSubscription(`players:${macroZone}`, {
+      queries: [`SELECT * FROM players WHERE macro_zone = ${macroZone} AND layer = ${WORLD_LAYER}`],
+      scopeKey: `macroZone:${macroZone}`,
+      clearStore: () => this.clearPlayersInWorldZone(zoneId),
+    });
+  }
+
+  unsubscribeWorldPlayers(macroZone: number): void {
+    this.removeSubscription(`players:${macroZone}`);
   }
 
   /**
@@ -314,8 +343,35 @@ export class SpacetimeManager {
   }
 
   private clearWorldZone(macroZone: number): void {
-    const row = this.data.zones.client.get(macroZone);
-    if (row) this.data.applyServerDelete("zones", row);
+    // Zone identity is `(macroZone, layer)` — scan all zones with this
+    // macroZone (across layers) since the subscribe API only carries
+    // macroZone. Once subscriptions become layer-scoped, this can use
+    // the `zone` secondary index instead.
+    const matches: Zone[] = [];
+    for (const z of this.data.zones.client.values()) {
+      if (z.macroZone === macroZone) matches.push(z);
+    }
+    for (const z of matches) this.data.applyServerDelete("zones", z);
+  }
+
+  private clearPlayersInWorldZone(zoneId: ZoneId): void {
+    const keys = Array.from(this.data.players.byIndex("zone", zoneId));
+    for (const key of keys) {
+      const row = this.data.players.client.get(key);
+      if (row) this.data.applyServerDelete("players", row);
+    }
+  }
+
+  private clearWorldCards(macroZone: number): void {
+    const keys: number[] = [];
+    for (const [key, card] of this.data.cards.client.entries()) {
+      if (card.macroZone === macroZone && card.layer >= WORLD_LAYER) {
+        keys.push(key as number);
+      }
+    }
+    for (const key of keys) {
+      this.data.advanceCardDeath(key);
+    }
   }
 
   private clearCardsInZone(zoneId: ZoneId): void {

@@ -68,6 +68,7 @@ export class GameScene extends Scene {
     ctx.actions = this.actionManager;
 
     this.worldPanManager = new WorldPanManager(ctx, this.gameLayout.worldView);
+    ctx.world = this.gameLayout.worldView;
 
     this.particleManager = new ParticleManager();
     void this.particleManager.init();
@@ -107,6 +108,7 @@ export class GameScene extends Scene {
       this.ctxRef.game = null;
       this.ctxRef.input = null;
       this.ctxRef.actions = null;
+      this.ctxRef.world = null;
       this.ctxRef = null;
     }
   }

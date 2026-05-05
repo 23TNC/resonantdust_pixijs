@@ -131,12 +131,18 @@ const tablesSchema = __schema({
   zones: __table({
     name: 'zones',
     indexes: [
+      { accessor: 'layer', name: 'zones_layer_idx_btree', algorithm: 'btree', columns: [
+        'layer',
+      ] },
       { accessor: 'macro_zone', name: 'zones_macro_zone_idx_btree', algorithm: 'btree', columns: [
         'macroZone',
       ] },
+      { accessor: 'zone_id', name: 'zones_zone_id_idx_btree', algorithm: 'btree', columns: [
+        'zoneId',
+      ] },
     ],
     constraints: [
-      { name: 'zones_macro_zone_key', constraint: 'unique', columns: ['macroZone'] },
+      { name: 'zones_zone_id_key', constraint: 'unique', columns: ['zoneId'] },
     ],
   }, ZonesRow),
 });

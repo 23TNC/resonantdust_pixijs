@@ -23,10 +23,14 @@ const INVENTORY_LAYER = 1;
 export type StackDirection = "top" | "bottom" | "hex";
 
 /** What `Card.setPosition` accepts. Loose = freely placed inventory xy;
- *  stacked = pinned to another card's stack-host with a direction. */
+ *  inventory = return to owner's inventory at given xy (resets layer/zone);
+ *  stacked = pinned to another card's stack-host with a direction;
+ *  world = placed at a specific world hex tile (q, r axial coords). */
 export type CardPositionState =
   | { kind: "loose"; x: number; y: number }
-  | { kind: "stacked"; parentId: number; direction: StackDirection };
+  | { kind: "inventory"; x: number; y: number }
+  | { kind: "stacked"; parentId: number; direction: StackDirection }
+  | { kind: "world"; q: number; r: number };
 
 export class Card {
   readonly cardId: number;
@@ -292,9 +296,11 @@ export class Card {
       // here means a "drop on same parent" path doesn't strand us on the
       // zone surface when no data actually changes.
       this.attachToCurrent();
-      const surface = this.layoutCard.parent;
-      if (surface) {
-        const sg = surface.container.getGlobalPosition();
+      // Use the actual PIXI parent (e.g. worldCardLayer) rather than the
+      // LayoutNode surface's container, which may differ for world cards.
+      const pixiParent = this.layoutCard.container.parent;
+      if (pixiParent) {
+        const sg = pixiParent.getGlobalPosition();
         this.layoutCard.setDisplayPosition(g.x - sg.x, g.y - sg.y);
       }
       this.layoutCard.setDragging(false);

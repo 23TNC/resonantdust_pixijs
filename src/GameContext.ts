@@ -12,6 +12,7 @@ import type { LayoutManager } from "./layout/LayoutManager";
 import type { SceneManager } from "./scenes/SceneManager";
 import type { SpacetimeManager } from "./server/SpacetimeManager";
 import type { DataManager } from "./state/DataManager";
+import type { LayoutWorld } from "./world/LayoutWorld";
 import type { ZoneManager } from "./zones/ZoneManager";
 
 export interface GameContext {
@@ -35,4 +36,6 @@ export interface GameContext {
   input: InputManager | null;
   /** Scene-scoped: set by GameScene on enter, cleared on exit. Null otherwise. */
   actions: ActionManager | null;
+  /** Scene-scoped: the world surface. Used by world-layer cards to compute screen position. */
+  world: LayoutWorld | null;
 }

@@ -40,7 +40,7 @@ export class GameLayout extends LayoutNode {
   ) {
     super();
     this.titleBar = new TitleBar(playerName);
-    this.worldView = new LayoutWorld(ctx);
+    this.worldView = new LayoutWorld(ctx, layoutManager);
     this.inventoryView = new LayoutInventory(layoutManager, inventoryZoneId);
     this.overlay = new OverlayNode();
     this.addChild(this.titleBar);

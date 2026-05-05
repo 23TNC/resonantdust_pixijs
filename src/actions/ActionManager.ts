@@ -8,6 +8,7 @@ import type { Action as ActionRow, InventoryStack } from "../server/bindings/typ
 import type { MagneticActionRow } from "../state/DataManager";
 import type { ShadowedChange } from "../state/ShadowedStore";
 import { packZoneId, type ZoneId } from "../zones/zoneId";
+import { WORLD_LAYER } from "../world/worldCoords";
 
 export interface CachedMagneticAction {
   magneticActionId: number;
@@ -100,24 +101,29 @@ export class ActionManager {
       throw new Error("[ActionManager] ctx.cards is null");
     }
 
-    // Pick up any actions already in the store for our zone (if our zone
-    // subscription landed before us, rows may already be present).
+    // Pick up any actions already in the store (inventory zone + any world zones).
     let seedCount = 0;
-    for (const row of ctx.data.valuesByIndex("actions", "zone", zoneId)) {
-      this.upsert(row as ActionRow);
-      seedCount++;
+    for (const row of ctx.data.values("actions")) {
+      const rowZoneId = packZoneId((row as ActionRow).macroZone, (row as ActionRow).layer);
+      if (rowZoneId === zoneId || (row as ActionRow).layer >= WORLD_LAYER) {
+        this.upsert(row as ActionRow);
+        seedCount++;
+      }
     }
     debug.log(["actions"], `[ActionManager] initialized zone=${zoneId} seeded=${seedCount}`, 2);
 
     this.unsubActionData = ctx.data.subscribe("actions", (change) => {
       this.onActionChange(change as ShadowedChange<ActionRow>);
     });
-    this.unsubStackChange = ctx.cards.subscribeStackChange(zoneId, (rootId) => {
+    this.unsubStackChange = ctx.cards.subscribeAllStackChanges((rootId) => {
       this.onStackChange(rootId);
     });
 
-    for (const row of ctx.data.valuesByIndex("magnetic_actions", "zone", zoneId)) {
-      this.upsertMagnetic(row as MagneticActionRow);
+    for (const row of ctx.data.values("magnetic_actions")) {
+      const r = row as MagneticActionRow;
+      if (packZoneId(r.macroZone, r.layer) === zoneId || r.layer >= WORLD_LAYER) {
+        this.upsertMagnetic(r);
+      }
     }
     this.unsubMagneticData = ctx.data.subscribe("magnetic_actions", (change) => {
       this.onMagneticChange(change as ShadowedChange<MagneticActionRow>);
@@ -193,13 +199,6 @@ export class ActionManager {
     }
     const row = change.newValue;
     if (!row) return;
-    if (packZoneId(row.macroZone, row.layer) !== this.zoneId) {
-      // Out of our zone — drop any stale entry we might have. Defensive
-      // against a row updating its zone (an action moving across zones is
-      // probably nonsense, but if it happens we don't want a ghost entry).
-      this.remove(row.actionId);
-      return;
-    }
     this.upsert(row);
   }
 
@@ -285,31 +284,47 @@ export class ActionManager {
     const top = this.collectChain(rootId, "top");
     const bottom = this.collectChain(rootId, "bottom");
 
-    debug.log(["actions"], `[ActionManager] onStackChange root=${rootId} up=[${top.join(",")}] down=[${bottom.join(",")}]`, 2);
+    debug.log(["actions"], `[ActionManager] onStackChange root=${rootId} up=[${top.join(",")}] down=[${bottom.join(",")}]`, 5);
 
     let needsSubmit = false;
     if (top.length >= 1) needsSubmit = this.evaluateBranch(top, "up") || needsSubmit;
     if (bottom.length >= 1) needsSubmit = this.evaluateBranch(bottom, "down") || needsSubmit;
 
     if (!needsSubmit) {
-      debug.log(["actions"], `[ActionManager] root=${rootId} — no change needed, skipping submit`, 2);
-      return;
+      // Force submit when the server is already tracking world position (any
+      // stack change there must propagate), or when the client has placed the
+      // root on the world while an action is already running on it.
+      const serverRow = this.ctx.data.cards.server.get(rootId);
+      const clientRow = this.ctx.data.get("cards", rootId);
+      const serverWorld = serverRow !== undefined && serverRow.layer >= WORLD_LAYER;
+      const clientWorldWithAction = clientRow !== undefined && clientRow.layer >= WORLD_LAYER && this.byCardId.has(rootId);
+      if (!serverWorld && !clientWorldWithAction) {
+        debug.log(["actions"], `[ActionManager] root=${rootId} — no change needed, skipping submit`, 4);
+        return;
+      }
+      debug.log(["actions"], `[ActionManager] root=${rootId} — forcing world submit (serverWorld=${serverWorld} clientWorldWithAction=${clientWorldWithAction})`, 3);
     }
 
-    // Pull the hex card_id off the root's local row when it's on a hex.
-    // The server can't read this from its own row (inventory cards
-    // server-side hold `microZone = 0`), so we forward it here.
+    // The server mirrors whatever (layer, macroZone, microZone,
+    // microLocation) we send onto the root's row verbatim, then
+    // derives the children's row state from the chain composition.
+    // Pull the root's current local view to populate the position
+    // fields. If the root row is gone (drag-induced race), bail —
+    // the next stack-change tick will retry with fresh data.
     const rootRow = this.ctx.data.get("cards", rootId);
-    const hexCardId =
-      rootRow && getStackedState(rootRow.microZone) === STACKED_ON_HEX
-        ? rootRow.microLocation
-        : undefined;
-    debug.log(["actions"], `[ActionManager] root=${rootId} — submitting stack (hex=${hexCardId ?? "none"})`, 3);
+    if (!rootRow) {
+      debug.log(["actions"], `[ActionManager] root=${rootId} — row missing, skipping submit`, 4);
+      return;
+    }
+    debug.log(["actions"], `[ActionManager] root=${rootId} — submitting stack (state=${rootRow.microZone & 0b11} parent=${rootRow.microLocation})`, 3);
     const stack: InventoryStack = {
       root: rootId,
+      layer: rootRow.layer,
+      macroZone: rootRow.macroZone,
+      microZone: rootRow.microZone,
+      microLocation: rootRow.microLocation,
       stackUp: top.slice(1),
       stackDown: bottom.slice(1),
-      hex: hexCardId,
     };
     void this.ctx.spacetime.submitStacks([stack]);
   }
@@ -477,10 +492,6 @@ export class ActionManager {
     }
     const row = change.newValue;
     if (!row) return;
-    if (packZoneId(row.macroZone, row.layer) !== this.zoneId) {
-      this.removeMagnetic(row.magneticActionId, row.cardId);
-      return;
-    }
     this.upsertMagnetic(row);
   }
 

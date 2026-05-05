@@ -51,9 +51,12 @@ export type CardHold = __Infer<typeof CardHold>;
 
 export const InventoryStack = __t.object("InventoryStack", {
   root: __t.u32(),
+  layer: __t.u8(),
+  macroZone: __t.u32(),
+  microZone: __t.u8(),
+  microLocation: __t.u32(),
   stackUp: __t.array(__t.u32()),
   stackDown: __t.array(__t.u32()),
-  hex: __t.option(__t.u32()),
 });
 export type InventoryStack = __Infer<typeof InventoryStack>;
 
@@ -100,6 +103,8 @@ export const PlayerSession = __t.object("PlayerSession", {
 export type PlayerSession = __Infer<typeof PlayerSession>;
 
 export const Zone = __t.object("Zone", {
+  zoneId: __t.u32(),
+  layer: __t.u8(),
   macroZone: __t.u32(),
   packedDefinition: __t.u8(),
   t0: __t.u64(),

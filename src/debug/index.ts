@@ -8,13 +8,13 @@
  */
 const config: readonly (readonly [string, number])[] = [
   ["actions",     3],
-  ["spacetime",   0],
-  ["zone",        1],
-  ["vite",        0],
-  ["definitions", 0],
-  ["layout",      0],
-  ["particles",   0],
-  ["cards",       0],
+  ["spacetime",   3],
+  ["zone",        3],
+  ["vite",        3],
+  ["definitions", 3],
+  ["layout",      3],
+  ["particles",   3],
+  ["cards",       3],
 ] as const;
 
 function shouldPrint(tags: string[], level: number): boolean {

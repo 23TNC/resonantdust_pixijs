@@ -17,6 +17,7 @@ import {
   HEX_WIDTH,
 } from "./HexCardVisual";
 import { LayoutCard } from "./LayoutCard";
+import { unpackMacroZone, WORLD_LAYER } from "../world/worldCoords";
 
 export { HEX_HEIGHT, HEX_RADIUS, HEX_WIDTH } from "./HexCardVisual";
 
@@ -111,6 +112,16 @@ export class LayoutHexCard extends LayoutCard {
       const def = this.ctx.definitions.decode(row.packedDefinition) ?? null;
       this.hexSprite.texture = this.ctx.textures.getHexTexture(def, row.packedDefinition);
       this.invalidate();
+    }
+
+    if (row.layer >= WORLD_LAYER) {
+      const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
+      const q = zoneQ + ((row.microZone >> 5) & 0x7);
+      const r = zoneR + ((row.microZone >> 2) & 0x7);
+      const x = HEX_RADIUS * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r);
+      const y = HEX_RADIUS * (3 / 2 * r);
+      this.setTarget(x - HEX_WIDTH / 2, y - HEX_HEIGHT / 2);
+      return;
     }
 
     const stacked = getStackedState(row.microZone);

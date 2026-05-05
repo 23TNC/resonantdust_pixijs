@@ -13,6 +13,7 @@ import {
   STACKED_ON_RECT_X,
   STACKED_ON_RECT_Y,
 } from "./cardData";
+import { packMacroZone, unpackMacroZone, WORLD_LAYER, ZONE_SIZE } from "../world/worldCoords";
 
 export type CardChangeKind = "added" | "removed";
 export type CardListener = (kind: CardChangeKind, card: Card) => void;
@@ -31,6 +32,7 @@ export class CardManager {
   private readonly byZone = new Map<ZoneId, Set<Card>>();
   private readonly listeners = new Map<ZoneId, Set<CardListener>>();
   private readonly stackListeners = new Map<ZoneId, Set<StackChangeListener>>();
+  private readonly globalStackListeners = new Set<StackChangeListener>();
   private readonly unsubscribe: () => void;
   /** Cards currently being spliced out — suppress fireStackChange for these roots. */
   private readonly splicing = new Set<number>();
@@ -59,7 +61,8 @@ export class CardManager {
    *   card's attachment) inherits this card's `microZone` and `microLocation`
    *   verbatim, transplanting its chain position exactly. The cross child is
    *   left for orphan-detection to recover (uncommon case).
-   * - State 3 (hex): not handled yet.
+   * - State 3 (hex/world-root): top child becomes the new root; bottom child
+   *   is directly re-parented onto the new root's bottom slot.
    */
   spliceCard(cardId: number): void {
     const card = this.cards.get(cardId);
@@ -70,17 +73,31 @@ export class CardManager {
     this.splicing.add(cardId);
     const state = getStackedState(row.microZone);
 
+    const isWorld = row.layer >= WORLD_LAYER;
+
     if (state === STACKED_LOOSE) {
-      const { x, y } = decodeLooseXY(row.microLocation);
-      // Make the top child the new root, then re-stack the bottom child onto
-      // it so the two survivors stay paired rather than scattering loose.
       const topId    = card.stackedTop;
       const bottomId = card.stackedBottom;
-      if (topId !== 0) {
-        this.setCardPosition(topId, { kind: "loose", x, y });
-        if (bottomId !== 0) this.stack(bottomId, topId, "bottom");
-      } else if (bottomId !== 0) {
-        this.setCardPosition(bottomId, { kind: "loose", x, y });
+      if (isWorld) {
+        const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
+        const q = zoneQ + ((row.microZone >> 5) & 0x7);
+        const r = zoneR + ((row.microZone >> 2) & 0x7);
+        if (topId !== 0) {
+          this.setCardPosition(topId, { kind: "world", q, r });
+          if (bottomId !== 0) this.stack(bottomId, topId, "bottom");
+        } else if (bottomId !== 0) {
+          this.setCardPosition(bottomId, { kind: "world", q, r });
+        }
+      } else {
+        // Make the top child the new root, then re-stack the bottom child onto
+        // it so the two survivors stay paired rather than scattering loose.
+        const { x, y } = decodeLooseXY(row.microLocation);
+        if (topId !== 0) {
+          this.setCardPosition(topId, { kind: "loose", x, y });
+          if (bottomId !== 0) this.stack(bottomId, topId, "bottom");
+        } else if (bottomId !== 0) {
+          this.setCardPosition(bottomId, { kind: "loose", x, y });
+        }
       }
     } else if (state === STACKED_ON_RECT_X || state === STACKED_ON_RECT_Y) {
       // stack() does a leaf walk from the parent which still sees this card
@@ -99,11 +116,32 @@ export class CardManager {
       const hexId = row.microLocation;
       const topId = card.stackedTop;
       const bottomId = card.stackedBottom;
-      if (topId !== 0) {
-        this.setCardPosition(topId, { kind: "stacked", parentId: hexId, direction: "hex" });
-        if (bottomId !== 0) this.stack(bottomId, topId, "bottom");
-      } else if (bottomId !== 0) {
-        this.setCardPosition(bottomId, { kind: "stacked", parentId: hexId, direction: "hex" });
+      if (isWorld) {
+        // microLocation=0 → bare tile, coords come from the dying card's own row.
+        // microLocation!=0 → stacked on a hex card, coords come from that card.
+        const coordRow = hexId !== 0 ? this.ctx.data.get("cards", hexId) : row;
+        if (coordRow) {
+          const { zoneQ, zoneR } = unpackMacroZone(coordRow.macroZone);
+          const q = zoneQ + ((coordRow.microZone >> 5) & 0x7);
+          const r = zoneR + ((coordRow.microZone >> 2) & 0x7);
+          if (topId !== 0) {
+            this.setCardPosition(topId, { kind: "world", q, r });
+            if (bottomId !== 0) {
+              // Direct re-parent — bypass stack()'s leaf walk which would fire
+              // fireStackChange on the intermediate single-card state.
+              this.setCardPosition(bottomId, { kind: "stacked", parentId: topId, direction: "bottom" });
+            }
+          } else if (bottomId !== 0) {
+            this.setCardPosition(bottomId, { kind: "world", q, r });
+          }
+        }
+      } else {
+        if (topId !== 0) {
+          this.setCardPosition(topId, { kind: "stacked", parentId: hexId, direction: "hex" });
+          if (bottomId !== 0) this.stack(bottomId, topId, "bottom");
+        } else if (bottomId !== 0) {
+          this.setCardPosition(bottomId, { kind: "stacked", parentId: hexId, direction: "hex" });
+        }
       }
       this.setCardPosition(cardId, { kind: "loose", x: 0, y: 0 });
     }
@@ -186,15 +224,39 @@ export class CardManager {
         microLocation: encodeLooseXY(state.x, state.y),
         microZone: clearStackedState(row.microZone),
       };
-    } else {
+    } else if (state.kind === "inventory") {
+      newRow = {
+        ...row,
+        macroZone: row.ownerId,
+        layer: 1,
+        microLocation: encodeLooseXY(state.x, state.y),
+        microZone: clearStackedState(row.microZone),
+      };
+    } else if (state.kind === "stacked") {
       const stateBits =
         state.direction === "top" ? STACKED_ON_RECT_X :
         state.direction === "bottom" ? STACKED_ON_RECT_Y :
         STACKED_ON_HEX;
+      const parentRow = this.ctx.data.get("cards", state.parentId);
       newRow = {
         ...row,
+        macroZone:     parentRow?.macroZone ?? row.macroZone,
+        layer:         parentRow?.layer     ?? row.layer,
         microLocation: state.parentId,
-        microZone: setStackedState(row.microZone, stateBits),
+        microZone:     setStackedState(row.microZone, stateBits),
+      };
+    } else {
+      // world: encode absolute (q, r) as macroZone + localQ/localR in microZone
+      const localQ = ((state.q % ZONE_SIZE) + ZONE_SIZE) % ZONE_SIZE;
+      const localR = ((state.r % ZONE_SIZE) + ZONE_SIZE) % ZONE_SIZE;
+      const zoneQ  = state.q - localQ;
+      const zoneR  = state.r - localR;
+      newRow = {
+        ...row,
+        macroZone:     packMacroZone(zoneQ, zoneR),
+        layer:         WORLD_LAYER,
+        microZone:     setStackedState((localQ << 5) | (localR << 2), STACKED_ON_HEX),
+        microLocation: 0,
       };
     }
     this.ctx.data.setClientCard(newRow);
@@ -240,6 +302,11 @@ export class CardManager {
     return this.addListener(this.stackListeners, zoneId, listener);
   }
 
+  subscribeAllStackChanges(listener: StackChangeListener): () => void {
+    this.globalStackListeners.add(listener);
+    return () => this.globalStackListeners.delete(listener);
+  }
+
   /**
    * Fire stack-change listeners for the chain rooted at `rootId`. Called
    * by `Card.onDataChange` after a parent/direction transition. Determines
@@ -252,8 +319,16 @@ export class CardManager {
     if (!root) return;
     const zoneId = root.zoneId();
     const set = this.stackListeners.get(zoneId);
-    if (!set) return;
-    for (const listener of set) {
+    if (set) {
+      for (const listener of set) {
+        try {
+          listener(rootId);
+        } catch (err) {
+          console.error("[CardManager] stack-change listener threw", err);
+        }
+      }
+    }
+    for (const listener of this.globalStackListeners) {
       try {
         listener(rootId);
       } catch (err) {

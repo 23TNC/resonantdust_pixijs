@@ -4,6 +4,8 @@ import { LayoutCard } from "../cards/LayoutCard";
 import { GameRectCard } from "../cards/RectangleCard";
 import type { GameContext } from "../GameContext";
 import type { LayoutNode } from "../layout/LayoutNode";
+import { WORLD_LAYER } from "../world/worldCoords";
+import { packZoneId } from "../zones/zoneId";
 import type { PointerEventData } from "./InputManager";
 
 interface DragState {
@@ -121,6 +123,18 @@ export class DragManager {
         }
       }
     }
+    // Drop onto the world surface if the cursor is over it.
+    const worldSurface = this.ctx.world;
+    if (worldSurface) {
+      const wg = worldSurface.container.getGlobalPosition();
+      const localX = up.x - wg.x;
+      const localY = up.y - wg.y;
+      if (localX >= 0 && localX <= worldSurface.width && localY >= 0 && localY <= worldSurface.height) {
+        const { q, r } = worldSurface.localToWorld(localX, localY);
+        card.setPosition({ kind: "world", q, r });
+        return;
+      }
+    }
     // No valid target — drop loose in the same zone.
     this.dropLoose(card, up, offsetX, offsetY);
     // TODO: cross-zone drops
@@ -132,9 +146,19 @@ export class DragManager {
     offsetX: number,
     offsetY: number,
   ): void {
-    // Hex-to-hex stacking not yet implemented — always drop loose in same zone.
+    const worldSurface = this.ctx.world;
+    if (worldSurface) {
+      const wg = worldSurface.container.getGlobalPosition();
+      const localX = up.x - wg.x;
+      const localY = up.y - wg.y;
+      if (localX >= 0 && localX <= worldSurface.width && localY >= 0 && localY <= worldSurface.height) {
+        const { q, r } = worldSurface.localToWorld(localX, localY);
+        card.setPosition({ kind: "world", q, r });
+        return;
+      }
+    }
+    // Not over the world — drop loose in same zone.
     this.dropLoose(card, up, offsetX, offsetY);
-    // TODO: hex stacking, cross-zone drops
   }
 
   private dropLoose(
@@ -143,6 +167,17 @@ export class DragManager {
     offsetX: number,
     offsetY: number,
   ): void {
+    const row = this.ctx.data.get("cards", card.cardId);
+    if (row && row.layer >= WORLD_LAYER) {
+      // World card dropped outside world surface — return to owner's inventory.
+      const inventoryZoneId = packZoneId(row.ownerId, 1);
+      const surface = this.ctx.layout?.surfaceFor(inventoryZoneId);
+      if (surface) {
+        const sg = surface.container.getGlobalPosition();
+        card.setPosition({ kind: "inventory", x: up.x - sg.x - offsetX, y: up.y - sg.y - offsetY });
+        return;
+      }
+    }
     // Look the zone surface up fresh (rather than using whatever the card was
     // parented to at drag start) — for a stacked-source drag that was a
     // stackHost, not the inventory coord space we need for loose xy.
