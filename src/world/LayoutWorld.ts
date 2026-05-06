@@ -9,6 +9,7 @@ import {
   HEIGHT_UNIT_PX,
   LightingManager,
   type Light,
+  type LightHandle,
   type Point3,
   type TriangleKind,
 } from "../lighting/LightingManager";
@@ -22,10 +23,6 @@ const BG_COLOR = "#0d1218";
  *  fill and the back-face-black effect are not gated on this — they're
  *  rendering, not debug. */
 const LIGHTING_DEBUG = false;
-
-/** Triangle layer alpha. Lets the tile sprites read through faintly while
- *  keeping the shading dominant. */
-const TRIANGLE_ALPHA = 1.0;
 
 /** Hex `u3` height of the dynamic point light, used both to position it
  *  in the LightingManager world frame and to label its glyph. */
@@ -51,6 +48,13 @@ const NORMAL_INDICATOR_SCALE = HEX_RADIUS / 2;
 
 /** Pixel radius of the on-screen debug glyph for the point light. */
 const LIGHT_GLYPH_RADIUS = 18;
+
+/** Parameters for the mouse-tracking light. The light's `(x, y, z)` is
+ *  recomputed each time the cursor crosses into a new hex; everything
+ *  else stays fixed. */
+const MOUSE_LIGHT_POWER = 5;
+const MOUSE_LIGHT_RANGE = 5;
+const MOUSE_LIGHT_FALLOFF = 0.3;
 
 /**
  * Hit-passthrough panning layer for world cards.
@@ -104,6 +108,20 @@ export class LayoutWorld extends LayoutNode {
 
   private readonly lighting: LightingManager;
 
+  /** Handle of the mouse-tracking light registered with `lighting`. The
+   *  light is created once in the constructor and updated in place as the
+   *  cursor moves between hexes. */
+  private readonly mouseLightHandle: LightHandle;
+  /** Hex the mouse light is currently attached to. NaN until the first
+   *  ticker tick — which is fine, since `NaN !== anyValue` so the first
+   *  comparison always falls through to an update. */
+  private mouseHexQ = NaN;
+  private mouseHexR = NaN;
+  /** Per-frame callback registered with `app.ticker` — polls the cursor
+   *  position via `ctx.input.lastPointer` and re-aims the mouse light if
+   *  the cursor has crossed into a new hex. */
+  private readonly mouseTicker: () => void;
+
   private viewQ = 0;
   private viewR = 0;
 
@@ -130,6 +148,22 @@ export class LayoutWorld extends LayoutNode {
 
     this.lighting = new LightingManager(ctx);
     this.lighting.registerLight(POINT_LIGHT);
+
+    // Mouse-tracking light. Initial position is irrelevant — the first
+    // ticker tick replaces it as soon as InputManager has logged a
+    // pointer position. `updateLight` flags it dirty automatically, so
+    // only this light's flood-fill re-runs each time the cursor crosses
+    // a hex boundary.
+    this.mouseLightHandle = this.lighting.registerLight({
+      x: 0,
+      y: 0,
+      z: 1,
+      power: MOUSE_LIGHT_POWER,
+      range: MOUSE_LIGHT_RANGE,
+      falloff: MOUSE_LIGHT_FALLOFF,
+    });
+    this.mouseTicker = () => this._tickMouseLight(ctx);
+    ctx.app.ticker.add(this.mouseTicker);
 
     // Light debug glyph lives inside lightingLayer's display tree so it
     // shares a layer with the lit triangles, but as persistent children —
@@ -206,6 +240,42 @@ export class LayoutWorld extends LayoutNode {
     };
   }
 
+  /**
+   * Per-frame poll: read the cursor from `ctx.input.lastPointer`, project
+   * canvas pixels into LayoutWorld-local pixels via the PIXI container
+   * transform, snap to the nearest hex, and — if the cursor has crossed
+   * into a new hex since last tick — `updateLight` the mouse light to that
+   * hex's centre at `tile.height + 1`. `updateLight` flags the light dirty
+   * so only its propagation gets recomputed.
+   */
+  private _tickMouseLight(ctx: GameContext): void {
+    const input = ctx.input;
+    if (!input) return;
+
+    const local = this.container.toLocal({
+      x: input.lastPointer.x,
+      y: input.lastPointer.y,
+    });
+    const { q, r } = this.localToWorld(local.x, local.y);
+    if (q === this.mouseHexQ && r === this.mouseHexR) return;
+    this.mouseHexQ = q;
+    this.mouseHexR = r;
+
+    const worldX = HEX_RADIUS * Math.sqrt(3) * (q + r / 2);
+    const worldY = HEX_RADIUS * 1.5 * r;
+    const tileHeight = this.tileData.get(`${q},${r}`)?.height ?? 0;
+
+    this.lighting.updateLight(this.mouseLightHandle, {
+      x: worldX,
+      y: worldY,
+      z: tileHeight + 1,
+      power: MOUSE_LIGHT_POWER,
+      range: MOUSE_LIGHT_RANGE,
+      falloff: MOUSE_LIGHT_FALLOFF,
+    });
+    this.invalidate();
+  }
+
   /** Pixel position local to this node → nearest world hex (q, r). */
   localToWorld(localX: number, localY: number): { q: number; r: number } {
     const dx = localX - this.width  / 2;
@@ -265,16 +335,12 @@ export class LayoutWorld extends LayoutNode {
     const [bx, by] = this._project(b, originX, originY);
     const [cx, cy] = this._project(c, originX, originY);
 
-    // LightingManager already folds ambient + upward bias + tone-mapped
-    // propagated light into the colour, so just remap to 0..255 here.
-    const r8 = Math.round(lit.color[0] * 255);
-    const g8 = Math.round(lit.color[1] * 255);
-    const b8 = Math.round(lit.color[2] * 255);
-    const fill = (r8 << 16) | (g8 << 8) | b8;
-
+    // Render lighting as a black shadow overlay — alpha is the inverse of
+    // brightness so fully lit triangles draw transparent (the tile sprite
+    // reads through cleanly) and fully dark triangles draw fully black.
     const polyChain = this.lightingLayer
       .poly([ax, ay, bx, by, cx, cy])
-      .fill({ color: fill, alpha: TRIANGLE_ALPHA });
+      .fill({ color: 0x000000, alpha: 1 - lit.brightness });
 
     if (LIGHTING_DEBUG) {
       polyChain.stroke({ width: 1, color: 0xffffff, alpha: 0.35 });
@@ -421,6 +487,7 @@ export class LayoutWorld extends LayoutNode {
     this.unsubZones();
     this.unsubZoneAdded();
     this.unsubZoneRemoved();
+    this.ctx.app.ticker.remove(this.mouseTicker);
     this.lighting.dispose();
     this.sunCircle.destroy();
     this.sunLabel.destroy();

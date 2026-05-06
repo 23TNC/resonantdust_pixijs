@@ -27,7 +27,7 @@ const DEFAULT_MIN_LIGHT = 0.02;
  *  `normal.z` so flat surfaces are visible without lighting and so up-facing
  *  triangles never read totally black. */
 const AMBIENT = 0.0; // 0.2;
-const UPWARD_BIAS = 0.1; // 0.1;
+const UPWARD_BIAS = 0.0; // 0.1;
 
 export type LightHandle = number;
 
@@ -111,6 +111,20 @@ interface NormalisedLight {
   readonly slopeStrength: number;
   readonly heightStrength: number;
   readonly minLight: number;
+}
+
+/**
+ * Per-light state. `contribution` is this light's per-triangle propagation
+ * result from its last clean recompute; `dirty` flags it for recomputation
+ * on the next `lightingAt` call. The aggregate `totalLight` is kept in sync
+ * incrementally — when a dirty light is recomputed, the old contribution is
+ * subtracted and the new one is added, so static lights pay nothing on
+ * frames where only a dynamic light moved.
+ */
+interface LightEntry {
+  light: NormalisedLight;
+  dirty: boolean;
+  contribution: Map<string, number>;
 }
 
 function normaliseLight(l: Light): NormalisedLight {
@@ -214,13 +228,14 @@ export class LightingManager {
   /** Lazy per-triangle geometry cache. */
   private readonly triCache = new Map<string, TriangleData>();
 
-  private readonly lights = new Map<LightHandle, NormalisedLight>();
+  private readonly lights = new Map<LightHandle, LightEntry>();
   private nextHandle = 1;
 
-  /** `triKey → accumulated light` after flood-fill propagation. `null`
-   *  means it needs recomputing — set on zone changes and light register /
-   *  unregister, then rebuilt lazily on the next `lightingAt` call. */
-  private propagated: Map<string, number> | null = null;
+  /** `triKey → totalLight`. Always kept in sync with the sum of every
+   *  registered light's `contribution`. Updated incrementally inside
+   *  `_ensureFreshLighting` — only dirty lights are recomputed, and their
+   *  delta (`new − old`) is applied per affected triangle. */
+  private readonly totalLight = new Map<string, number>();
 
   private readonly unsubZones: () => void;
 
@@ -233,22 +248,48 @@ export class LightingManager {
       this.evictZone(zone);
       if (change.kind !== "delete") this.ingest(zone);
       // Heights along a zone border feed neighbouring hexes' triangle
-      // vertices, so the safe blast radius is "everything we've cached" —
-      // for both the geometry and the propagation accumulator.
+      // vertices, so the safe blast radius for the geometry is "everything
+      // we've cached." Every light's propagation depends on the geometry,
+      // so they all get marked dirty.
       this.triCache.clear();
-      this.propagated = null;
+      for (const entry of this.lights.values()) entry.dirty = true;
     });
   }
 
   registerLight(light: Light): LightHandle {
     const handle = this.nextHandle++;
-    this.lights.set(handle, normaliseLight(light));
-    this.propagated = null;
+    this.lights.set(handle, {
+      light: normaliseLight(light),
+      dirty: true,
+      contribution: new Map(),
+    });
     return handle;
   }
 
   unregisterLight(handle: LightHandle): void {
-    if (this.lights.delete(handle)) this.propagated = null;
+    const entry = this.lights.get(handle);
+    if (!entry) return;
+    this._subtractContribution(entry.contribution);
+    this.lights.delete(handle);
+  }
+
+  /** Replace a registered light's parameters in place and flag it for
+   *  recomputation on the next `lightingAt` call. Static lights pay no
+   *  cost; only the updated light walks its flood-fill again. */
+  updateLight(handle: LightHandle, light: Light): void {
+    const entry = this.lights.get(handle);
+    if (!entry) return;
+    entry.light = normaliseLight(light);
+    entry.dirty = true;
+  }
+
+  /** Mark a registered light as needing its propagation recomputed. Useful
+   *  when something other than the light's own parameters has changed and
+   *  you want to force a refresh — though zone updates already mark every
+   *  light dirty automatically. */
+  markLightDirty(handle: LightHandle): void {
+    const entry = this.lights.get(handle);
+    if (entry) entry.dirty = true;
   }
 
   /** Tile height in `u3` units (0..7). 0 for unknown / unloaded tiles. */
@@ -274,9 +315,9 @@ export class LightingManager {
    *  tone-mapped flood-fill light. */
   lightingAt(q: number, r: number, kind: TriangleKind): HexLighting {
     const tri = this.triangleAt(q, r, kind);
-    if (this.propagated === null) this.recomputePropagation();
+    this._ensureFreshLighting();
 
-    const propagated = this.propagated!.get(triKey(q, r, kind)) ?? 0;
+    const propagated = this.totalLight.get(triKey(q, r, kind)) ?? 0;
     const nz = Math.max(0, tri.normal[2]);
     const brightness = Math.min(
       1,
@@ -295,31 +336,53 @@ export class LightingManager {
     this.heights.clear();
     this.triCache.clear();
     this.lights.clear();
-    this.propagated = null;
+    this.totalLight.clear();
   }
 
   // ── propagation ──────────────────────────────────────────────────────────
 
-  private recomputePropagation(): void {
-    const result = new Map<string, number>();
-    for (const light of this.lights.values()) {
-      this.propagateLight(light, result);
+  /** Walk every registered light, recompute the dirty ones, and apply the
+   *  delta of (new contribution − old contribution) to `totalLight`. */
+  private _ensureFreshLighting(): void {
+    for (const entry of this.lights.values()) {
+      if (!entry.dirty) continue;
+      const next = this._computeContribution(entry.light);
+      this._applyContributionDelta(entry.contribution, next);
+      entry.contribution = next;
+      entry.dirty = false;
     }
-    this.propagated = result;
+  }
+
+  /** Subtract `oldContrib` and add `newContrib` to `totalLight`, dropping
+   *  keys whose accumulated value goes to zero (within floating-point
+   *  noise) so the map stays compact. */
+  private _applyContributionDelta(
+    oldContrib: Map<string, number>,
+    newContrib: Map<string, number>,
+  ): void {
+    this._subtractContribution(oldContrib);
+    for (const [k, v] of newContrib) {
+      this.totalLight.set(k, (this.totalLight.get(k) ?? 0) + v);
+    }
+  }
+
+  private _subtractContribution(contrib: Map<string, number>): void {
+    for (const [k, v] of contrib) {
+      const next = (this.totalLight.get(k) ?? 0) - v;
+      if (next > 1e-9) this.totalLight.set(k, next);
+      else this.totalLight.delete(k);
+    }
   }
 
   /**
-   * Dijkstra-style flood fill for one light, summed into `accumulator`.
-   * The brightest unvisited triangle is dequeued first so each triangle is
-   * finalised at its peak reachable light value; once finalised, that value
-   * is added to the global accumulator (linear sum across lights).
+   * Dijkstra-style flood fill for one light, returning a fresh per-triangle
+   * contribution map. The brightest unvisited triangle is dequeued first so
+   * each triangle is finalised at its peak reachable light value.
    */
-  private propagateLight(
-    light: NormalisedLight,
-    accumulator: Map<string, number>,
-  ): void {
+  private _computeContribution(light: NormalisedLight): Map<string, number> {
+    const contribution = new Map<string, number>();
     const sourceKey = this.findContainingTriangle(light.x, light.y);
-    if (sourceKey === null) return;
+    if (sourceKey === null) return contribution;
 
     const visited = new Map<string, number>();
     const queue: { key: string; light: number; step: number }[] = [
@@ -383,9 +446,8 @@ export class LightingManager {
       }
     }
 
-    for (const [k, v] of visited) {
-      accumulator.set(k, (accumulator.get(k) ?? 0) + v);
-    }
+    for (const [k, v] of visited) contribution.set(k, v);
+    return contribution;
   }
 
   /**
