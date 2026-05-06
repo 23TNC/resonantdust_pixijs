@@ -20,6 +20,20 @@ import { FLAG_ACTION_CANCELED } from "../actions/ActionManager";
 
 const DEATH_SPEED = 0.04;
 
+/** Mix a `#rrggbb` (or numeric) color toward white by `amount` (0..1). Used
+ *  to derive the bright-fill color of the pending-action progress bar from
+ *  the card's secondary color. */
+function brighten(color: string | number, amount: number): number {
+  const c = typeof color === "string"
+    ? parseInt(color.replace(/^#/, ""), 16)
+    : color;
+  const r = (c >> 16) & 0xff;
+  const g = (c >> 8) & 0xff;
+  const b = c & 0xff;
+  const mix = (v: number): number => Math.min(255, Math.round(v + (255 - v) * amount));
+  return (mix(r) << 16) | (mix(g) << 8) | mix(b);
+}
+
 export const CARD_SCALE = 1;
 export const RECT_CARD_WIDTH        = 72 * CARD_SCALE;
 export const RECT_CARD_HEIGHT       = 96 * CARD_SCALE;
@@ -204,6 +218,26 @@ export class LayoutRectCard extends LayoutCard {
     }
     const barStyle = recipeDef?.style ?? null;
 
+    // Pending-action progress — when an action insert/update is buffered for
+    // this card, count down the buffer in the title bar so the player sees
+    // something is on the way. The right side reuses the title-bar color so
+    // it blends in; the left side is a brighter shade of the same color.
+    let pendingFill = 0;
+    if (progressFill === 0) {
+      for (const queued of this.ctx.data.actions.pendingValues()) {
+        if (queued.cardId !== this.cardId) continue;
+        if ((queued.flags & FLAG_ACTION_CANCELED) !== 0) continue;
+        const receivedAt = this.ctx.data.actions.getReceivedAt(queued.actionId);
+        const fireAtMs = this.ctx.data.actions.pendingFireAt(queued.actionId);
+        if (receivedAt === undefined || fireAtMs === undefined) continue;
+        const startMs = receivedAt * 1000;
+        const duration = fireAtMs - startMs;
+        if (duration <= 0) continue;
+        pendingFill = Math.min(1, Math.max(0, (Date.now() - startMs) / duration));
+        break;
+      }
+    }
+
     this.progressBar.clear();
     if (barStyle && progressFill > 0) {
       const secondary = def?.style[1] ?? "#7a7a8a";
@@ -221,6 +255,18 @@ export class LayoutRectCard extends LayoutCard {
         this.progressBar
           .rect(splitX, titleY, this.width - splitX, RECT_CARD_TITLE_HEIGHT)
           .fill({ color: right });
+      }
+    } else if (pendingFill > 0) {
+      const secondary = def?.style[1] ?? "#7a7a8a";
+      const left  = brighten(secondary, 0.2);
+      const splitX = pendingFill * this.width;
+      if (splitX > 0) {
+        this.progressBar.rect(0, titleY, splitX, RECT_CARD_TITLE_HEIGHT).fill({ color: left });
+      }
+      if (splitX < this.width) {
+        this.progressBar
+          .rect(splitX, titleY, this.width - splitX, RECT_CARD_TITLE_HEIGHT)
+          .fill({ color: secondary });
       }
     }
 
@@ -281,7 +327,7 @@ export class LayoutRectCard extends LayoutCard {
       }
     }
     const moving = this.tweenTo(effX, effY);
-    return this.state.dragging || moving || this.dying || actionRow !== undefined;
+    return this.state.dragging || moving || this.dying || actionRow !== undefined || pendingFill > 0;
   }
 
   private _spawnDeathEffect(): void {

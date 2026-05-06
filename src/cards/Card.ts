@@ -40,6 +40,7 @@ export class Card {
   private readonly cardManager: CardManager;
   private unsubscribe: (() => void) | null = null;
   private unsubAction: (() => void) | null = null;
+  private unsubActionPending: (() => void) | null = null;
   private currentZoneId: ZoneId;
   /** card_id we're stacked on, or 0 when loose. Drives layout-side parenting:
    *  loose → zone surface, stacked → parent card's stackHost. */
@@ -164,6 +165,17 @@ export class Card {
         this.layoutCard.invalidate();
       });
     }
+
+    // Pending-action progress: layout reads `data.actions.pendingValues()`
+    // each frame, but only re-runs when something invalidates it. Subscribe
+    // to the parallel pending channel so a buffered action insert kicks the
+    // card back into the animation loop and the bar starts ticking.
+    this.unsubActionPending = ctx.data.actions.subscribePending((change) => {
+      const row = change.newValue ?? change.oldValue;
+      if (row && row.cardId === this.cardId) {
+        this.layoutCard.invalidate();
+      }
+    });
   }
 
   /**
@@ -316,6 +328,8 @@ export class Card {
     this.unsubscribe = null;
     this.unsubAction?.();
     this.unsubAction = null;
+    this.unsubActionPending?.();
+    this.unsubActionPending = null;
     // Free our slot on the parent so its back-pointer doesn't dangle.
     if (this.currentParentId !== 0 && this.currentStackDirection) {
       this.clearBackPointerOn(this.currentParentId, this.currentStackDirection);

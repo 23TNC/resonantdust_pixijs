@@ -96,6 +96,7 @@ export class ShadowedStore<T> {
   >();
   private readonly indexes = new Map<string, IndexState<T>>();
   private readonly pendingQueues = new Map<number | string, PendingOp<T>[]>();
+  private readonly pendingListeners = new Set<ShadowedListener<T>>();
   private readonly clientTransform: FireTransform<T> | undefined;
   private readonly deltaTMs: ((row: T) => number) | undefined;
   private readonly defaultDelayMs: number;
@@ -127,6 +128,19 @@ export class ShadowedStore<T> {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
+    };
+  }
+
+  /** Parallel subscription channel that fires only when a delayed op enters
+   *  the pending queue. Lets UI surface "buffered server state on the way"
+   *  (e.g. a pending-action progress countdown) without disturbing the
+   *  regular `subscribe` / `subscribeKey` contract — those still see only
+   *  committed state. The change carries the would-be-applied row as
+   *  `newValue`; `oldValue` is the current client row if any. */
+  subscribePending(listener: ShadowedListener<T>): () => void {
+    this.pendingListeners.add(listener);
+    return () => {
+      this.pendingListeners.delete(listener);
     };
   }
 
@@ -381,6 +395,32 @@ export class ShadowedStore<T> {
     return this.pendingQueues.has(key);
   }
 
+  /** Yields the would-be-visible row of each pending op (most recent op per
+   *  key when several are stacked). Inserts/updates yield the queued
+   *  post-state, dying yields the dying row, deletes yield nothing. Useful
+   *  for surfacing "buffered server state that hasn't landed yet" in the UI
+   *  (e.g. progress countdowns during the display buffer). */
+  *pendingValues(): Generator<T> {
+    for (const queue of this.pendingQueues.values()) {
+      if (queue.length === 0) continue;
+      const op = queue[queue.length - 1];
+      switch (op.kind) {
+        case "insert": yield op.row; break;
+        case "update": yield op.newRow; break;
+        case "dying":  yield op.row; break;
+        // "delete" intentionally yields nothing — the row is going away.
+      }
+    }
+  }
+
+  /** Wall-clock ms timestamp at which the next queued op for `key` will fire,
+   *  or undefined when nothing is queued. */
+  pendingFireAt(key: number | string): number | undefined {
+    const queue = this.pendingQueues.get(key);
+    if (!queue || queue.length === 0) return undefined;
+    return queue[0].fireAt;
+  }
+
   /** Force every pending delayed write for `key` (or all keys, if omitted) to commit synchronously. Pending promises resolve as if the timer had fired. */
   flushPending(key?: number | string): void {
     if (key === undefined) {
@@ -417,6 +457,7 @@ export class ShadowedStore<T> {
     this.receivedAt.clear();
     this.flushedAt.clear();
     this.listeners.clear();
+    this.pendingListeners.clear();
     this.keyListeners.clear();
     for (const state of this.indexes.values()) state.forward.clear();
   }
@@ -429,6 +470,32 @@ export class ShadowedStore<T> {
     }
     queue.push(op);
     if (queue.length === 1) this.armPendingTimer(key);
+    this.emitPending(key, op);
+  }
+
+  private emitPending(key: number | string, op: PendingOp<T>): void {
+    if (this.pendingListeners.size === 0) return;
+    let newValue: T | undefined;
+    switch (op.kind) {
+      case "insert": newValue = op.row; break;
+      case "update": newValue = op.newRow; break;
+      case "dying":  newValue = op.row; break;
+      // "delete" — newValue stays undefined (the row is going away).
+    }
+    const change: ShadowedChange<T> = {
+      kind: op.kind === "delete" ? "delete" : op.kind === "update" ? "update" : op.kind === "dying" ? "dying" : "insert",
+      source: "server",
+      key,
+      oldValue: this.client.get(key),
+      newValue,
+    };
+    for (const listener of this.pendingListeners) {
+      try {
+        listener(change);
+      } catch (err) {
+        console.error("[ShadowedStore] pending listener threw", err);
+      }
+    }
   }
 
   private armPendingTimer(key: number | string): void {
