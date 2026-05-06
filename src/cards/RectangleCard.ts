@@ -16,6 +16,7 @@ import { GameCard } from "./GameCard";
 import { LayoutCard } from "./LayoutCard";
 import { RectCardVisual } from "./RectCardVisual";
 import { unpackMacroZone } from "../world/worldCoords";
+import { FLAG_ACTION_CANCELED } from "../actions/ActionManager";
 
 const DEATH_SPEED = 0.04;
 
@@ -175,9 +176,14 @@ export class LayoutRectCard extends LayoutCard {
         : Math.max(0, this.height - RECT_CARD_TITLE_HEIGHT);
 
     // Progress bar — draws over the title bar fill when an action is active.
+    // Cancelled actions (FLAG_ACTION_CANCELED, bit 1) suppress progress so
+    // the bar isn't shown ticking during the dying window.
     const card = this.ctx.cards?.get(this.cardId);
-    const actionRow = card?.currentAction
+    const rawActionRow = card?.currentAction
       ? this.ctx.data.get("actions", card.currentAction.actionId)
+      : undefined;
+    const actionRow = rawActionRow && (rawActionRow.flags & FLAG_ACTION_CANCELED) === 0
+      ? rawActionRow
       : undefined;
     const recipeDef = actionRow
       ? this.ctx.recipes.decode(actionRow.recipe)
@@ -189,7 +195,7 @@ export class LayoutRectCard extends LayoutCard {
         const start = actionRow.end - recipeDef.duration;
         progressFill = Math.min(1, Math.max(0, (now - start) / recipeDef.duration));
       } else {
-        const receivedAt = this.ctx.data.actions.getReceivedAt(actionRow.actionId) ?? now;
+        const receivedAt = this.ctx.data.actions.getFlushedAt(actionRow.actionId) ?? now;
         const duration = actionRow.end - receivedAt;
         if (duration > 0 && now <= actionRow.end) {
           progressFill = Math.min(1, Math.max(0, (now - receivedAt) / duration));

@@ -8,7 +8,7 @@ import {
   STACKED_LOOSE,
   type LooseXY,
 } from "./cardData";
-import type { CachedMagneticAction } from "../actions/ActionManager";
+import { FLAG_ACTION_CANCELED, type CachedMagneticAction } from "../actions/ActionManager";
 import { GameCard } from "./GameCard";
 import {
   hexPoints,
@@ -138,9 +138,14 @@ export class LayoutHexCard extends LayoutCard {
 
     // Progress bar arc — drawn between hexSprite and stateOverlay.
     // Use the regular action if present; fall back to a magnetic action.
+    // Cancelled actions (FLAG_ACTION_CANCELED, bit 1) suppress progress so
+    // the arc isn't shown ticking during the dying window.
     const card = this.ctx.cards?.get(this.cardId);
-    const actionRow = card?.currentAction
+    const rawActionRow = card?.currentAction
       ? this.ctx.data.get("actions", card.currentAction.actionId)
+      : undefined;
+    const actionRow = rawActionRow && (rawActionRow.flags & FLAG_ACTION_CANCELED) === 0
+      ? rawActionRow
       : undefined;
     const activeRecipePacked = actionRow?.recipe ?? this.currentMagneticAction?.recipe;
     const activeEnd          = actionRow?.end    ?? this.currentMagneticAction?.end;

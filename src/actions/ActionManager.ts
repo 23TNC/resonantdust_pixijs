@@ -10,6 +10,12 @@ import type { ShadowedChange } from "../state/ShadowedStore";
 import { packZoneId, type ZoneId } from "../zones/zoneId";
 import { WORLD_LAYER } from "../world/worldCoords";
 
+/** Bit 1 of `Action.flags`. Mirrors `FLAG_ACTION_CANCELED` in the Rust module:
+ *  set together with `FLAG_ACTION_DEAD` when an action ended for a reason
+ *  other than completion (root drifted, slot fillers moved, etc.). The client
+ *  uses it to suppress progress display during the dying window. */
+export const FLAG_ACTION_CANCELED = 1 << 1;
+
 export interface CachedMagneticAction {
   magneticActionId: number;
   cardId: number;
@@ -279,6 +285,13 @@ export class ActionManager {
    * If any actor candidate in either branch would trigger a server-side
    * state change (start, cancel, or upgrade), submit the stack so the
    * server can do its authoritative pass.
+   *
+   * The pre-filter reads from `data.serverValues("actions")` — the
+   * client-side `byCardId` / `byActionId` caches lag the server during
+   * the display-buffer window, and a stale view here would let real
+   * start/cancel/upgrade transitions slip past the "should we submit?"
+   * check. The caches still drive `subscribeCard` so UI animations
+   * stay aligned with what the user is currently looking at.
    */
   private onStackChange(rootId: number): void {
     const top = this.collectChain(rootId, "top");
@@ -286,18 +299,20 @@ export class ActionManager {
 
     debug.log(["actions"], `[ActionManager] onStackChange root=${rootId} up=[${top.join(",")}] down=[${bottom.join(",")}]`, 5);
 
+    const serverActionsByCard = this.buildServerActionsByCard();
+
     let needsSubmit = false;
-    if (top.length >= 1) needsSubmit = this.evaluateBranch(top, "up") || needsSubmit;
-    if (bottom.length >= 1) needsSubmit = this.evaluateBranch(bottom, "down") || needsSubmit;
+    if (top.length >= 1) needsSubmit = this.evaluateBranch(top, "up", serverActionsByCard) || needsSubmit;
+    if (bottom.length >= 1) needsSubmit = this.evaluateBranch(bottom, "down", serverActionsByCard) || needsSubmit;
 
     if (!needsSubmit) {
       // Force submit when the server is already tracking world position (any
       // stack change there must propagate), or when the client has placed the
       // root on the world while an action is already running on it.
-      const serverRow = this.ctx.data.cards.server.get(rootId);
+      const serverRow = this.ctx.data.getServer("cards", rootId);
       const clientRow = this.ctx.data.get("cards", rootId);
       const serverWorld = serverRow !== undefined && serverRow.layer >= WORLD_LAYER;
-      const clientWorldWithAction = clientRow !== undefined && clientRow.layer >= WORLD_LAYER && this.byCardId.has(rootId);
+      const clientWorldWithAction = clientRow !== undefined && clientRow.layer >= WORLD_LAYER && serverActionsByCard.has(rootId);
       if (!serverWorld && !clientWorldWithAction) {
         debug.log(["actions"], `[ActionManager] root=${rootId} — no change needed, skipping submit`, 4);
         return;
@@ -329,6 +344,18 @@ export class ActionManager {
     void this.ctx.spacetime.submitStacks([stack]);
   }
 
+  /** Snapshot of the server's `actions` table keyed by actor `cardId`. Built
+   *  once per pre-filter pass so every branch / actor candidate sees the
+   *  same authoritative view, regardless of where the client's display
+   *  buffer happens to be. One action per actor today. */
+  private buildServerActionsByCard(): Map<number, ActionRow> {
+    const map = new Map<number, ActionRow>();
+    for (const row of this.ctx.data.serverValues("actions")) {
+      map.set(row.cardId, row);
+    }
+    return map;
+  }
+
   /**
    * Walk every potential actor in `chain` and apply the four-way
    * upgrade decision. Returns `true` if any candidate would trigger a
@@ -336,14 +363,18 @@ export class ActionManager {
    * candidates (not short-circuiting) so a future debug logger can see
    * every decision.
    */
-  private evaluateBranch(chain: readonly number[], direction: "up" | "down"): boolean {
+  private evaluateBranch(
+    chain: readonly number[],
+    direction: "up" | "down",
+    serverActionsByCard: Map<number, ActionRow>,
+  ): boolean {
     const defs = this.resolveDefinitions(chain);
     const hexDef = this.resolveHexDef(chain);
     debug.log(["actions"], `[ActionManager] evaluateBranch direction=${direction} chain=[${chain.join(",")}] defs=[${defs.map(d => d?.key ?? "null").join(",")}] hexDef=${hexDef?.key ?? "none"}`, 1);
-    const claimedBy = this.buildClaimedMap(chain, direction);
+    const claimedBy = this.buildClaimedMap(chain, direction, serverActionsByCard);
     let needsSubmit = false;
     for (let actorIdx = 0; actorIdx < chain.length; actorIdx++) {
-      if (this.evaluateActorCandidate(chain, defs, actorIdx, direction, claimedBy, hexDef)) {
+      if (this.evaluateActorCandidate(chain, defs, actorIdx, direction, claimedBy, hexDef, serverActionsByCard)) {
         needsSubmit = true;
       }
     }
@@ -383,17 +414,18 @@ export class ActionManager {
   private buildClaimedMap(
     chain: readonly number[],
     direction: "up" | "down",
+    serverActionsByCard: Map<number, ActionRow>,
   ): Map<number, number> {
     const map = new Map<number, number>();
     for (let i = 0; i < chain.length; i++) {
-      const actionId = this.byCardId.get(chain[i]);
-      if (actionId === undefined) continue;
-      const action = this.byActionId.get(actionId);
+      const action = serverActionsByCard.get(chain[i]);
       if (!action) continue;
-      const count = direction === "up" ? action.participantsUp : action.participantsDown;
+      const count = direction === "up"
+        ? (action.participants >> 4) & 0x0F
+        : action.participants & 0x0F;
       if (count === 0) continue;
       for (let j = i; j < i + count && j < chain.length; j++) {
-        map.set(chain[j], actionId);
+        map.set(chain[j], action.actionId);
       }
     }
     return map;
@@ -411,12 +443,11 @@ export class ActionManager {
     direction: "up" | "down",
     claimedBy: Map<number, number>,
     hexDef: CardDefinition | null,
+    serverActionsByCard: Map<number, ActionRow>,
   ): boolean {
     const actorId = chain[actorIdx];
-    const actorActionId = this.byCardId.get(actorId);
-    const actorAction = actorActionId !== undefined
-      ? this.byActionId.get(actorActionId) ?? null
-      : null;
+    const actorAction = serverActionsByCard.get(actorId) ?? null;
+    const actorActionId = actorAction?.actionId;
 
     if (actorAction && actorAction.cardId !== actorId) {
       debug.log(["actions"], `[ActionManager] card=${actorId} skip — slot filler in action=${actorActionId}`, 1);

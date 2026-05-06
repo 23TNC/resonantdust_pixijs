@@ -20,6 +20,7 @@ export const Action = __t.object("Action", {
   end: __t.u32(),
   participants: __t.u8(),
   flags: __t.u8(),
+  deltaT: __t.u8(),
 });
 export type Action = __Infer<typeof Action>;
 
@@ -40,6 +41,7 @@ export const Card = __t.object("Card", {
   ownerId: __t.u32(),
   packedDefinition: __t.u16(),
   flags: __t.u8(),
+  deltaT: __t.u8(),
 });
 export type Card = __Infer<typeof Card>;
 
@@ -68,6 +70,8 @@ export const MagneticAction = __t.object("MagneticAction", {
   layer: __t.u8(),
   macroZone: __t.u32(),
   loopCount: __t.u8(),
+  flags: __t.u8(),
+  deltaT: __t.u8(),
 });
 export type MagneticAction = __Infer<typeof MagneticAction>;
 
@@ -85,6 +89,27 @@ export const MagneticActionScheduler = __t.object("MagneticActionScheduler", {
 });
 export type MagneticActionScheduler = __Infer<typeof MagneticActionScheduler>;
 
+export const PendingActionDeletion = __t.object("PendingActionDeletion", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+  actionId: __t.u32(),
+});
+export type PendingActionDeletion = __Infer<typeof PendingActionDeletion>;
+
+export const PendingCardDeletion = __t.object("PendingCardDeletion", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+  cardId: __t.u32(),
+});
+export type PendingCardDeletion = __Infer<typeof PendingCardDeletion>;
+
+export const PendingMagneticActionDeletion = __t.object("PendingMagneticActionDeletion", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+  magneticActionId: __t.u32(),
+});
+export type PendingMagneticActionDeletion = __Infer<typeof PendingMagneticActionDeletion>;
+
 export const Player = __t.object("Player", {
   playerId: __t.u32(),
   name: __t.string(),
@@ -93,6 +118,7 @@ export const Player = __t.object("Player", {
   macroZone: __t.u32(),
   microZone: __t.u8(),
   microLocation: __t.u32(),
+  deltaT: __t.u8(),
 });
 export type Player = __Infer<typeof Player>;
 
@@ -115,6 +141,7 @@ export const Zone = __t.object("Zone", {
   t5: __t.u64(),
   t6: __t.u64(),
   t7: __t.u64(),
+  deltaT: __t.u8(),
 });
 export type Zone = __Infer<typeof Zone>;
 

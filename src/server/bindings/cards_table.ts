@@ -19,4 +19,5 @@ export default __t.row({
   ownerId: __t.u32().name("owner_id"),
   packedDefinition: __t.u16().name("packed_definition"),
   flags: __t.u8(),
+  deltaT: __t.u8().name("delta_t"),
 });

@@ -9,6 +9,7 @@ export interface MagneticActionRow {
   layer: number;
   macroZone: number;
   loopCount: number;
+  deltaT: number;
 }
 import type { SpacetimeManager } from "../server/SpacetimeManager";
 import { getStackedState, STACKED_LOOSE } from "../cards/cardData";
@@ -18,10 +19,18 @@ import { ShadowedStore, type ShadowedListener } from "./ShadowedStore";
 import { WORLD_LAYER } from "../world/worldCoords";
 
 /** Card row extended with a client-only death counter. `dead === 0` is live;
- *  `dead === 1` means the server deleted it but it is still playing out its
- *  death (subscribers see `kind === "dying"`); `dead === 2` is the final
- *  removal (subscribers see `kind === "dead"`). */
+ *  `dead === 1` means the server flagged it dead via `FLAG_CARD_DEAD` (bit 7
+ *  of `flags`) and it is still playing out its death (subscribers see
+ *  `kind === "dying"`); `dead === 2` is the final removal (subscribers see
+ *  `kind === "dead"`). */
 export type ClientCard = Card & { readonly dead: 0 | 1 | 2 };
+
+/** Bit 7 of `Card.flags`. Mirrors `FLAG_CARD_DEAD` in the Rust module: the
+ *  server sets this via UPDATE (carrying `delta_t`) instead of deleting the
+ *  row outright, so the client can back-date its death animation by
+ *  `16 * delta_t` ms. The actual row delete arrives later via the server-side
+ *  reaper. */
+const FLAG_CARD_DEAD = 1 << 7;
 
 export type TableMap = {
   cards: ClientCard;
@@ -42,22 +51,46 @@ export interface KeySetChange {
 
 export type KeySetListener = (change: KeySetChange) => void;
 
+/** Server stamps `end` (seconds) for the original timeline; the client receives
+ *  the row `delayMs` later, so its `end` slides forward by the same amount to
+ *  keep progress animations aligned with what the user is actually seeing.
+ *  The server map keeps the unshifted value. */
+const shiftEndByDelay = <R extends { end: number }>(row: R, delayMs: number): R => ({
+  ...row,
+  end: row.end + delayMs / 1000,
+});
+
+/** Every spacetime table carries `delta_t` (u8, 16-ms increments) — the
+ *  scheduled-reducer lag at the time the row was written. Subtracted from the
+ *  client display buffer so server lateness consumes the buffer rather than
+ *  stacking on top of it. */
+const deltaTMsFromRow = <R extends { deltaT: number }>(row: R): number => row.deltaT * 16;
+
+/** Pending applyServer* / markDying promises reject when the store is cleared
+ *  or disposed. Listeners are torn down separately, so we just need to keep
+ *  the unhandled-rejection noise out of the console. */
+const swallowCancelled = (): void => {};
+
 export class DataManager {
   readonly cards = new ShadowedStore<ClientCard>(
     (c) => c.cardId,
     { zone: (c) => packZoneId(c.macroZone, c.layer) },
+    { deltaTMs: deltaTMsFromRow, delayMs: 2000 },
   );
   readonly players = new ShadowedStore<Player>(
     (p) => p.playerId,
     { zone: (p) => packZoneId(p.macroZone, p.layer) },
+    { deltaTMs: deltaTMsFromRow },
   );
   readonly actions = new ShadowedStore<Action>(
     (a) => a.actionId,
     { zone: (a) => packZoneId(a.macroZone, a.layer) },
+    { clientTransform: shiftEndByDelay, deltaTMs: deltaTMsFromRow, delayMs: 2000 },
   );
   readonly zones = new ShadowedStore<Zone>(
     (z) => z.zoneId,
     { zone: (z) => packZoneId(z.macroZone, z.layer) },
+    { deltaTMs: deltaTMsFromRow, delayMs: 2000 },
   );
   readonly magneticActions = new ShadowedStore<MagneticActionRow>(
     (m) => m.magneticActionId,
@@ -65,6 +98,7 @@ export class DataManager {
       zone: (m) => packZoneId(m.macroZone, m.layer),
       card: (m) => m.cardId,
     },
+    { clientTransform: shiftEndByDelay, deltaTMs: deltaTMsFromRow, delayMs: 2000 },
   );
 
   private spacetime: SpacetimeManager | null = null;
@@ -226,6 +260,32 @@ export class DataManager {
     return this.storeOf(table).client.values();
   }
 
+  /** Server-side read: bypasses every client-side shadow (drag state,
+   *  optimistic `setClient`, dying rows still in the client map for their
+   *  death animation, and rows pending a delayed client commit). Returns
+   *  undefined if the server has no row for `key`. */
+  getServer<K extends TableName>(
+    table: K,
+    key: number | string,
+  ): TableMap[K] | undefined {
+    return this.storeOf(table).server.get(key);
+  }
+
+  /** True if the server map has an entry for `key`. May differ from a
+   *  client-side check during a delayed write, while a card is dying, or
+   *  when an optimistic local row exists with no server confirmation yet. */
+  hasServer<K extends TableName>(table: K, key: number | string): boolean {
+    return this.storeOf(table).server.has(key);
+  }
+
+  serverKeys<K extends TableName>(table: K): IterableIterator<number | string> {
+    return this.storeOf(table).server.keys();
+  }
+
+  serverValues<K extends TableName>(table: K): IterableIterator<TableMap[K]> {
+    return this.storeOf(table).server.values();
+  }
+
   keysByIndex<K extends TableName>(
     table: K,
     indexName: string,
@@ -265,64 +325,92 @@ export class DataManager {
   applyServerInsert<K extends Exclude<TableName, "cards">>(table: K, row: TableMap[K]): void;
   applyServerInsert(table: TableName, row: Card | TableMap[TableName]): void {
     if (table === "cards") {
-      const clientCard: ClientCard = { ...(row as Card), dead: 0 };
-      const { key, wasPresent } = this.cards.applyServerInsert(clientCard);
-      if (!wasPresent) this.notifyKeySet("cards", "added", key);
+      const merged = this.preserveInventoryPosition(row as Card);
+      const clientCard: ClientCard = { ...merged, dead: 0 };
+      this.dispatchInsert("cards", clientCard);
       return;
     }
-    const { key, wasPresent } = this.storeOf(table).applyServerInsert(row as TableMap[typeof table]);
-    if (!wasPresent) this.notifyKeySet(table, "added", key);
+    this.dispatchInsert(table, row as TableMap[typeof table]);
   }
 
   applyServerUpdate(table: "cards", oldRow: Card, newRow: Card): void;
   applyServerUpdate<K extends Exclude<TableName, "cards">>(table: K, oldRow: TableMap[K], newRow: TableMap[K]): void;
   applyServerUpdate(table: TableName, oldRow: Card | TableMap[TableName], newRow: Card | TableMap[TableName]): void {
     if (table === "cards") {
-      let merged = newRow as Card;
-      const existing = this.cards.get((newRow as Card).cardId);
-      if (existing && existing.layer && merged.layer === 1 && (merged.microZone & 0xE0) === 0) {
-        // Server doesn't track inventory positions — preserve the client's
-        // macroZone/microZone/microLocation so local drag state is not overwritten.
-        // Only applies when BOTH client and server have localQ=0; if the server is
-        // setting localQ≠0 (hex-placed), that placement is authoritative.
-        merged = {
-          ...merged,
-          macroZone: existing.macroZone,
-          microZone: existing.microZone,
-          microLocation: existing.microLocation,
-        };
+      const newCard = newRow as Card;
+      const oldCard = oldRow as Card;
+      const merged = this.preserveInventoryPosition(newCard);
+      const becameDead =
+        (newCard.flags & FLAG_CARD_DEAD) !== 0 &&
+        (oldCard.flags & FLAG_CARD_DEAD) === 0;
+      if (becameDead) {
+        void this.cards.markDying({ ...merged, dead: 1 }).catch(swallowCancelled);
+        return;
       }
-      this.cards.applyServerUpdate(oldRow as ClientCard, merged as ClientCard);
+      this.dispatchUpdate("cards", oldRow as ClientCard, merged as ClientCard);
       return;
     }
-    this.storeOf(table).applyServerUpdate(
+    this.dispatchUpdate(
+      table,
       oldRow as TableMap[typeof table],
       newRow as TableMap[typeof table],
     );
   }
 
-  /** For cards: marks the row dying (`dead === 1`) and emits `"dying"` — the
-   *  row stays in the store until `advanceCardDeath` is called. For all other
-   *  tables: immediate removal with `"delete"` as before. */
+  private dispatchInsert<K extends TableName>(table: K, row: TableMap[K]): void {
+    void this.storeOf(table).applyServerInsert(row).then(
+      ({ key, wasPresent }) => {
+        if (!wasPresent) this.notifyKeySet(table, "added", key);
+      },
+      swallowCancelled,
+    );
+  }
+
+  private dispatchUpdate<K extends TableName>(
+    table: K,
+    oldRow: TableMap[K],
+    newRow: TableMap[K],
+  ): void {
+    void this.storeOf(table).applyServerUpdate(oldRow, newRow).catch(swallowCancelled);
+  }
+
+  /** When both the client and the server agree the card is in the inventory
+   *  (layer === 1) and the server isn't using localQ to override its position
+   *  (top 3 bits of microZone are zero), the client's macroZone / microZone /
+   *  microLocation are kept — the server doesn't track inventory layout, so
+   *  taking its values would clobber drag state and slot ordering. */
+  private preserveInventoryPosition(row: Card): Card {
+    const existing = this.cards.get(row.cardId);
+    if (
+      existing &&
+      existing.layer === 1 &&
+      row.layer === 1 &&
+      (row.microZone & 0xE0) === 0
+    ) {
+      return {
+        ...row,
+        macroZone: existing.macroZone,
+        microZone: existing.microZone,
+        microLocation: existing.microLocation,
+      };
+    }
+    return row;
+  }
+
+  /** Final row removal — emits `"delete"` for all tables. The dying phase
+   *  for cards is now driven by `applyServerUpdate` detecting `FLAG_CARD_DEAD`,
+   *  so by the time the server-side reaper deletes the row the client has
+   *  typically already torn it down via `advanceCardDeath`; this is the
+   *  cleanup path for any row that's still hanging around. */
   applyServerDelete(table: "cards", row: Card): void;
   applyServerDelete<K extends Exclude<TableName, "cards">>(table: K, row: TableMap[K]): void;
   applyServerDelete(table: TableName, row: Card | TableMap[TableName]): void {
-    if (table === "cards") {
-      let merged = row as Card;
-      const existing = this.cards.get((row as Card).cardId);
-      if (existing) {
-        merged = {
-          ...merged,
-          macroZone: existing.macroZone,
-          microZone: existing.microZone,
-          microLocation: existing.microLocation,
-        };
-      }
-      this.cards.markDying({ ...merged, dead: 1 });
-      return;
-    }
-    const { key, wasPresent } = this.storeOf(table).applyServerDelete(row as TableMap[typeof table]);
-    if (wasPresent) this.notifyKeySet(table, "removed", key);
+    void this.storeOf(table).applyServerDelete(row as TableMap[typeof table]).then(
+      ({ key, wasPresent }) => {
+        if (wasPresent) this.notifyKeySet(table, "removed", key);
+      },
+      swallowCancelled,
+    );
   }
 
   /** Advance a dying card (`dead === 1`) to fully dead: removes it from the
@@ -334,7 +422,9 @@ export class DataManager {
 
   /** Fire a `removed` keyset event and remove every row. For cards this
    *  bypasses the dying phase (subscription teardown, not a game event) and
-   *  emits `"dead"` directly. Listener registrations are preserved. */
+   *  emits `"dead"` directly. Listener registrations are preserved.
+   *  Bypasses the per-store display buffer (`delayMs: 0`) — teardowns are
+   *  about discarding stale state, not animating it through. */
   clearTable<K extends TableName>(table: K): void {
     if (table === "cards") {
       if (this.cards.client.size === 0) return;
@@ -348,8 +438,12 @@ export class DataManager {
     if (store.client.size === 0) return;
     const rows = [...store.client.values()];
     for (const row of rows) {
-      const { key, wasPresent } = store.applyServerDelete(row);
-      if (wasPresent) this.notifyKeySet(table, "removed", key);
+      void store.applyServerDelete(row, 0).then(
+        ({ key, wasPresent }) => {
+          if (wasPresent) this.notifyKeySet(table, "removed", key);
+        },
+        swallowCancelled,
+      );
     }
   }
 
