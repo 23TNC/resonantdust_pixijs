@@ -23,7 +23,7 @@ const DEATH_SPEED = 0.04;
 /** Mix a `#rrggbb` (or numeric) color toward white by `amount` (0..1). Used
  *  to derive the bright-fill color of the pending-action progress bar from
  *  the card's secondary color. */
-function brighten(color: string | number, amount: number): number {
+export function brighten(color: string | number, amount: number): number {
   const c = typeof color === "string"
     ? parseInt(color.replace(/^#/, ""), 16)
     : color;
@@ -213,15 +213,25 @@ export class LayoutRectCard extends LayoutCard {
     let progressFill = 0;
     if (actionRow && recipeDef) {
       const now = Date.now() / 1000;
-      if (recipeDef.duration > 0) {
-        const start = actionRow.end - recipeDef.duration;
-        progressFill = Math.min(1, Math.max(0, (now - start) / recipeDef.duration));
-      } else {
-        const receivedAt = this.ctx.data.actions.getFlushedAt(actionRow.actionId) ?? now;
-        const duration = actionRow.end - receivedAt;
-        if (duration > 0 && now <= actionRow.end) {
-          progressFill = Math.min(1, Math.max(0, (now - receivedAt) / duration));
-        }
+      // Anchor `start` in wall-clock at `flushedAt` (when this row first
+      // hit the client) and let `end` slide between the recipe's projected
+      // finish and the queued UPDATE's `pendingFireAt`. Snapping `start`
+      // when the pending arrives would visibly jolt the bar; sliding only
+      // `end` keeps position continuous and just adjusts the bar's pace
+      // over the last buffer's worth of frames. Falls back to
+      // server-stamped `actionRow.end` when neither timestamp is known.
+      const pendingFireAtMs = this.ctx.data.actions.pendingFireAt(actionRow.actionId);
+      const flushedAt = this.ctx.data.actions.getFlushedAt(actionRow.actionId);
+      const start = flushedAt ?? (actionRow.end - recipeDef.duration);
+      const projectedEnd = recipeDef.duration > 0
+        ? start + recipeDef.duration
+        : actionRow.end;
+      const endSec = pendingFireAtMs !== undefined
+        ? pendingFireAtMs / 1000
+        : projectedEnd;
+      const duration = endSec - start;
+      if (duration > 0 && now <= endSec) {
+        progressFill = Math.min(1, Math.max(0, (now - start) / duration));
       }
     }
     const barStyle = recipeDef?.style ?? null;

@@ -375,16 +375,22 @@ export class DataManager {
   }
 
   /** When both the client and the server agree the card is in the inventory
-   *  (layer === 1) and the server isn't using localQ to override its position
-   *  (top 3 bits of microZone are zero), the client's macroZone / microZone /
-   *  microLocation are kept — the server doesn't track inventory layout, so
-   *  taking its values would clobber drag state and slot ordering. */
+   *  (layer === 1), the existing client card is loose (stackedState === 0),
+   *  and the server isn't using localQ to override its position (top 3 bits
+   *  of microZone are zero), the client's macroZone / microZone /
+   *  microLocation are kept — the server doesn't track loose inventory
+   *  layout, so taking its values would clobber drag state and slot
+   *  ordering. Stacked-state, however, *is* server-authoritative even on
+   *  inventory rows (a refresh that lands a stacked card after we've cleared
+   *  the table needs to retain the parent linkage), so we let the server's
+   *  microZone through whenever the client copy is already stacked. */
   private preserveInventoryPosition(row: Card): Card {
     const existing = this.cards.get(row.cardId);
     if (
       existing &&
       existing.layer === 1 &&
       row.layer === 1 &&
+      getStackedState(existing.microZone) === STACKED_LOOSE &&
       (row.microZone & 0xE0) === 0
     ) {
       return {

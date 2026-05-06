@@ -9,6 +9,7 @@ import {
   type LooseXY,
 } from "./cardData";
 import { FLAG_ACTION_CANCELED, type CachedMagneticAction } from "../actions/ActionManager";
+import { brighten } from "./RectangleCard";
 import { GameCard } from "./GameCard";
 import {
   hexPoints,
@@ -164,22 +165,73 @@ export class LayoutHexCard extends LayoutCard {
     const now = Date.now() / 1000;
     if (activeEnd !== undefined && recipeDef) {
       if (actionRow && recipeDef.duration > 0) {
-        const start = activeEnd - recipeDef.duration;
-        progressFill = Math.min(1, Math.max(0, (now - start) / recipeDef.duration));
+        // Anchor `start` in wall-clock at `flushedAt` (when this row first
+        // hit the client) and let `end` slide between the recipe's
+        // projected finish and the queued UPDATE's `pendingFireAt`.
+        // Snapping `start` when the pending arrives would visibly jolt the
+        // arc; sliding only `end` keeps position continuous and just
+        // adjusts the bar's pace over the last buffer's worth of frames.
+        const pendingFireAtMs = this.ctx.data.actions.pendingFireAt(actionRow.actionId);
+        const flushedAt = this.ctx.data.actions.getFlushedAt(actionRow.actionId);
+        const start = flushedAt ?? (activeEnd - recipeDef.duration);
+        const projectedEnd = start + recipeDef.duration;
+        const endSec = pendingFireAtMs !== undefined
+          ? pendingFireAtMs / 1000
+          : projectedEnd;
+        const duration = endSec - start;
+        if (duration > 0 && now <= endSec) {
+          progressFill = Math.min(1, Math.max(0, (now - start) / duration));
+        }
       } else if (this.currentMagneticAction) {
-        const { receivedAt } = this.currentMagneticAction;
-        const duration = activeEnd - receivedAt;
-        if (duration > 0 && now <= activeEnd) {
+        // `receivedAt` here is flushed-to-client time (set in ActionManager
+        // from `getFlushedAt`) — wall-clock anchor. Slide the end to
+        // `pendingFireAt` when a queued UPDATE is in flight so the bar
+        // lands at 1.0 on the right frame; otherwise fall back to the
+        // row's server-stamped `end` (close enough when clocks are aligned).
+        const { magneticActionId, receivedAt } = this.currentMagneticAction;
+        const pendingFireAtMs = this.ctx.data.magneticActions.pendingFireAt(magneticActionId);
+        const endSec = pendingFireAtMs !== undefined
+          ? pendingFireAtMs / 1000
+          : activeEnd;
+        const duration = endSec - receivedAt;
+        if (duration > 0 && now <= endSec) {
           progressFill = Math.min(1, Math.max(0, (now - receivedAt) / duration));
         }
       }
     }
     const barStyle = recipeDef?.style ?? null;
 
+    // Pending-action progress — when an action insert/update is buffered for
+    // this card, count down the buffer on the outline arc so the player sees
+    // something is on the way. Filled side is a brightened secondary; empty
+    // side is the secondary itself. Mirrors the rect-card pending bar.
+    let pendingFill = 0;
+    if (progressFill === 0 && !this.currentMagneticAction) {
+      for (const queued of this.ctx.data.actions.pendingValues()) {
+        if (queued.cardId !== this.cardId) continue;
+        if ((queued.flags & FLAG_ACTION_CANCELED) !== 0) continue;
+        const receivedAt = this.ctx.data.actions.getReceivedAt(queued.actionId);
+        const fireAtMs = this.ctx.data.actions.pendingFireAt(queued.actionId);
+        if (receivedAt === undefined || fireAtMs === undefined) continue;
+        const startMs = receivedAt * 1000;
+        const duration = fireAtMs - startMs;
+        if (duration <= 0) continue;
+        pendingFill = Math.min(1, Math.max(0, (Date.now() - startMs) / duration));
+        break;
+      }
+    }
+
     this.progressBar.clear();
     if (barStyle && (actionRow || this.currentMagneticAction)) {
       const clockwise = barStyle.direction !== "ccw";
       this._drawHexOutline(progressFill, barStyle.colorLeft, barStyle.colorRight, clockwise);
+    } else if (pendingFill > 0) {
+      const def = this.currentPackedDefinition !== null
+        ? this.ctx.definitions.decode(this.currentPackedDefinition) ?? null
+        : null;
+      const secondary = def?.style[1] ?? "#7a7a8a";
+      const left = `#${brighten(secondary, 0.4).toString(16).padStart(6, "0")}`;
+      this._drawHexOutline(pendingFill, left, secondary, /* clockwise = */ true);
     }
 
     this.stateOverlay.clear();
@@ -219,45 +271,61 @@ export class LayoutHexCard extends LayoutCard {
       }
     }
     const moving = this.tweenTo(effX, effY);
-    return this.state.dragging || moving || this.dying || activeEnd !== undefined;
+    return this.state.dragging || moving || this.dying || activeEnd !== undefined || pendingFill > 0;
   }
 
-  // Vertex 4 = top point. CW order walks right-ward; CCW walks left-ward.
-  // Draws the full hex outline split into a filled arc (colorFilled, from the
-  // top for progressFill fraction) and an empty arc (colorEmpty, the rest).
-  // Exactly one side may carry both colors at the transition point.
+  // Walks the hex outline starting at the pointy top (vertex 4) in either
+  // direction, drawing N completed segments + the in-progress partial in
+  // `colorFilled`, then the remaining sides in `colorEmpty`. Each segment is
+  // 1/6 of the perimeter, so `fullSegments = floor(progress * 6)` and
+  // `partialT = (progress * 6) - fullSegments` carries the in-segment fill.
+  // Each color gets its own stroke pair (`moveTo` + `lineTo`s + `stroke()`),
+  // and we skip the call entirely when there's no geometry — a stroke on an
+  // empty path can leave Pixi's GraphicsContext in a state where the next
+  // sub-path picks up stray segments.
   private _drawHexOutline(progressFill: number, colorFilled: string, colorEmpty: string, clockwise: boolean): void {
     const cx = HEX_WIDTH  / 2;
     const cy = HEX_HEIGHT / 2;
     const pts = hexPoints(cx, cy, PROGRESS_RING_RADIUS);
     const fill = Math.min(1, Math.max(0, progressFill));
 
-    const order = clockwise ? [4, 5, 0, 1, 2, 3] : [4, 3, 2, 1, 0, 5];
+    // Step 0..6 walks vertex 4 → ... → vertex 4 (closed loop). The 7th entry
+    // is the wrap back to top, used by the final segment.
+    const order = clockwise ? [4, 5, 0, 1, 2, 3, 4] : [4, 3, 2, 1, 0, 5, 4];
+    const vx = (step: number): number => pts[order[step] * 2];
+    const vy = (step: number): number => pts[order[step] * 2 + 1];
 
-    const px = (i: number) => pts[i * 2];
-    const py = (i: number) => pts[i * 2 + 1];
-    const vx = (step: number) => px(order[step % 6]);
-    const vy = (step: number) => py(order[step % 6]);
+    const fullSegments = Math.min(6, Math.floor(fill * 6));
+    const partialT     = fill * 6 - fullSegments;
 
-    const splitStep    = fill * 6;
-    const splitSideIdx = Math.min(Math.floor(splitStep), 5);
-    const splitT       = splitStep - splitSideIdx;
+    // Split point: where the filled arc ends and the empty arc begins.
+    const fromX  = vx(fullSegments);
+    const fromY  = vy(fullSegments);
+    const toX    = vx(Math.min(fullSegments + 1, 6));
+    const toY    = vy(Math.min(fullSegments + 1, 6));
+    const splitX = fromX + (toX - fromX) * partialT;
+    const splitY = fromY + (toY - fromY) * partialT;
 
-    const fromV  = order[splitSideIdx];
-    const toV    = order[(splitSideIdx + 1) % 6];
-    const splitX = px(fromV) + (px(toV) - px(fromV)) * splitT;
-    const splitY = py(fromV) + (py(toV) - py(fromV)) * splitT;
+    // Filled arc — N full segments + the partial of the next.
+    if (fullSegments > 0 || partialT > 0) {
+      this.progressBar.moveTo(vx(0), vy(0));
+      for (let i = 1; i <= fullSegments; i++) {
+        this.progressBar.lineTo(vx(i), vy(i));
+      }
+      if (partialT > 0 && fullSegments < 6) {
+        this.progressBar.lineTo(splitX, splitY);
+      }
+      this.progressBar.stroke({ color: colorFilled, width: PROGRESS_RING_WIDTH });
+    }
 
-    // Filled arc: top vertex → split point.
-    this.progressBar.moveTo(vx(0), vy(0));
-    for (let i = 1; i <= splitSideIdx; i++) this.progressBar.lineTo(vx(i), vy(i));
-    if (splitT > 0) this.progressBar.lineTo(splitX, splitY);
-    this.progressBar.stroke({ color: colorFilled, width: PROGRESS_RING_WIDTH });
-
-    // Empty arc: split point → top vertex (completing the outline).
-    this.progressBar.moveTo(splitX, splitY);
-    for (let i = splitSideIdx + 1; i <= 6; i++) this.progressBar.lineTo(vx(i), vy(i));
-    this.progressBar.stroke({ color: colorEmpty, width: PROGRESS_RING_WIDTH });
+    // Empty arc — split point → remaining vertices → back to top.
+    if (fill < 1) {
+      this.progressBar.moveTo(splitX, splitY);
+      for (let i = fullSegments + 1; i <= 6; i++) {
+        this.progressBar.lineTo(vx(i), vy(i));
+      }
+      this.progressBar.stroke({ color: colorEmpty, width: PROGRESS_RING_WIDTH });
+    }
   }
 
   override destroy(): void {

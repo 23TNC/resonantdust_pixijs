@@ -539,7 +539,10 @@ export class ActionManager {
       recipe: row.recipe,
       end: row.end,
       loopCount: row.loopCount,
-      receivedAt: this.ctx.data.magneticActions.getReceivedAt(row.magneticActionId) ?? Date.now() / 1000,
+      // Flushed time, not received time — the row may have sat ~2 s in the
+      // display buffer before becoming visible, and progress should start at
+      // 0 the frame the bar appears, not "buffer's worth of progress" in.
+      receivedAt: this.ctx.data.magneticActions.getFlushedAt(row.magneticActionId) ?? Date.now() / 1000,
     };
     this.magneticById.set(row.magneticActionId, cached);
     this.magneticByCardId.set(row.cardId, row.magneticActionId);
