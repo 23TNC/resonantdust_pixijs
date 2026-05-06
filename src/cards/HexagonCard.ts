@@ -139,14 +139,22 @@ export class LayoutHexCard extends LayoutCard {
     // Progress bar arc — drawn between hexSprite and stateOverlay.
     // Use the regular action if present; fall back to a magnetic action.
     // Cancelled actions (FLAG_ACTION_CANCELED, bit 1) suppress progress so
-    // the arc isn't shown ticking during the dying window.
+    // the arc isn't shown ticking during the dying window. We consult both
+    // the client row and the server row: with the display buffer the client
+    // copy can lag a server-side cancel by up to ~2 s, so we suppress as
+    // soon as either copy has the bit set.
     const card = this.ctx.cards?.get(this.cardId);
-    const rawActionRow = card?.currentAction
-      ? this.ctx.data.get("actions", card.currentAction.actionId)
+    const actionId = card?.currentAction?.actionId;
+    const rawActionRow = actionId !== undefined
+      ? this.ctx.data.get("actions", actionId)
       : undefined;
-    const actionRow = rawActionRow && (rawActionRow.flags & FLAG_ACTION_CANCELED) === 0
-      ? rawActionRow
+    const serverActionRow = actionId !== undefined
+      ? this.ctx.data.getServer("actions", actionId)
       : undefined;
+    const cancelled =
+      ((rawActionRow?.flags ?? 0) & FLAG_ACTION_CANCELED) !== 0 ||
+      ((serverActionRow?.flags ?? 0) & FLAG_ACTION_CANCELED) !== 0;
+    const actionRow = rawActionRow && !cancelled ? rawActionRow : undefined;
     const activeRecipePacked = actionRow?.recipe ?? this.currentMagneticAction?.recipe;
     const activeEnd          = actionRow?.end    ?? this.currentMagneticAction?.end;
     const recipeDef = activeRecipePacked !== undefined

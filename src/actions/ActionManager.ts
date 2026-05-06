@@ -347,10 +347,16 @@ export class ActionManager {
   /** Snapshot of the server's `actions` table keyed by actor `cardId`. Built
    *  once per pre-filter pass so every branch / actor candidate sees the
    *  same authoritative view, regardless of where the client's display
-   *  buffer happens to be. One action per actor today. */
+   *  buffer happens to be. One action per actor today.
+   *
+   *  Cancelled actions (`FLAG_ACTION_CANCELED`, bit 1) are skipped — the row
+   *  lingers in the table during its reap window, but the actor is
+   *  effectively free, so a fresh recipe match should be allowed to claim
+   *  it without the pre-filter treating the slot as occupied. */
   private buildServerActionsByCard(): Map<number, ActionRow> {
     const map = new Map<number, ActionRow>();
     for (const row of this.ctx.data.serverValues("actions")) {
+      if ((row.flags & FLAG_ACTION_CANCELED) !== 0) continue;
       map.set(row.cardId, row);
     }
     return map;

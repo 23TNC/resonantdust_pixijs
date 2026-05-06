@@ -238,9 +238,26 @@ export class Card {
    * Re-parent layoutCard preserving on-screen position via global→local
    * conversion. Used when zone or stack-parent changes after the initial
    * spawn — keeps the visual transition seamless rather than snapping.
+   *
+   * The display buffer (`delayMs` on the cards store) means an update can
+   * fire after our PIXI container has been detached or destroyed mid-flight
+   * (parent vanished, scope cleared). When the container isn't in a live
+   * scene graph, `getGlobalPosition()` dereferences a null `position` and
+   * throws — fall back to a plain detach + re-attach since there's no
+   * on-screen position worth preserving.
    */
   private reparentSmoothly(newParent: LayoutNode | null): void {
-    const g = this.layoutCard.container.getGlobalPosition();
+    const myContainer = this.layoutCard.container;
+    // PIXI nulls `position` during `Container.destroy()`. A destroyed
+    // container can't be reparented — bail out before any further calls
+    // throw (`detach`, `addChild`, etc. all access `position` internally).
+    if (!myContainer.position) return;
+    if (!myContainer.parent) {
+      this.layoutCard.detach();
+      if (newParent) newParent.addChild(this.layoutCard);
+      return;
+    }
+    const g = myContainer.getGlobalPosition();
     this.layoutCard.detach();
     if (!newParent) return;
     newParent.addChild(this.layoutCard);

@@ -191,14 +191,22 @@ export class LayoutRectCard extends LayoutCard {
 
     // Progress bar — draws over the title bar fill when an action is active.
     // Cancelled actions (FLAG_ACTION_CANCELED, bit 1) suppress progress so
-    // the bar isn't shown ticking during the dying window.
+    // the bar isn't shown ticking during the dying window. We consult both
+    // the client row and the server row: with the display buffer the client
+    // copy can lag a server-side cancel by up to ~2 s, so we suppress as
+    // soon as either copy has the bit set.
     const card = this.ctx.cards?.get(this.cardId);
-    const rawActionRow = card?.currentAction
-      ? this.ctx.data.get("actions", card.currentAction.actionId)
+    const actionId = card?.currentAction?.actionId;
+    const rawActionRow = actionId !== undefined
+      ? this.ctx.data.get("actions", actionId)
       : undefined;
-    const actionRow = rawActionRow && (rawActionRow.flags & FLAG_ACTION_CANCELED) === 0
-      ? rawActionRow
+    const serverActionRow = actionId !== undefined
+      ? this.ctx.data.getServer("actions", actionId)
       : undefined;
+    const cancelled =
+      ((rawActionRow?.flags ?? 0) & FLAG_ACTION_CANCELED) !== 0 ||
+      ((serverActionRow?.flags ?? 0) & FLAG_ACTION_CANCELED) !== 0;
+    const actionRow = rawActionRow && !cancelled ? rawActionRow : undefined;
     const recipeDef = actionRow
       ? this.ctx.recipes.decode(actionRow.recipe)
       : undefined;
@@ -258,7 +266,7 @@ export class LayoutRectCard extends LayoutCard {
       }
     } else if (pendingFill > 0) {
       const secondary = def?.style[1] ?? "#7a7a8a";
-      const left  = brighten(secondary, 0.2);
+      const left  = brighten(secondary, 0.8);
       const splitX = pendingFill * this.width;
       if (splitX > 0) {
         this.progressBar.rect(0, titleY, splitX, RECT_CARD_TITLE_HEIGHT).fill({ color: left });
