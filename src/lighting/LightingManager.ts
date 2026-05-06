@@ -1,25 +1,38 @@
 import type { Zone } from "../server/bindings/types";
 import type { GameContext } from "../GameContext";
 import { HEX_RADIUS } from "../cards/HexCardVisual";
-import {
-  getTileDefId,
-  getTileHeight,
-  unpackMacroZone,
-} from "../world/worldCoords";
+import type {
+  CardDefinition,
+  DefinitionManager,
+} from "../definitions/DefinitionManager";
+import { decodeZoneTiles, unpackMacroZone } from "../world/worldCoords";
+
+/** Maximum height value any tile/light should report — matches the upper
+ *  bound the definition files now allow for the `height` aspect. */
+export const MAX_HEIGHT = 32;
 
 /**
- * Pixels of vertical relief per `u3` height step. Heights are stored 0..7;
- * scaling them into the same units as world x/y is what gives the cross
- * product a non-degenerate normal. `HEX_RADIUS / 4` puts a 1-step delta at
- * roughly 8° of slope — gentle enough that mixed terrain reads as varied
- * shading rather than as cliffs.
+ * Pixels of vertical relief per height-aspect unit. The `height` aspect on
+ * a CardDefinition can range 0..MAX_HEIGHT now that definition files hold
+ * full numbers. `HEX_RADIUS / 4` puts a 1-step delta at roughly 8° of slope
+ * — gentle enough that mixed terrain reads as varied shading rather than
+ * as cliffs.
  */
 export const HEIGHT_UNIT_PX = HEX_RADIUS / 4;
 
+/** Reads the `height` aspect from a CardDefinition. Aspects are stored as
+ *  `[name, value]` tuples; missing entries default to 0. */
+function heightOf(def: CardDefinition): number {
+  for (const [name, value] of def.aspects) {
+    if (name === "height") return value;
+  }
+  return 0;
+}
+
 /** Default per-light tunables — exposed as constants so callers can match
  *  the spec's defaults without repeating the literals. */
-const DEFAULT_SLOPE_STRENGTH = 0.35;
-const DEFAULT_HEIGHT_STRENGTH = 0.15;
+const DEFAULT_SLOPE_STRENGTH = 0.35; // 0.35;
+const DEFAULT_HEIGHT_STRENGTH = 1; // 0.15;
 const DEFAULT_MIN_LIGHT = 0.02;
 
 /** Final-brightness composition. The propagation accumulator is fed through
@@ -39,9 +52,10 @@ export type Point3 = readonly [x: number, y: number, z: number];
  * contains `(x, y)` with `power` and walks outward through triangle
  * neighbours up to `range` steps, multiplying by `falloff` each step plus
  * `slopeBlock` / `heightBlock` penalties. `z` is the light's elevation in
- * raw `u3` units (multiply hex height by 1, not by `HEIGHT_UNIT_PX`); it
- * is recorded for callers / debug glyphs but not used by the propagation
- * formula itself, which only references triangle centroid heights.
+ * the same raw height-aspect units as tiles (`0..MAX_HEIGHT`, not pixels);
+ * it is recorded for callers / debug glyphs but not used by the
+ * propagation formula itself, which only references triangle centroid
+ * heights.
  */
 export interface Light {
   readonly x: number;
@@ -55,7 +69,8 @@ export interface Light {
   readonly falloff: number;
   /** Strength of the slope-block penalty. Default `0.35`. */
   readonly slopeStrength?: number;
-  /** Strength of the height-block penalty (per raw `u3` step). Default `0.15`. */
+  /** Strength of the height-block penalty (per raw height-aspect step).
+   *  Default `0.15`. */
   readonly heightStrength?: number;
   /** Propagation cuts off when `nextLight` falls below this. Default `0.02`. */
   readonly minLight?: number;
@@ -218,11 +233,13 @@ function triCenter(tri: TriangleData): Point3 {
  * an ambient floor + an `n.z` upward bias on top of `toneMap(accumulator)`.
  *
  * World frame: `+x` east, `+y` south (matches LayoutWorld pixel axes), `+z`
- * up. Vertex `z` is in pixels (`u3 * HEIGHT_UNIT_PX`); the propagation
- * converts back to raw `u3` for `heightBlock`.
+ * up. Vertex `z` is in pixels (`height-aspect × HEIGHT_UNIT_PX`); the
+ * propagation divides back out for `heightBlock`.
  */
 export class LightingManager {
-  /** `${q},${r}` → tile height (0..7). Missing entries are treated as 0. */
+  /** `${q},${r}` → tile height (`0..MAX_HEIGHT`). Missing entries are
+   *  treated as 0. Sourced from each tile's CardDefinition `height`
+   *  aspect. */
   private readonly heights = new Map<string, number>();
 
   /** Lazy per-triangle geometry cache. */
@@ -237,9 +254,11 @@ export class LightingManager {
    *  delta (`new − old`) is applied per affected triangle. */
   private readonly totalLight = new Map<string, number>();
 
+  private readonly definitions: DefinitionManager;
   private readonly unsubZones: () => void;
 
   constructor(ctx: GameContext) {
+    this.definitions = ctx.definitions;
     for (const zone of ctx.data.values("zones")) this.ingest(zone);
 
     this.unsubZones = ctx.data.subscribe("zones", (change) => {
@@ -292,7 +311,8 @@ export class LightingManager {
     if (entry) entry.dirty = true;
   }
 
-  /** Tile height in `u3` units (0..7). 0 for unknown / unloaded tiles. */
+  /** Tile height in raw height-aspect units (`0..MAX_HEIGHT`). 0 for
+   *  unknown / unloaded tiles. */
   heightAt(q: number, r: number): number {
     return this.heights.get(`${q},${r}`) ?? 0;
   }
@@ -381,8 +401,9 @@ export class LightingManager {
    */
   private _computeContribution(light: NormalisedLight): Map<string, number> {
     const contribution = new Map<string, number>();
-    const sourceKey = this.findContainingTriangle(light.x, light.y);
-    if (sourceKey === null) return contribution;
+    const source = this.findTriangleAt(light.x, light.y);
+    if (source === null) return contribution;
+    const sourceKey = triKey(source.q, source.r, source.kind);
 
     const visited = new Map<string, number>();
     const queue: { key: string; light: number; step: number }[] = [
@@ -426,7 +447,8 @@ export class LightingManager {
         );
 
         // Height block: stepping uphill costs; downhill is free. Convert
-        // pixel z back to raw `u3` so `heightStrength` can be O(0.1).
+        // pixel z back to raw height-aspect units so `heightStrength` can
+        // stay O(0.1).
         const nextZ = next[2] / HEIGHT_UNIT_PX;
         const curZ = cur[2] / HEIGHT_UNIT_PX;
         const heightBlock = Math.max(0, nextZ - curZ) * light.heightStrength;
@@ -451,12 +473,17 @@ export class LightingManager {
   }
 
   /**
-   * Finds the triangle whose 2D footprint contains `(x, y)`. Approximates
-   * the hex via axial-coord rounding then tests the UP/DOWN of a 3×3
-   * neighbourhood — UP+DOWN tile the plane without overlap, so exactly one
-   * test passes (or none, if the point is outside the loaded grid).
+   * Finds the triangle whose 2D footprint contains world point `(x, y)`.
+   * Approximates the hex via axial-coord rounding then tests the UP/DOWN
+   * of a 3×3 neighbourhood — UP+DOWN tile the plane without overlap, so
+   * exactly one test passes (or none, if `(x, y)` is outside the loaded
+   * grid). World frame: same `(+x east, +y south)` axes the manager uses
+   * everywhere else.
    */
-  private findContainingTriangle(x: number, y: number): string | null {
+  findTriangleAt(
+    x: number,
+    y: number,
+  ): { q: number; r: number; kind: TriangleKind } | null {
     const fq = ((Math.sqrt(3) / 3) * x - (1 / 3) * y) / HEX_RADIUS;
     const fr = ((2 / 3) * y) / HEX_RADIUS;
     const fx = fq, fz = fr, fy = -fq - fr;
@@ -478,7 +505,7 @@ export class LightingManager {
         const r = baseR + dr;
         for (const kind of ["up", "down"] as const) {
           const tri = this.triangleAt(q, r, kind);
-          if (pointInTri(x, y, tri.points)) return triKey(q, r, kind);
+          if (pointInTri(x, y, tri.points)) return { q, r, kind };
         }
       }
     }
@@ -548,19 +575,8 @@ export class LightingManager {
   }
 
   private ingest(zone: Zone): void {
-    const { zoneQ, zoneR } = unpackMacroZone(zone.macroZone);
-    const ts: bigint[] = [
-      zone.t0, zone.t1, zone.t2, zone.t3,
-      zone.t4, zone.t5, zone.t6, zone.t7,
-    ];
-    for (let r = 0; r < 8; r++) {
-      const t = ts[r];
-      if (t === 0n) continue;
-      for (let q = 0; q < 8; q++) {
-        const tileByte = Number((t >> BigInt(q * 8)) & 0xffn);
-        if (getTileDefId(tileByte) === 0) continue;
-        this.heights.set(`${zoneQ + q},${zoneR + r}`, getTileHeight(tileByte));
-      }
+    for (const tile of decodeZoneTiles(zone, this.definitions)) {
+      this.heights.set(`${tile.q},${tile.r}`, heightOf(tile.definition));
     }
   }
 

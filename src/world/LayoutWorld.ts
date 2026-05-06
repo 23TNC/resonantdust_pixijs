@@ -24,13 +24,18 @@ const BG_COLOR = "#0d1218";
  *  rendering, not debug. */
 const LIGHTING_DEBUG = false;
 
-/** Hex `u3` height of the dynamic point light, used both to position it
- *  in the LightingManager world frame and to label its glyph. */
+/** Master toggle for per-tile text overlays: the height number on each
+ *  populated tile and the `q,r` coord label on every visible hex. */
+const TILE_LABEL_DEBUG = false;
+
+/** Height (in CardDefinition `height`-aspect units) of the dynamic point
+ *  light, used both to position it in the LightingManager world frame and
+ *  to label its glyph. */
 const POINT_LIGHT_HEIGHT = 3;
 
 /** Single grid-flood light seeded at world hex (0, 0). `x` / `y` are pixel
- *  coords in the LightingManager world frame; `z` is in raw `u3` units to
- *  match the propagation formula. */
+ *  coords in the LightingManager world frame; `z` is in raw height-aspect
+ *  units (matching the propagation formula). */
 const POINT_LIGHT: Light = {
   x: 0,
   y: 0,
@@ -52,9 +57,9 @@ const LIGHT_GLYPH_RADIUS = 18;
 /** Parameters for the mouse-tracking light. The light's `(x, y, z)` is
  *  recomputed each time the cursor crosses into a new hex; everything
  *  else stays fixed. */
-const MOUSE_LIGHT_POWER = 5;
-const MOUSE_LIGHT_RANGE = 5;
-const MOUSE_LIGHT_FALLOFF = 0.3;
+const MOUSE_LIGHT_POWER = 1;
+const MOUSE_LIGHT_RANGE = 6;
+const MOUSE_LIGHT_FALLOFF = 0.7;
 
 /**
  * Hit-passthrough panning layer for world cards.
@@ -104,7 +109,7 @@ export class LayoutWorld extends LayoutNode {
 
 
   /** Flat tile cache keyed by "${q},${r}". Stores packed definition id and height. */
-  private readonly tileData = new Map<string, { packed: number; height: number }>();
+  private readonly tileData = new Map<string, { packed: number }>();
 
   private readonly lighting: LightingManager;
 
@@ -112,14 +117,15 @@ export class LayoutWorld extends LayoutNode {
    *  light is created once in the constructor and updated in place as the
    *  cursor moves between hexes. */
   private readonly mouseLightHandle: LightHandle;
-  /** Hex the mouse light is currently attached to. NaN until the first
-   *  ticker tick — which is fine, since `NaN !== anyValue` so the first
-   *  comparison always falls through to an update. */
-  private mouseHexQ = NaN;
-  private mouseHexR = NaN;
+  /** Triangle the mouse light is currently attached to. `q`/`r` start as
+   *  `NaN` so the first comparison falls through; `kind` starts as a
+   *  sentinel that won't match either valid value. */
+  private mouseTriQ = NaN;
+  private mouseTriR = NaN;
+  private mouseTriKind: TriangleKind | "" = "";
   /** Per-frame callback registered with `app.ticker` — polls the cursor
    *  position via `ctx.input.lastPointer` and re-aims the mouse light if
-   *  the cursor has crossed into a new hex. */
+   *  the cursor has crossed into a new triangle. */
   private readonly mouseTicker: () => void;
 
   private viewQ = 0;
@@ -134,20 +140,21 @@ export class LayoutWorld extends LayoutNode {
     super();
     this.container.addChild(this.bg);
     this.container.addChild(this.tileLayer);
-    // Lighting triangles draw above the tile sprites but below the card
-    // surface so cards always remain on top.
-    this.container.addChild(this.lightingLayer);
-    // Wire worldCardSurface into the LayoutNode tree and PIXI tree manually so
-    // we control z-order (cards must sit between the lighting layer and the
-    // clip mask).
+    // Wire worldCardSurface into the LayoutNode tree and PIXI tree manually
+    // so we control z-order (cards sit between the tile layer and the
+    // lighting layer — the lighting overlay then dims/lights the cards
+    // along with the tiles below them).
     this.worldCardSurface.parent = this;
     this.children.push(this.worldCardSurface);
     this.container.addChild(this.worldCardSurface.container);
+    // Lighting triangles draw on top of both tiles and cards so the
+    // black-with-alpha shadow overlay applies to everything below.
+    this.container.addChild(this.lightingLayer);
     this.container.addChild(this.clipMask);
     this.container.mask = this.clipMask;
 
     this.lighting = new LightingManager(ctx);
-    this.lighting.registerLight(POINT_LIGHT);
+    //this.lighting.registerLight(POINT_LIGHT);
 
     // Mouse-tracking light. Initial position is irrelevant — the first
     // ticker tick replaces it as soon as InputManager has logged a
@@ -215,7 +222,7 @@ export class LayoutWorld extends LayoutNode {
 
       if (change.kind !== "delete") {
         for (const tile of decodeZoneTiles(zone, ctx.definitions)) {
-          this.tileData.set(`${tile.q},${tile.r}`, { packed: tile.definition.packed, height: tile.height });
+          this.tileData.set(`${tile.q},${tile.r}`, { packed: tile.definition.packed });
         }
       }
 
@@ -225,7 +232,7 @@ export class LayoutWorld extends LayoutNode {
     // Hydrate from zones already in the store.
     for (const zone of ctx.data.values("zones")) {
       for (const tile of decodeZoneTiles(zone, ctx.definitions)) {
-        this.tileData.set(`${tile.q},${tile.r}`, { packed: tile.definition.packed, height: tile.height });
+        this.tileData.set(`${tile.q},${tile.r}`, { packed: tile.definition.packed });
       }
     }
   }
@@ -241,12 +248,12 @@ export class LayoutWorld extends LayoutNode {
   }
 
   /**
-   * Per-frame poll: read the cursor from `ctx.input.lastPointer`, project
-   * canvas pixels into LayoutWorld-local pixels via the PIXI container
-   * transform, snap to the nearest hex, and — if the cursor has crossed
-   * into a new hex since last tick — `updateLight` the mouse light to that
-   * hex's centre at `tile.height + 1`. `updateLight` flags the light dirty
-   * so only its propagation gets recomputed.
+   * Per-frame poll: read the cursor from `ctx.input.lastPointer`, translate
+   * into LightingManager world coords, ask the manager which triangle the
+   * cursor sits inside, and — if the cursor has crossed into a new triangle
+   * since last tick — `updateLight` the mouse light to that triangle's
+   * centroid at `centroid.z + 1`. `updateLight` flags the light dirty so
+   * only its flood-fill re-runs.
    */
   private _tickMouseLight(ctx: GameContext): void {
     const input = ctx.input;
@@ -256,19 +263,38 @@ export class LayoutWorld extends LayoutNode {
       x: input.lastPointer.x,
       y: input.lastPointer.y,
     });
-    const { q, r } = this.localToWorld(local.x, local.y);
-    if (q === this.mouseHexQ && r === this.mouseHexR) return;
-    this.mouseHexQ = q;
-    this.mouseHexR = r;
+    // LightingManager world frame puts hex (0,0) at (0,0); shift by the
+    // local-pixel position of that origin to translate cursor → world.
+    const origin = this.worldToLocal(0, 0);
+    const found = this.lighting.findTriangleAt(
+      local.x - origin.x,
+      local.y - origin.y,
+    );
+    if (
+      !found ||
+      (found.q === this.mouseTriQ &&
+        found.r === this.mouseTriR &&
+        found.kind === this.mouseTriKind)
+    ) {
+      return;
+    }
+    this.mouseTriQ = found.q;
+    this.mouseTriR = found.r;
+    this.mouseTriKind = found.kind;
 
-    const worldX = HEX_RADIUS * Math.sqrt(3) * (q + r / 2);
-    const worldY = HEX_RADIUS * 1.5 * r;
-    const tileHeight = this.tileData.get(`${q},${r}`)?.height ?? 0;
+    const tri = this.lighting.triangleAt(found.q, found.r, found.kind);
+    const [p0, p1, p2] = tri.points;
+    const cx = (p0[0] + p1[0] + p2[0]) / 3;
+    const cy = (p0[1] + p1[1] + p2[1]) / 3;
+    // Centroid z is the mean of vertex heights × HEIGHT_UNIT_PX; divide
+    // back to raw height-aspect units so the light's z matches the
+    // propagation formula's expectations.
+    const cz = (p0[2] + p1[2] + p2[2]) / 3 / HEIGHT_UNIT_PX;
 
     this.lighting.updateLight(this.mouseLightHandle, {
-      x: worldX,
-      y: worldY,
-      z: tileHeight + 1,
+      x: cx,
+      y: cy,
+      z: cz + 1,
       power: MOUSE_LIGHT_POWER,
       range: MOUSE_LIGHT_RANGE,
       falloff: MOUSE_LIGHT_FALLOFF,
@@ -367,7 +393,7 @@ export class LayoutWorld extends LayoutNode {
    * position, so the glyph anchors to `worldToLocal(0,0)` plus the light's
    * xy offset and is lifted on screen by its z component — it pans with
    * the world and floats above its hex by its height. The label shows the
-   * light's height in `u3` units.
+   * light's height in raw height-aspect units.
    */
   private _drawLightDebug(originX: number, originY: number): void {
     if (!LIGHTING_DEBUG) {
@@ -376,8 +402,9 @@ export class LayoutWorld extends LayoutNode {
       return;
     }
 
-    // POINT_LIGHT.z is in raw u3 units; multiply by HEIGHT_UNIT_PX to lift
-    // the glyph on screen by its terrain-equivalent height.
+    // POINT_LIGHT.z is in raw height-aspect units; multiply by
+    // HEIGHT_UNIT_PX to lift the glyph on screen by its terrain-equivalent
+    // height.
     const cx = originX + POINT_LIGHT.x;
     const cy = originY + POINT_LIGHT.y - POINT_LIGHT.z * HEIGHT_UNIT_PX;
 
@@ -442,28 +469,32 @@ export class LayoutWorld extends LayoutNode {
           const def = this.ctx.definitions.decode(entry.packed) ?? null;
           sprite.texture = this.ctx.textures.getHexTexture(def, entry.packed);
 
-          const label = new Text({ text: String(entry.height), style: { fontSize: 16, fill: 0xffffff, dropShadow: { color: 0x000000, distance: 2, blur: 2 } } });
-          label.anchor.set(0.5, 0);
-          label.position.set(x, y + 8);
-          this.container.addChild(label);
-          this.labelPool.push(label);
+          if (TILE_LABEL_DEBUG) {
+            const label = new Text({ text: String(entry.packed), style: { fontSize: 16, fill: 0xffffff, dropShadow: { color: 0x000000, distance: 2, blur: 2 } } });
+            label.anchor.set(0.5, 0);
+            label.position.set(x, y + 8);
+            this.container.addChild(label);
+            this.labelPool.push(label);
+          }
         } else {
           sprite.texture = this.ctx.textures.getHexTexture(null, EMPTY_TILE_PACKED);
         }
         sprite.position.set(x - HEX_WIDTH / 2, y - HEX_HEIGHT / 2);
 
-        const coordLabel = new Text({
-          text: `${q},${r}`,
-          style: {
-            fontSize: 12,
-            fill: 0xffffff,
-            dropShadow: { color: 0x000000, distance: 2, blur: 2 },
-          },
-        });
-        coordLabel.anchor.set(0.5, 1);
-        coordLabel.position.set(x, y - 8);
-        this.container.addChild(coordLabel);
-        this.labelPool.push(coordLabel);
+        if (TILE_LABEL_DEBUG) {
+          const coordLabel = new Text({
+            text: `${q},${r}`,
+            style: {
+              fontSize: 12,
+              fill: 0xffffff,
+              dropShadow: { color: 0x000000, distance: 2, blur: 2 },
+            },
+          });
+          coordLabel.anchor.set(0.5, 1);
+          coordLabel.position.set(x, y - 8);
+          this.container.addChild(coordLabel);
+          this.labelPool.push(coordLabel);
+        }
 
         this._drawLitTriangle(q, r, "up",   origin.x, origin.y);
         this._drawLitTriangle(q, r, "down", origin.x, origin.y);

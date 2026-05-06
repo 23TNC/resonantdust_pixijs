@@ -36,30 +36,15 @@ export function unpackMacroZone(macroZone: number): { zoneQ: number; zoneR: numb
   return { zoneQ: chunkQ * ZONE_SIZE, zoneR: chunkR * ZONE_SIZE };
 }
 
-/** Extract a tile byte at `byteIndex` (0-7) from a u64 t-field (BigInt). The
- *  byte itself packs `definition_id:u5` (low 5 bits) + `height:u3` (high 3
- *  bits); use `getTileDefId` / `getTileHeight` to split. */
+/** Extract a tile byte at `byteIndex` (0-7) from a u64 t-field (BigInt).
+ *  The byte is the full u8 `definition_id`; `0` means the slot is empty. */
 function extractTByte(t: bigint, byteIndex: number): number {
   return Number((t >> BigInt(byteIndex * 8)) & 0xFFn);
-}
-
-const TILE_DEF_MASK     = 0x1F;
-const TILE_HEIGHT_SHIFT = 5;
-
-/** Tile definition_id (u5, 0..31). `0` means the slot is empty. */
-export function getTileDefId(tileByte: number): number {
-  return tileByte & TILE_DEF_MASK;
-}
-
-/** Tile height (u3, 0..7). Stacked above the base hex level. */
-export function getTileHeight(tileByte: number): number {
-  return (tileByte >>> TILE_HEIGHT_SHIFT) & 0x07;
 }
 
 export interface ZoneTile {
   q: number;
   r: number;
-  height: number;
   definition: CardDefinition;
 }
 
@@ -91,22 +76,20 @@ export function decodeZoneTiles(
     const t = ts[tIndex];
     if (t === 0n) continue;
     for (let byteIndex = 0; byteIndex < 8; byteIndex++) {
-      const tileByte = extractTByte(t, byteIndex);
-      const definitionId = getTileDefId(tileByte);
+      const definitionId = extractTByte(t, byteIndex);
       if (definitionId === 0) continue;
-      const height = getTileHeight(tileByte);
       const packed = DefinitionManager.pack(typeId, categoryId, definitionId);
       const def = definitions.decode(packed);
       if (!def) {
         debug.warn(["zone"],
           `[decodeZoneTiles] no def for packed=0x${packed.toString(16)}` +
           ` (typeId=${typeId} categoryId=${categoryId} definitionId=${definitionId})` +
-          ` at tIndex=${tIndex} byteIndex=${byteIndex} height=${height}`,
+          ` at tIndex=${tIndex} byteIndex=${byteIndex}`,
         );
         missCount++;
         continue;
       }
-      result.push({ q: zoneQ + byteIndex, r: zoneR + tIndex, height, definition: def });
+      result.push({ q: zoneQ + byteIndex, r: zoneR + tIndex, definition: def });
     }
   }
 
