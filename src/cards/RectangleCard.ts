@@ -76,6 +76,12 @@ export class LayoutRectCard extends LayoutCard {
   private titlePosition: RectCardTitlePosition = "top";
   private dying = false;
   private deathProgress = 0;
+  // Last progress-bar fill we displayed for this card, plus the action ID it
+  // was tracking. Used to blend toward the pending-aware target instead of
+  // snapping when `pendingFireAt` arrives. Reset to 0 on action-ID change so
+  // a fresh recipe doesn't inherit the previous one's tail.
+  private lastProgress = 0;
+  private lastProgressActionId: number | null = null;
   private readonly deathMask = new Graphics();
   private unsubDying: (() => void) | null = null;
   private deathParticleContainer: ParticleContainer | null = null;
@@ -210,30 +216,57 @@ export class LayoutRectCard extends LayoutCard {
     const recipeDef = actionRow
       ? this.ctx.recipes.decode(actionRow.recipe)
       : undefined;
+    // Reset the blend's memory when the actor switches to a different action
+    // (recipe-completed-into-next-recipe, etc.) so the new bar doesn't
+    // inherit the previous one's fill.
+    const currentActionId = actionRow?.actionId ?? null;
+    if (currentActionId !== this.lastProgressActionId) {
+      this.lastProgress = 0;
+      this.lastProgressActionId = currentActionId;
+    }
+
     let progressFill = 0;
     if (actionRow && recipeDef) {
       const now = Date.now() / 1000;
       // Anchor `start` in wall-clock at `flushedAt` (when this row first
-      // hit the client) and let `end` slide between the recipe's projected
-      // finish and the queued UPDATE's `pendingFireAt`. Snapping `start`
-      // when the pending arrives would visibly jolt the bar; sliding only
-      // `end` keeps position continuous and just adjusts the bar's pace
-      // over the last buffer's worth of frames. Falls back to
-      // server-stamped `actionRow.end` when neither timestamp is known.
+      // hit the client). Compute two progress targets:
+      //   `progressNow`     — uses the recipe's projected end
+      //                       (`start + recipeDef.duration`).
+      //   `progressPending` — uses the queued UPDATE's `pendingFireAt` when
+      //                       one is in flight, otherwise equals
+      //                       `progressNow`.
+      // Blend toward `pending` by a small per-frame fraction so a late or
+      // early completion smoothly speeds up / slows down the bar instead of
+      // snapping. Direction-preserve: if the bar was moving forward, never
+      // step back, and always advance by at least `MIN_FORWARD` so motion
+      // doesn't stall when the targets agree.
       const pendingFireAtMs = this.ctx.data.actions.pendingFireAt(actionRow.actionId);
       const flushedAt = this.ctx.data.actions.getFlushedAt(actionRow.actionId);
       const start = flushedAt ?? (actionRow.end - recipeDef.duration);
       const projectedEnd = recipeDef.duration > 0
         ? start + recipeDef.duration
         : actionRow.end;
-      const endSec = pendingFireAtMs !== undefined
+      const pendingEnd = pendingFireAtMs !== undefined
         ? pendingFireAtMs / 1000
         : projectedEnd;
-      const duration = endSec - start;
-      if (duration > 0 && now <= endSec) {
-        progressFill = Math.min(1, Math.max(0, (now - start) / duration));
+      const projectedDuration = projectedEnd - start;
+      const pendingDuration = pendingEnd - start;
+      const progressNow = projectedDuration > 0
+        ? Math.min(1, Math.max(0, (now - start) / projectedDuration))
+        : 0;
+      const progressPending = pendingDuration > 0
+        ? Math.min(1, Math.max(0, (now - start) / pendingDuration))
+        : progressNow;
+
+      const BLEND_SCALE  = 0.45;
+      const MIN_FORWARD  = 0.001;
+      let blended = progressNow + BLEND_SCALE * (progressPending - progressNow);
+      if (this.lastProgress < progressNow) {
+        blended = Math.max(blended, this.lastProgress + MIN_FORWARD);
       }
+      progressFill = Math.min(1, Math.max(0, blended));
     }
+    this.lastProgress = progressFill;
     const barStyle = recipeDef?.style ?? null;
 
     // Pending-action progress — when an action insert/update is buffered for

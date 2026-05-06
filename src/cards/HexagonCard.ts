@@ -81,6 +81,12 @@ export class LayoutHexCard extends LayoutCard {
   private deathAlpha = 1;
   private unsubDying: (() => void) | null = null;
   private currentMagneticAction: CachedMagneticAction | null = null;
+  // Last progress arc fill we displayed for this card, plus the action key
+  // it was tracking ("a:<id>" for a regular action, "m:<id>" for a magnetic
+  // action). Used to blend toward the pending-aware target instead of
+  // snapping when `pendingFireAt` arrives. Reset to 0 on key change.
+  private lastProgress = 0;
+  private lastProgressKey: string | null = null;
   private unsubMagnetic: (() => void) | null = null;
 
   constructor(cardId: number, ctx: GameContext) {
@@ -161,44 +167,80 @@ export class LayoutHexCard extends LayoutCard {
     const recipeDef = activeRecipePacked !== undefined
       ? this.ctx.recipes.decode(activeRecipePacked)
       : undefined;
+    // Blend memory: reset to 0 when the active key changes so the new bar
+    // doesn't inherit the previous one's fill (regular ↔ magnetic switches,
+    // recipe-completed-into-next-recipe, etc.).
+    const currentProgressKey = actionRow
+      ? `a:${actionRow.actionId}`
+      : this.currentMagneticAction
+        ? `m:${this.currentMagneticAction.magneticActionId}`
+        : null;
+    if (currentProgressKey !== this.lastProgressKey) {
+      this.lastProgress = 0;
+      this.lastProgressKey = currentProgressKey;
+    }
+
     let progressFill = 0;
     const now = Date.now() / 1000;
     if (activeEnd !== undefined && recipeDef) {
+      // Compute two progress targets:
+      //   `progressNow`     — anchored in wall-clock at `flushedAt`
+      //                       (regular) or `receivedAt` (magnetic), running
+      //                       to the recipe's projected end.
+      //   `progressPending` — anchored at the same start, running to the
+      //                       queued UPDATE's `pendingFireAt` when one is in
+      //                       flight (else equals `progressNow`).
+      // Blend toward `pending` by a small per-frame fraction so a late or
+      // early completion smoothly speeds up / slows down the arc instead of
+      // snapping. Direction-preserve: if the arc was moving forward, never
+      // step back, and always advance by at least `MIN_FORWARD` so motion
+      // doesn't stall when the targets agree.
+      let progressNow = 0;
+      let progressPending = 0;
       if (actionRow && recipeDef.duration > 0) {
-        // Anchor `start` in wall-clock at `flushedAt` (when this row first
-        // hit the client) and let `end` slide between the recipe's
-        // projected finish and the queued UPDATE's `pendingFireAt`.
-        // Snapping `start` when the pending arrives would visibly jolt the
-        // arc; sliding only `end` keeps position continuous and just
-        // adjusts the bar's pace over the last buffer's worth of frames.
         const pendingFireAtMs = this.ctx.data.actions.pendingFireAt(actionRow.actionId);
         const flushedAt = this.ctx.data.actions.getFlushedAt(actionRow.actionId);
         const start = flushedAt ?? (activeEnd - recipeDef.duration);
         const projectedEnd = start + recipeDef.duration;
-        const endSec = pendingFireAtMs !== undefined
+        const pendingEnd = pendingFireAtMs !== undefined
           ? pendingFireAtMs / 1000
           : projectedEnd;
-        const duration = endSec - start;
-        if (duration > 0 && now <= endSec) {
-          progressFill = Math.min(1, Math.max(0, (now - start) / duration));
+        const projectedDuration = projectedEnd - start;
+        const pendingDuration = pendingEnd - start;
+        if (projectedDuration > 0) {
+          progressNow = Math.min(1, Math.max(0, (now - start) / projectedDuration));
         }
+        progressPending = pendingDuration > 0
+          ? Math.min(1, Math.max(0, (now - start) / pendingDuration))
+          : progressNow;
       } else if (this.currentMagneticAction) {
         // `receivedAt` here is flushed-to-client time (set in ActionManager
-        // from `getFlushedAt`) — wall-clock anchor. Slide the end to
-        // `pendingFireAt` when a queued UPDATE is in flight so the bar
-        // lands at 1.0 on the right frame; otherwise fall back to the
-        // row's server-stamped `end` (close enough when clocks are aligned).
+        // from `getFlushedAt`) — wall-clock anchor.
         const { magneticActionId, receivedAt } = this.currentMagneticAction;
         const pendingFireAtMs = this.ctx.data.magneticActions.pendingFireAt(magneticActionId);
-        const endSec = pendingFireAtMs !== undefined
+        const projectedEnd = activeEnd;
+        const pendingEnd = pendingFireAtMs !== undefined
           ? pendingFireAtMs / 1000
-          : activeEnd;
-        const duration = endSec - receivedAt;
-        if (duration > 0 && now <= endSec) {
-          progressFill = Math.min(1, Math.max(0, (now - receivedAt) / duration));
+          : projectedEnd;
+        const projectedDuration = projectedEnd - receivedAt;
+        const pendingDuration = pendingEnd - receivedAt;
+        if (projectedDuration > 0) {
+          progressNow = Math.min(1, Math.max(0, (now - receivedAt) / projectedDuration));
         }
+        progressPending = pendingDuration > 0
+          ? Math.min(1, Math.max(0, (now - receivedAt) / pendingDuration))
+          : progressNow;
       }
+
+      const BLEND_SCALE = 0.45;
+      const MIN_FORWARD = 0.001;
+      let blended = progressNow + BLEND_SCALE * (progressPending - progressNow);
+      if (this.lastProgress < progressNow) {
+        blended = Math.max(blended, this.lastProgress + MIN_FORWARD);
+      }
+      progressFill = Math.min(1, Math.max(0, blended));
     }
+    this.lastProgress = progressFill;
     const barStyle = recipeDef?.style ?? null;
 
     // Pending-action progress — when an action insert/update is buffered for
