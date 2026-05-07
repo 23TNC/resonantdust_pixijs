@@ -9,6 +9,7 @@ export interface MagneticActionRow {
   layer: number;
   macroZone: number;
   loopCount: number;
+  flags: number;
   deltaT: number;
 }
 import type { SpacetimeManager } from "../server/SpacetimeManager";
@@ -25,10 +26,19 @@ import { WORLD_LAYER } from "../world/worldCoords";
  *  `kind === "dead"`). */
 export type ClientCard = Card & { readonly dead: 0 | 1 | 2 };
 
+/** Bit 0 of `Card.flags`. Mirrors `FLAG_CARD_POSITION_HOLD` in the Rust module:
+ *  temporary hold set by the magnetic system while this card is a slot filler.
+ *  Cleared on action completion/cancel or inventory landing. */
+export const FLAG_CARD_POSITION_HOLD = 1 << 0;
+
+/** Bit 1 of `Card.flags`. Mirrors `position_locked` in flags.json:
+ *  permanent lock — card can never be picked up by the user. */
+export const FLAG_CARD_POSITION_LOCKED = 1 << 1;
+
 /** Bit 7 of `Card.flags`. Mirrors `FLAG_CARD_DEAD` in the Rust module: the
  *  server sets this via UPDATE (carrying `delta_t`) instead of deleting the
  *  row outright, so the client can back-date its death animation by
- *  `16 * delta_t` ms. The actual row delete arrives later via the server-side
+ *  `32 * delta_t` ms. The actual row delete arrives later via the server-side
  *  reaper. */
 const FLAG_CARD_DEAD = 1 << 7;
 
@@ -60,11 +70,11 @@ const shiftEndByDelay = <R extends { end: number }>(row: R, delayMs: number): R 
   end: row.end + delayMs / 1000,
 });
 
-/** Every spacetime table carries `delta_t` (u8, 16-ms increments) — the
+/** Every spacetime table carries `delta_t` (u8, 32-ms increments) — the
  *  scheduled-reducer lag at the time the row was written. Subtracted from the
  *  client display buffer so server lateness consumes the buffer rather than
  *  stacking on top of it. */
-const deltaTMsFromRow = <R extends { deltaT: number }>(row: R): number => row.deltaT * 16;
+const deltaTMsFromRow = <R extends { deltaT: number }>(row: R): number => row.deltaT * 32;
 
 /** Pending applyServer* / markDying promises reject when the store is cleared
  *  or disposed. Listeners are torn down separately, so we just need to keep
@@ -75,7 +85,11 @@ export class DataManager {
   readonly cards = new ShadowedStore<ClientCard>(
     (c) => c.cardId,
     { zone: (c) => packZoneId(c.macroZone, c.layer) },
-    { deltaTMs: deltaTMsFromRow, delayMs: 2000 },
+    {
+      clientTransform: (row) => ({ ...this.preserveInventoryPosition(row), dead: row.dead }),
+      deltaTMs: deltaTMsFromRow,
+      delayMs: 0,
+    },
   );
   readonly players = new ShadowedStore<Player>(
     (p) => p.playerId,
@@ -85,12 +99,13 @@ export class DataManager {
   readonly actions = new ShadowedStore<Action>(
     (a) => a.actionId,
     { zone: (a) => packZoneId(a.macroZone, a.layer) },
-    { clientTransform: shiftEndByDelay, deltaTMs: deltaTMsFromRow, delayMs: 2000 },
+    { clientTransform: shiftEndByDelay, deltaTMs: deltaTMsFromRow, 
+      delayMs: 0 },
   );
   readonly zones = new ShadowedStore<Zone>(
     (z) => z.zoneId,
     { zone: (z) => packZoneId(z.macroZone, z.layer) },
-    { deltaTMs: deltaTMsFromRow, delayMs: 2000 },
+    { deltaTMs: deltaTMsFromRow, delayMs: 0 },
   );
   readonly magneticActions = new ShadowedStore<MagneticActionRow>(
     (m) => m.magneticActionId,
@@ -98,7 +113,7 @@ export class DataManager {
       zone: (m) => packZoneId(m.macroZone, m.layer),
       card: (m) => m.cardId,
     },
-    { clientTransform: shiftEndByDelay, deltaTMs: deltaTMsFromRow, delayMs: 2000 },
+    { clientTransform: shiftEndByDelay, deltaTMs: deltaTMsFromRow, delayMs: 0 },
   );
 
   private spacetime: SpacetimeManager | null = null;
@@ -321,16 +336,16 @@ export class DataManager {
     this.cards.setClient({ ...row, dead: existing?.dead ?? 0 });
   }
 
-  applyServerInsert(table: "cards", row: Card): void;
-  applyServerInsert<K extends Exclude<TableName, "cards">>(table: K, row: TableMap[K]): void;
-  applyServerInsert(table: TableName, row: Card | TableMap[TableName]): void {
+  applyServerInsert(table: "cards", row: Card, delayMs?: number): void;
+  applyServerInsert<K extends Exclude<TableName, "cards">>(table: K, row: TableMap[K], delayMs?: number): void;
+  applyServerInsert(table: TableName, row: Card | TableMap[TableName], delayMs?: number): void {
     if (table === "cards") {
       const merged = this.preserveInventoryPosition(row as Card);
       const clientCard: ClientCard = { ...merged, dead: 0 };
-      this.dispatchInsert("cards", clientCard);
+      this.dispatchInsert("cards", clientCard, delayMs);
       return;
     }
-    this.dispatchInsert(table, row as TableMap[typeof table]);
+    this.dispatchInsert(table, row as TableMap[typeof table], delayMs);
   }
 
   applyServerUpdate(table: "cards", oldRow: Card, newRow: Card): void;
@@ -339,15 +354,20 @@ export class DataManager {
     if (table === "cards") {
       const newCard = newRow as Card;
       const oldCard = oldRow as Card;
-      const merged = this.preserveInventoryPosition(newCard);
       const becameDead =
         (newCard.flags & FLAG_CARD_DEAD) !== 0 &&
         (oldCard.flags & FLAG_CARD_DEAD) === 0;
       if (becameDead) {
+        // Preserve position at enqueue time for dying cards — they don't move
+        // during their death animation so fire-time preservation isn't needed.
+        const merged = this.preserveInventoryPosition(newCard);
         void this.cards.markDying({ ...merged, dead: 1 }).catch(swallowCancelled);
         return;
       }
-      this.dispatchUpdate("cards", oldRow as ClientCard, merged as ClientCard);
+      // Don't preserve position here — clientTransform does it at fire time so
+      // a stack moved during the 2 s display buffer isn't snapped back to the
+      // position it held when the action update was enqueued.
+      this.dispatchUpdate("cards", oldRow as ClientCard, { ...newCard, dead: 0 } as ClientCard);
       return;
     }
     this.dispatchUpdate(
@@ -357,8 +377,8 @@ export class DataManager {
     );
   }
 
-  private dispatchInsert<K extends TableName>(table: K, row: TableMap[K]): void {
-    void this.storeOf(table).applyServerInsert(row).then(
+  private dispatchInsert<K extends TableName>(table: K, row: TableMap[K], delayMs?: number): void {
+    void this.storeOf(table).applyServerInsert(row, delayMs).then(
       ({ key, wasPresent }) => {
         if (!wasPresent) this.notifyKeySet(table, "added", key);
       },
@@ -417,6 +437,16 @@ export class DataManager {
       },
       swallowCancelled,
     );
+  }
+
+  /** Synchronously discard `key` from `table`: cancel any pending server
+   *  writes for it, drop from server and client maps, fire `"delete"` /
+   *  `"removed"` events. Used by per-zone subscription teardown so a quick
+   *  re-subscribe starts from a clean slate without leftover delayed
+   *  inserts that would resurrect rows after the unsubscribe fired. */
+  dropRow<K extends TableName>(table: K, key: number | string): void {
+    const { wasPresent } = this.storeOf(table).dropRow(key);
+    if (wasPresent) this.notifyKeySet(table, "removed", key);
   }
 
   /** Advance a dying card (`dead === 1`) to fully dead: removes it from the

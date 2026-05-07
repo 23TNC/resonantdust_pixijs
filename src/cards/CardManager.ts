@@ -78,6 +78,7 @@ export class CardManager {
     if (state === STACKED_LOOSE) {
       const topId    = card.stackedTop;
       const bottomId = card.stackedBottom;
+      const hexId    = card.stackedHex;
       if (isWorld) {
         const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
         const q = zoneQ + ((row.microZone >> 5) & 0x7);
@@ -99,6 +100,10 @@ export class CardManager {
           this.setCardPosition(bottomId, { kind: "loose", x, y });
         }
       }
+      if (hexId !== 0) {
+        const dest = this.releasedHexChildPosition(row);
+        if (dest) this.setCardPosition(hexId, dest);
+      }
     } else if (state === STACKED_ON_RECT_X || state === STACKED_ON_RECT_Y) {
       // stack() does a leaf walk from the parent which still sees this card
       // as a live child, so attach the continuation child directly instead.
@@ -116,6 +121,7 @@ export class CardManager {
       const hexId = row.microLocation;
       const topId = card.stackedTop;
       const bottomId = card.stackedBottom;
+      const hexChildId = card.stackedHex;
       if (isWorld) {
         // microLocation=0 → bare tile, coords come from the dying card's own row.
         // microLocation!=0 → stacked on a hex card, coords come from that card.
@@ -143,12 +149,53 @@ export class CardManager {
           this.setCardPosition(bottomId, { kind: "stacked", parentId: hexId, direction: "hex" });
         }
       }
+      if (hexChildId !== 0) {
+        const dest = this.releasedHexChildPosition(row);
+        if (dest) this.setCardPosition(hexChildId, dest);
+      }
       this.setCardPosition(cardId, { kind: "loose", x: 0, y: 0 });
     }
 
     card.stackedTop = 0;
     card.stackedBottom = 0;
+    card.stackedHex = 0;
     this.splicing.delete(cardId);
+  }
+
+  /**
+   * Where a `STACKED_ON_HEX` child of a dying hex should land. Mirrors the
+   * dying hex's own position so the child stays put visually — wherever the
+   * hex was, the child takes its place loose:
+   *
+   *   - hex loose in world  → child at the same `(q, r)` (state 3, microLocation=0)
+   *   - hex loose in inventory → child loose at the same `(x, y)`
+   *   - hex on a bare world tile (state 3, microLocation=0) → child at that `(q, r)`
+   *   - hex stacked on another hex (state 3, microLocation=parentId)
+   *       → child re-anchors to the same parent hex
+   */
+  private releasedHexChildPosition(row: CardRow): CardPositionState | null {
+    const state = getStackedState(row.microZone);
+    const isWorld = row.layer >= WORLD_LAYER;
+    if (state === STACKED_LOOSE) {
+      if (isWorld) {
+        const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
+        const q = zoneQ + ((row.microZone >> 5) & 0x7);
+        const r = zoneR + ((row.microZone >> 2) & 0x7);
+        return { kind: "world", q, r };
+      }
+      const { x, y } = decodeLooseXY(row.microLocation);
+      return { kind: "inventory", x, y };
+    }
+    if (state === STACKED_ON_HEX) {
+      if (row.microLocation === 0) {
+        const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
+        const q = zoneQ + ((row.microZone >> 5) & 0x7);
+        const r = zoneR + ((row.microZone >> 2) & 0x7);
+        return { kind: "world", q, r };
+      }
+      return { kind: "stacked", parentId: row.microLocation, direction: "hex" };
+    }
+    return null;
   }
 
   /**

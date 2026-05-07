@@ -138,7 +138,7 @@ export class DefinitionManager {
       return;
     }
 
-    const seenGroups = new Map<number, string>();
+    const seenPacked = new Map<number, string>();
 
     for (const [path, module] of entries) {
       for (const group of module.default) {
@@ -152,15 +152,6 @@ export class DefinitionManager {
           debug.warn(["definitions"], `[DefinitionManager] ${path}: unknown category "${group.category}", skipping group`);
           continue;
         }
-
-        const groupKey = (typeId << 4) | categoryId;
-        const existingPath = seenGroups.get(groupKey);
-        if (existingPath !== undefined) {
-          throw new Error(
-            `[DefinitionManager] duplicate (${group.card_type}, ${group.category}) group in ${path} — already declared in ${existingPath}`,
-          );
-        }
-        seenGroups.set(groupKey, path);
 
         const typeName = this.typeNameById.get(typeId)!;
         const categoryName = this.categoryNameById.get(categoryId)!;
@@ -180,6 +171,13 @@ export class DefinitionManager {
             );
           }
           const packed = DefinitionManager.pack(typeId, categoryId, definitionId);
+          const existingPath = seenPacked.get(packed);
+          if (existingPath !== undefined) {
+            throw new Error(
+              `[DefinitionManager] duplicate card "${key}" (${group.card_type}/${group.category}) in ${path} — already declared in ${existingPath}`,
+            );
+          }
+          seenPacked.set(packed, path);
           const [displayName, style, aspects] = raw;
           this.byPacked.set(packed, {
             packed,

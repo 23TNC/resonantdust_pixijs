@@ -20,4 +20,5 @@ export default __t.row({
   loopCount: __t.u8().name("loop_count"),
   flags: __t.u8(),
   deltaT: __t.u8().name("delta_t"),
+  debug: __t.u32(),
 });

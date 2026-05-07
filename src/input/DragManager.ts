@@ -7,6 +7,7 @@ import type { LayoutNode } from "../layout/LayoutNode";
 import { WORLD_LAYER } from "../world/worldCoords";
 import { packZoneId } from "../zones/zoneId";
 import type { PointerEventData } from "./InputManager";
+import { FLAG_CARD_POSITION_HOLD, FLAG_CARD_POSITION_LOCKED } from "../state/DataManager";
 
 interface DragState {
   card: Card;
@@ -63,6 +64,10 @@ export class DragManager {
     const card = this.ctx.cards?.get(data.hit.cardId);
     if (!card) return;
     if (!(card.gameCard instanceof GameRectCard) && !(card.gameCard instanceof GameHexCard)) return;
+
+    const cardRow = this.ctx.data.get("cards", data.hit.cardId);
+    const DRAG_BLOCK = FLAG_CARD_POSITION_HOLD | FLAG_CARD_POSITION_LOCKED;
+    if (cardRow && (cardRow.flags & DRAG_BLOCK) !== 0) return;
 
     // Stacked cards are draggable too — dropping them on another card
     // re-stacks, dropping on empty space converts to loose (unstack). Both

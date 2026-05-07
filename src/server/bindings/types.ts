@@ -72,6 +72,7 @@ export const MagneticAction = __t.object("MagneticAction", {
   loopCount: __t.u8(),
   flags: __t.u8(),
   deltaT: __t.u8(),
+  debug: __t.u32(),
 });
 export type MagneticAction = __Infer<typeof MagneticAction>;
 

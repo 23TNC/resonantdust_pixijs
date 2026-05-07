@@ -439,6 +439,29 @@ export class ShadowedStore<T> {
     }
   }
 
+  /** Synchronously tear down `key`: cancel any pending ops (their promises
+   *  reject), drop from server and client maps, fire `"delete"` if the row was
+   *  in client. Use during subscription teardown — unlike `applyServerDelete`
+   *  this doesn't queue and doesn't respect the display buffer, and unlike
+   *  `applyServerDelete(row, 0)` it also discards any in-flight inserts/updates
+   *  for the key so they can't resurrect the row after the unsubscribe. */
+  dropRow(key: number | string): ApplyResult {
+    const queue = this.pendingQueues.get(key);
+    if (queue) {
+      for (const op of queue) {
+        if (op.timer !== null) {
+          clearTimeout(op.timer);
+          op.timer = null;
+        }
+        op.reject(new Error("ShadowedStore.dropRow"));
+      }
+      this.pendingQueues.delete(key);
+    }
+    this.server.delete(key);
+    this.receivedAt.delete(key);
+    return this.commitDeleteToClient(key);
+  }
+
   /** Drop every row from both maps without firing change events or touching listeners. Use sparingly — most callers want `DataManager.clearTable` which fires deletes so subscribers can react. */
   clearRows(): void {
     this.cancelAllPending("ShadowedStore.clearRows");

@@ -8,8 +8,7 @@ import {
   STACKED_LOOSE,
   type LooseXY,
 } from "./cardData";
-import { FLAG_ACTION_CANCELED, type CachedMagneticAction } from "../actions/ActionManager";
-import { brighten } from "./RectangleCard";
+import { FLAG_ACTION_CANCELED, FLAG_ACTION_COMPLETE, FLAG_ACTION_DEAD, type CachedMagneticAction } from "../actions/ActionManager";
 import { GameCard } from "./GameCard";
 import {
   hexPoints,
@@ -40,8 +39,6 @@ class HexMount extends LayoutNode {
 const DEATH_FADE_LERP  = 0.15;
 const DEATH_ALPHA_SNAP = 0.01;
 
-// Inset ring drawn inside the hex boundary — outer edge sits 5px inside the
-// vertex circle so it never overlaps an adjacent tile's stroke.
 const PROGRESS_RING_WIDTH  = 4;
 const PROGRESS_RING_RADIUS = HEX_RADIUS - 7;
 
@@ -72,22 +69,18 @@ export class LayoutHexCard extends LayoutCard {
   static readonly WIDTH  = HEX_WIDTH;
   static readonly HEIGHT = HEX_HEIGHT;
 
-  private readonly visual       = new Container();
-  private readonly hexSprite    = new Sprite(Texture.EMPTY);
-  private readonly progressBar  = new Graphics();
-  private readonly stateOverlay = new Graphics();
+  private readonly visual        = new Container();
+  private readonly hexSprite     = new Sprite(Texture.EMPTY);
+  private readonly progressBar   = new Graphics();
+  private readonly stateOverlay  = new Graphics();
   private currentPackedDefinition: number | null = null;
   private dying      = false;
   private deathAlpha = 1;
   private unsubDying: (() => void) | null = null;
   private currentMagneticAction: CachedMagneticAction | null = null;
-  // Last progress arc fill we displayed for this card, plus the action key
-  // it was tracking ("a:<id>" for a regular action, "m:<id>" for a magnetic
-  // action). Used to blend toward the pending-aware target instead of
-  // snapping when `pendingFireAt` arrives. Reset to 0 on key change.
-  private lastProgress = 0;
-  private lastProgressKey: string | null = null;
   private unsubMagnetic: (() => void) | null = null;
+  private lastMagneticProgress = 0;
+  private lastMagneticActionId: number | null = null;
 
   constructor(cardId: number, ctx: GameContext) {
     super(cardId, ctx);
@@ -143,137 +136,71 @@ export class LayoutHexCard extends LayoutCard {
     const cx = HEX_WIDTH  / 2;
     const cy = HEX_HEIGHT / 2;
 
-    // Progress bar arc — drawn between hexSprite and stateOverlay.
-    // Use the regular action if present; fall back to a magnetic action.
-    // Cancelled actions (FLAG_ACTION_CANCELED, bit 1) suppress progress so
-    // the arc isn't shown ticking during the dying window. We consult both
-    // the client row and the server row: with the display buffer the client
-    // copy can lag a server-side cancel by up to ~2 s, so we suppress as
-    // soon as either copy has the bit set.
-    const card = this.ctx.cards?.get(this.cardId);
-    const actionId = card?.currentAction?.actionId;
-    const rawActionRow = actionId !== undefined
-      ? this.ctx.data.get("actions", actionId)
+    // Magnetic action progress ring.
+    // Suppress if the row is canceled, complete, or dead on the client, or
+    // canceled on the server (server can lag the client by ~2 s).
+    const CLIENT_SUPPRESS = FLAG_ACTION_CANCELED | FLAG_ACTION_COMPLETE | FLAG_ACTION_DEAD;
+    const magneticId = this.currentMagneticAction?.magneticActionId;
+    const rawMagneticRow = magneticId !== undefined
+      ? this.ctx.data.get("magnetic_actions", magneticId)
       : undefined;
-    const serverActionRow = actionId !== undefined
-      ? this.ctx.data.getServer("actions", actionId)
+    const serverMagneticRow = magneticId !== undefined
+      ? this.ctx.data.getServer("magnetic_actions", magneticId)
       : undefined;
-    const cancelled =
-      ((rawActionRow?.flags ?? 0) & FLAG_ACTION_CANCELED) !== 0 ||
-      ((serverActionRow?.flags ?? 0) & FLAG_ACTION_CANCELED) !== 0;
-    const actionRow = rawActionRow && !cancelled ? rawActionRow : undefined;
-    const activeRecipePacked = actionRow?.recipe ?? this.currentMagneticAction?.recipe;
-    const activeEnd          = actionRow?.end    ?? this.currentMagneticAction?.end;
-    const recipeDef = activeRecipePacked !== undefined
-      ? this.ctx.recipes.decode(activeRecipePacked)
-      : undefined;
-    // Blend memory: reset to 0 when the active key changes so the new bar
-    // doesn't inherit the previous one's fill (regular ↔ magnetic switches,
-    // recipe-completed-into-next-recipe, etc.).
-    const currentProgressKey = actionRow
-      ? `a:${actionRow.actionId}`
-      : this.currentMagneticAction
-        ? `m:${this.currentMagneticAction.magneticActionId}`
-        : null;
-    if (currentProgressKey !== this.lastProgressKey) {
-      this.lastProgress = 0;
-      this.lastProgressKey = currentProgressKey;
-    }
+    const SERVER_SUPPRESS = FLAG_ACTION_CANCELED | FLAG_ACTION_COMPLETE | FLAG_ACTION_DEAD;
+    const magneticSuppressed =
+      (magneticId !== undefined && serverMagneticRow === undefined) ||
+      ((rawMagneticRow?.flags ?? 0) & CLIENT_SUPPRESS) !== 0 ||
+      ((serverMagneticRow?.flags ?? 0) & SERVER_SUPPRESS) !== 0;
+    const magneticAction = this.currentMagneticAction && !magneticSuppressed
+      ? this.currentMagneticAction
+      : null;
 
-    let progressFill = 0;
-    const now = Date.now() / 1000;
-    if (activeEnd !== undefined && recipeDef) {
-      // Compute two progress targets:
-      //   `progressNow`     — anchored in wall-clock at `flushedAt`
-      //                       (regular) or `receivedAt` (magnetic), running
-      //                       to the recipe's projected end.
-      //   `progressPending` — anchored at the same start, running to the
-      //                       queued UPDATE's `pendingFireAt` when one is in
-      //                       flight (else equals `progressNow`).
-      // Blend toward `pending` by a small per-frame fraction so a late or
-      // early completion smoothly speeds up / slows down the arc instead of
-      // snapping. Direction-preserve: if the arc was moving forward, never
-      // step back, and always advance by at least `MIN_FORWARD` so motion
-      // doesn't stall when the targets agree.
-      let progressNow = 0;
-      let progressPending = 0;
-      if (actionRow && recipeDef.duration > 0) {
-        const pendingFireAtMs = this.ctx.data.actions.pendingFireAt(actionRow.actionId);
-        const flushedAt = this.ctx.data.actions.getFlushedAt(actionRow.actionId);
-        const start = flushedAt ?? (activeEnd - recipeDef.duration);
-        const projectedEnd = start + recipeDef.duration;
-        const pendingEnd = pendingFireAtMs !== undefined
-          ? pendingFireAtMs / 1000
-          : projectedEnd;
-        const projectedDuration = projectedEnd - start;
-        const pendingDuration = pendingEnd - start;
-        if (projectedDuration > 0) {
-          progressNow = Math.min(1, Math.max(0, (now - start) / projectedDuration));
-        }
-        progressPending = pendingDuration > 0
-          ? Math.min(1, Math.max(0, (now - start) / pendingDuration))
-          : progressNow;
-      } else if (this.currentMagneticAction) {
-        // `receivedAt` here is flushed-to-client time (set in ActionManager
-        // from `getFlushedAt`) — wall-clock anchor.
-        const { magneticActionId, receivedAt } = this.currentMagneticAction;
-        const pendingFireAtMs = this.ctx.data.magneticActions.pendingFireAt(magneticActionId);
-        const projectedEnd = activeEnd;
-        const pendingEnd = pendingFireAtMs !== undefined
-          ? pendingFireAtMs / 1000
-          : projectedEnd;
-        const projectedDuration = projectedEnd - receivedAt;
-        const pendingDuration = pendingEnd - receivedAt;
-        if (projectedDuration > 0) {
-          progressNow = Math.min(1, Math.max(0, (now - receivedAt) / projectedDuration));
-        }
-        progressPending = pendingDuration > 0
-          ? Math.min(1, Math.max(0, (now - receivedAt) / pendingDuration))
-          : progressNow;
-      }
-
-      const BLEND_SCALE = 0.45;
-      const MIN_FORWARD = 0.001;
-      let blended = progressNow + BLEND_SCALE * (progressPending - progressNow);
-      if (this.lastProgress < progressNow) {
-        blended = Math.max(blended, this.lastProgress + MIN_FORWARD);
-      }
-      progressFill = Math.min(1, Math.max(0, blended));
-    }
-    this.lastProgress = progressFill;
-    const barStyle = recipeDef?.style ?? null;
-
-    // Pending-action progress — when an action insert/update is buffered for
-    // this card, count down the buffer on the outline arc so the player sees
-    // something is on the way. Filled side is a brightened secondary; empty
-    // side is the secondary itself. Mirrors the rect-card pending bar.
-    let pendingFill = 0;
-    if (progressFill === 0 && !this.currentMagneticAction) {
-      for (const queued of this.ctx.data.actions.pendingValues()) {
-        if (queued.cardId !== this.cardId) continue;
-        if ((queued.flags & FLAG_ACTION_CANCELED) !== 0) continue;
-        const receivedAt = this.ctx.data.actions.getReceivedAt(queued.actionId);
-        const fireAtMs = this.ctx.data.actions.pendingFireAt(queued.actionId);
-        if (receivedAt === undefined || fireAtMs === undefined) continue;
-        const startMs = receivedAt * 1000;
-        const duration = fireAtMs - startMs;
-        if (duration <= 0) continue;
-        pendingFill = Math.min(1, Math.max(0, (Date.now() - startMs) / duration));
-        break;
-      }
+    // Reset floor when the action changes (or disappears).
+    if ((magneticAction?.magneticActionId ?? null) !== this.lastMagneticActionId) {
+      this.lastMagneticProgress = 0;
+      this.lastMagneticActionId = magneticAction?.magneticActionId ?? null;
     }
 
     this.progressBar.clear();
-    if (barStyle && (actionRow || this.currentMagneticAction)) {
-      const clockwise = barStyle.direction !== "ccw";
-      this._drawHexOutline(progressFill, barStyle.colorLeft, barStyle.colorRight, clockwise);
-    } else if (pendingFill > 0) {
-      const def = this.currentPackedDefinition !== null
-        ? this.ctx.definitions.decode(this.currentPackedDefinition) ?? null
-        : null;
-      const secondary = def?.style[1] ?? "#7a7a8a";
-      const left = `#${brighten(secondary, 0.4).toString(16).padStart(6, "0")}`;
-      this._drawHexOutline(pendingFill, left, secondary, /* clockwise = */ true);
+    if (magneticAction) {
+      const recipeDef = this.ctx.recipes.decode(magneticAction.recipe);
+      const barStyle = recipeDef?.style ?? null;
+      if (barStyle) {
+        const { magneticActionId } = magneticAction;
+        const now = Date.now() / 1000;
+        const activeEnd = magneticAction.end;
+        const flushedAt = this.ctx.data.magneticActions.getFlushedAt(magneticActionId);
+        const start = flushedAt ?? (activeEnd - (recipeDef?.duration ?? 0));
+        const pendingFireAtMs = this.ctx.data.magneticActions.pendingFireAt(magneticActionId);
+        const effectiveEnd = pendingFireAtMs !== undefined
+          ? pendingFireAtMs / 1000
+          : activeEnd;
+        const duration = effectiveEnd - start;
+        const raw = duration > 0
+          ? Math.min(1, Math.max(0, (now - start) / duration))
+          : 0;
+        // Floor only applies while pending data is in flight (prevents the
+        // optimistic prediction from jittering backwards). Once the pending
+        // commits, fall back to calculated progress so the bar tracks the
+        // server's true `end` instead of staying pinned at the prediction.
+        const progressFill = pendingFireAtMs !== undefined
+          ? Math.max(raw, this.lastMagneticProgress)
+          : raw;
+        this.lastMagneticProgress = progressFill;
+        const cardDef = this.currentPackedDefinition !== null
+          ? this.ctx.definitions.decode(this.currentPackedDefinition) ?? null
+          : null;
+        const secondary = cardDef?.style[1] ?? "#7a7a8a";
+        const resolveColor = (c: string) => (c === "default" ? secondary : c);
+        const clockwise = barStyle.direction !== "ccw";
+        this._drawMagneticProgress(
+          progressFill,
+          resolveColor(barStyle.colorLeft),
+          resolveColor(barStyle.colorRight),
+          clockwise,
+        );
+      }
     }
 
     this.stateOverlay.clear();
@@ -313,58 +240,40 @@ export class LayoutHexCard extends LayoutCard {
       }
     }
     const moving = this.tweenTo(effX, effY);
-    return this.state.dragging || moving || this.dying || activeEnd !== undefined || pendingFill > 0;
+    return this.state.dragging || moving || this.dying || magneticAction !== null;
   }
 
-  // Walks the hex outline starting at the pointy top (vertex 4) in either
-  // direction, drawing N completed segments + the in-progress partial in
-  // `colorFilled`, then the remaining sides in `colorEmpty`. Each segment is
-  // 1/6 of the perimeter, so `fullSegments = floor(progress * 6)` and
-  // `partialT = (progress * 6) - fullSegments` carries the in-segment fill.
-  // Each color gets its own stroke pair (`moveTo` + `lineTo`s + `stroke()`),
-  // and we skip the call entirely when there's no geometry — a stroke on an
-  // empty path can leave Pixi's GraphicsContext in a state where the next
-  // sub-path picks up stray segments.
-  private _drawHexOutline(progressFill: number, colorFilled: string, colorEmpty: string, clockwise: boolean): void {
-    const cx = HEX_WIDTH  / 2;
-    const cy = HEX_HEIGHT / 2;
+  // Draws the hex outline as 6 discrete sides: the first `litSides` in
+  // `colorFilled`, the rest in `colorEmpty`. A side lights up as soon as
+  // progress crosses its lower threshold (ceil semantics), so side 1 lights
+  // at any progress > 0, side 2 at >= 1/6, etc. — each side stays lit for
+  // roughly 1/6 of the total duration.
+  private _drawMagneticProgress(
+    fill: number,
+    colorFilled: string,
+    colorEmpty: string,
+    clockwise: boolean,
+  ): void {
+    const cx  = HEX_WIDTH  / 2;
+    const cy  = HEX_HEIGHT / 2;
     const pts = hexPoints(cx, cy, PROGRESS_RING_RADIUS);
-    const fill = Math.min(1, Math.max(0, progressFill));
 
-    // Step 0..6 walks vertex 4 → ... → vertex 4 (closed loop). The 7th entry
-    // is the wrap back to top, used by the final segment.
+    const litSides = Math.ceil(Math.min(1, Math.max(0, fill)) * 6);
     const order = clockwise ? [4, 5, 0, 1, 2, 3, 4] : [4, 3, 2, 1, 0, 5, 4];
-    const vx = (step: number): number => pts[order[step] * 2];
-    const vy = (step: number): number => pts[order[step] * 2 + 1];
+    const vx = (i: number): number => pts[order[i] * 2];
+    const vy = (i: number): number => pts[order[i] * 2 + 1];
 
-    const fullSegments = Math.min(6, Math.floor(fill * 6));
-    const partialT     = fill * 6 - fullSegments;
-
-    // Split point: where the filled arc ends and the empty arc begins.
-    const fromX  = vx(fullSegments);
-    const fromY  = vy(fullSegments);
-    const toX    = vx(Math.min(fullSegments + 1, 6));
-    const toY    = vy(Math.min(fullSegments + 1, 6));
-    const splitX = fromX + (toX - fromX) * partialT;
-    const splitY = fromY + (toY - fromY) * partialT;
-
-    // Filled arc — N full segments + the partial of the next.
-    if (fullSegments > 0 || partialT > 0) {
-      this.progressBar.moveTo(vx(0), vy(0));
-      for (let i = 1; i <= fullSegments; i++) {
-        this.progressBar.lineTo(vx(i), vy(i));
-      }
-      if (partialT > 0 && fullSegments < 6) {
-        this.progressBar.lineTo(splitX, splitY);
+    if (litSides > 0) {
+      for (let i = 0; i < litSides; i++) {
+        this.progressBar.moveTo(vx(i), vy(i));
+        this.progressBar.lineTo(vx(i + 1), vy(i + 1));
       }
       this.progressBar.stroke({ color: colorFilled, width: PROGRESS_RING_WIDTH });
     }
-
-    // Empty arc — split point → remaining vertices → back to top.
-    if (fill < 1) {
-      this.progressBar.moveTo(splitX, splitY);
-      for (let i = fullSegments + 1; i <= 6; i++) {
-        this.progressBar.lineTo(vx(i), vy(i));
+    if (litSides < 6) {
+      for (let i = litSides; i < 6; i++) {
+        this.progressBar.moveTo(vx(i), vy(i));
+        this.progressBar.lineTo(vx(i + 1), vy(i + 1));
       }
       this.progressBar.stroke({ color: colorEmpty, width: PROGRESS_RING_WIDTH });
     }

@@ -8,7 +8,7 @@ import type { DataManager } from "../state/DataManager";
 import { WORLD_LAYER } from "../world/worldCoords";
 import { packZoneId, unpackZoneId, type ZoneId } from "../zones/zoneId";
 import type { DbConnection } from "./bindings";
-import type { InventoryStack, Zone } from "./bindings/types";
+import type { InventoryStack } from "./bindings/types";
 
 type AnySubscriptionHandle = SubscriptionHandleImpl<any>;
 
@@ -219,23 +219,28 @@ export class SpacetimeManager {
         this.clearWorldCards(macroZone);
       },
       // After onApplied, the SDK may not have re-fired onInsert for rows already
-      // in its local cache. Sync zones and world cards independently.
+      // in its local cache. Sync zones and world cards independently. Check the
+      // server map, not client — within the display-buffer window after a recent
+      // teardown the client map can still hold rows whose deletion is pending,
+      // which would falsely suppress hydration. Bypass the buffer (`delayMs: 0`)
+      // since we're re-hydrating from a local cache, not animating in fresh
+      // server state.
       onApplied: () => {
         const conn = this.connection;
         if (!conn) return;
-        const hasZone = [...this.data.zones.client.values()].some(z => z.macroZone === macroZone);
+        const hasZone = [...this.data.zones.server.values()].some(z => z.macroZone === macroZone);
         if (!hasZone) {
           for (const zone of conn.db.zones.iter()) {
             if (zone.macroZone === macroZone) {
-              this.data.applyServerInsert("zones", zone);
+              this.data.applyServerInsert("zones", zone, 0);
             }
           }
         }
-        const hasCard = [...this.data.cards.client.values()].some(c => c.macroZone === macroZone && c.layer === WORLD_LAYER);
+        const hasCard = [...this.data.cards.server.values()].some(c => c.macroZone === macroZone && c.layer === WORLD_LAYER);
         if (!hasCard) {
           for (const card of conn.db.cards.iter()) {
             if (card.macroZone === macroZone && card.layer === WORLD_LAYER) {
-              this.data.applyServerInsert("cards", card);
+              this.data.applyServerInsert("cards", card, 0);
             }
           }
         }
@@ -346,54 +351,60 @@ export class SpacetimeManager {
     // Zone identity is `(macroZone, layer)` — scan all zones with this
     // macroZone (across layers) since the subscribe API only carries
     // macroZone. Once subscriptions become layer-scoped, this can use
-    // the `zone` secondary index instead.
-    const matches: Zone[] = [];
-    for (const z of this.data.zones.client.values()) {
-      if (z.macroZone === macroZone) matches.push(z);
+    // the `zone` secondary index instead. Sweep both server and client maps
+    // so rows visible in only one (e.g. a pending insert whose buffer hasn't
+    // fired) still get torn down.
+    const keys = new Set<number>();
+    for (const z of this.data.zones.server.values()) {
+      if (z.macroZone === macroZone) keys.add(z.zoneId);
     }
-    for (const z of matches) this.data.applyServerDelete("zones", z);
+    for (const z of this.data.zones.client.values()) {
+      if (z.macroZone === macroZone) keys.add(z.zoneId);
+    }
+    for (const key of keys) this.data.dropRow("zones", key);
   }
 
   private clearPlayersInWorldZone(zoneId: ZoneId): void {
-    const keys = Array.from(this.data.players.byIndex("zone", zoneId));
-    for (const key of keys) {
-      const row = this.data.players.client.get(key);
-      if (row) this.data.applyServerDelete("players", row);
+    const keys = new Set<number | string>(this.data.players.byIndex("zone", zoneId));
+    for (const p of this.data.players.server.values()) {
+      if (packZoneId(p.macroZone, p.layer) === zoneId) keys.add(p.playerId);
     }
+    for (const key of keys) this.data.dropRow("players", key);
   }
 
   private clearWorldCards(macroZone: number): void {
-    const keys: number[] = [];
-    for (const [key, card] of this.data.cards.client.entries()) {
-      if (card.macroZone === macroZone && card.layer >= WORLD_LAYER) {
-        keys.push(key as number);
-      }
+    const keys = new Set<number | string>();
+    for (const card of this.data.cards.server.values()) {
+      if (card.macroZone === macroZone && card.layer >= WORLD_LAYER) keys.add(card.cardId);
     }
-    for (const key of keys) {
-      this.data.advanceCardDeath(key);
+    for (const card of this.data.cards.client.values()) {
+      if (card.macroZone === macroZone && card.layer >= WORLD_LAYER) keys.add(card.cardId);
     }
+    for (const key of keys) this.data.dropRow("cards", key);
   }
 
   private clearCardsInZone(zoneId: ZoneId): void {
-    for (const key of Array.from(this.data.cards.byIndex("zone", zoneId))) {
-      this.data.advanceCardDeath(key as number);
+    const keys = new Set<number | string>(this.data.cards.byIndex("zone", zoneId));
+    for (const card of this.data.cards.server.values()) {
+      if (packZoneId(card.macroZone, card.layer) === zoneId) keys.add(card.cardId);
     }
+    for (const key of keys) this.data.dropRow("cards", key);
   }
 
   private clearActionsInZone(zoneId: ZoneId): void {
-    const keys = Array.from(this.data.actions.byIndex("zone", zoneId));
-    for (const key of keys) {
-      const row = this.data.actions.client.get(key);
-      if (row) this.data.applyServerDelete("actions", row);
+    const keys = new Set<number | string>(this.data.actions.byIndex("zone", zoneId));
+    for (const a of this.data.actions.server.values()) {
+      if (packZoneId(a.macroZone, a.layer) === zoneId) keys.add(a.actionId);
     }
+    for (const key of keys) this.data.dropRow("actions", key);
   }
 
   private clearMagneticActionsInZone(zoneId: ZoneId): void {
-    const keys = Array.from(this.data.magneticActions.byIndex("zone", zoneId));
-    for (const key of keys) {
-      const row = this.data.magneticActions.client.get(key);
-      if (row) this.data.applyServerDelete("magnetic_actions", row);
+    const keys = new Set<number | string>(this.data.magneticActions.byIndex("zone", zoneId));
+    for (const m of this.data.magneticActions.server.values()) {
+      if (packZoneId(m.macroZone, m.layer) === zoneId) keys.add(m.magneticActionId);
     }
+    for (const key of keys) this.data.dropRow("magnetic_actions", key);
   }
 
   private async openSubscription(sub: ActiveSubscription): Promise<void> {

@@ -2,10 +2,13 @@
 
 ## Purpose
 
-Client-side **upgrade pre-filter**. Mirrors the server's
-`actions.rs::process_branch` machinery so the client can decide whether
-a stack submission would actually change server-side state, and skip
-submitting when it wouldn't.
+Client-side **upgrade pre-filter** for the action / magnetic-action
+machinery. Mirrors the server's `actions.rs::process_branch` so the
+client can decide whether a stack submission would actually change
+server-side state, and skip submitting when it wouldn't. Also mirrors
+the public-table state for in-progress actions and magnetic actions
+into per-card listeners that card visuals subscribe to for progress
+rings and death animations.
 
 A stack-change event walks every potential actor in the affected
 branches, scores all recipes against each actor's visible window, and
@@ -27,28 +30,30 @@ re-runs the same calculation; the client doesn't trust its prediction.
 ## Important files
 
 - `ActionManager.ts`: scene-scoped, takes `(ctx, zoneId)`. Subscribes to
-  `ctx.cards.subscribeStackChange(zoneId, …)` and
-  `ctx.data.subscribe("actions", …)`. Holds `byActionId:
-  Map<actionId, CachedAction>` (source of truth) and `byCardId:
-  Map<cardId, actionId>` (reverse lookup for the actor check). On every
-  stack-change event: collect both top and bottom chains rooted at the
-  affected card, build a per-direction `claimedBy` map (which cards are
-  in which action's slot window), walk every actor candidate position,
-  apply the four-way decision, and submit the stack iff any candidate
-  in either branch would trigger a change.
-- `CachedAction` carries `recipe` (stable ID) in addition to
-  participants — the recipe ID is what the upgrade decision compares
-  against the matcher's best pick. The chain root isn't tracked: the
-  server doesn't hold it in `CardHold` (leaving it free is what lets
-  multiple recipes share one — `[attack, sword] + human` and
-  `[heal, anima] + human` running concurrently) and doesn't store it
-  on the `Action` row, so there's nothing for the client to mirror.
+  `ctx.cards.subscribeStackChange(zoneId, …)`,
+  `ctx.data.subscribe("actions", …)`, and
+  `ctx.data.subscribe("magnetic_actions", …)`. Holds two parallel
+  `byActionId` / `byCardId` maps — one for `Action` rows
+  (`CachedAction`), one for `MagneticAction` rows (`CachedMagneticAction`).
+  Also exports the `FLAG_ACTION_CANCELED` / `FLAG_ACTION_COMPLETE` /
+  `FLAG_ACTION_DEAD` bit constants used by card visuals to switch
+  animation phases.
+- **Per-card listeners.** `subscribeAction(cardId, listener)` /
+  `subscribeMagneticAction(cardId, listener)` deliver the action /
+  magnetic-action currently bound to that card; LayoutHexCard /
+  LayoutRectCard use these to drive progress rings, death fades, and
+  cancellation cues.
 
 ## Conventions
 
 - **One action per actor.** `byCardId` is `Map<number, number>`. The
   recipe model assumes a card is the actor for at most one in-flight
   recipe.
+- **Magnetic actions are tracked separately from regular actions.** A
+  card may simultaneously be the anchor of a `MagneticAction` (during
+  the slot-fill phase) and the actor of an `Action` (after the
+  magnetic phase queues an inner). The two tables are independent
+  registries; subscribers to one don't see the other.
 - **Visible chain walk.** From an actor candidate, extend outward
   including cards that are *free* or *in the actor's own action*. Stop
   at the first card claimed by some other action (excluding it). The
@@ -57,11 +62,8 @@ re-runs the same calculation; the client doesn't trust its prediction.
 - **Cross-branch-type guard.** A Y-stack root may be the actor of a
   TopStack action while we're processing the bottom branch (or vice
   versa). When the actor's current action is for the *other* branch
-  type, leave it alone — that branch's evaluator owns its fate. Without
-  this guard, one branch's iteration could unilaterally cancel the
-  other branch's action just because a different-type recipe also fits
-  the same actor. Mirrored on the server in
-  `actions.rs::process_actor_candidate`.
+  type, leave it alone — that branch's evaluator owns its fate.
+  Mirrored on the server in `actions.rs::process_actor_candidate`.
 - **Same-type, same recipe ⇒ noop.** When the best recipe at an actor
   matches its current `Action.recipe` index, the pre-filter says no-op.
   Strict slot-filler equality (the server-side check that catches
@@ -77,7 +79,7 @@ re-runs the same calculation; the client doesn't trust its prediction.
   move.** When a card moves between two chains we hear both old and
   new roots; both branches of each get evaluated.
 - **Recipe matching uses weighted scoring.** `RecipeManager` exposes
-  `recipesOfType(type)`, `scoreRecipeForActor(...)`, and
+  `recipesOfType(type, direction)`, `scoreRecipeForActor(...)`, and
   `compareWeight(a, b)`. ActionManager iterates `recipesOfType` and
   picks the highest-weight non-blocked match per actor — same as the
   server's `actions.rs::process_actor_candidate`. Per-leaf weights
@@ -88,6 +90,11 @@ re-runs the same calculation; the client doesn't trust its prediction.
   calls `submit_inventory_stacks` — that's how every state change
   reaches the server (start, cancel, upgrade all flow from it). There
   is no separate cancel reducer.
+- **Death is observed, not driven, by ActionManager.** When the server
+  flags an action dead (`FLAG_ACTION_DEAD`), the row update arrives via
+  `data.subscribe("actions")` and ActionManager updates its caches; per-card
+  listeners fire so visuals can play a fade. The actual `delete` arrives
+  ~10s later when the server-side reaper runs.
 
 ## Pitfalls
 

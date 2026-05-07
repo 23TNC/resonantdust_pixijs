@@ -16,6 +16,18 @@ import { WORLD_LAYER } from "../world/worldCoords";
  *  uses it to suppress progress display during the dying window. */
 export const FLAG_ACTION_CANCELED = 1 << 1;
 
+/** Bit 2 of `Action.flags`. Mirrors `FLAG_ACTION_COMPLETE` in the Rust module:
+ *  set together with `FLAG_ACTION_DEAD` when an action ended via normal recipe
+ *  completion. Mutually exclusive with `FLAG_ACTION_CANCELED`. The client
+ *  uses it to suppress progress display once the action is already done. */
+export const FLAG_ACTION_COMPLETE = 1 << 2;
+
+/** Bit 7 of `Action.flags` (and `MagneticAction.flags`). Mirrors
+ *  `FLAG_ACTION_DEAD` in the Rust module: set as an UPDATE so the client can
+ *  back-date its end animation. Always set together with either
+ *  `FLAG_ACTION_CANCELED` or `FLAG_ACTION_COMPLETE`. */
+export const FLAG_ACTION_DEAD = 1 << 7;
+
 export interface CachedMagneticAction {
   magneticActionId: number;
   cardId: number;
