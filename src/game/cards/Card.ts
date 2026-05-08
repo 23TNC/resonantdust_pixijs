@@ -159,7 +159,7 @@ export class Card {
       }
     }
 
-    this.unsubscribe = ctx.data.cards.subscribeKey(cardId, (change) => {
+    this.unsubscribe = ctx.data.subscribeLocalCardKey(cardId, (change) => {
       this.onDataChange(change);
     });
 

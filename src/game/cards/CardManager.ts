@@ -1,6 +1,6 @@
 import type { GameContext } from "../../GameContext";
 import type { Card as CardRow } from "../../server/spacetime/bindings/types";
-import { packValidAt, type ZoneId } from "../../server/data/packing";
+import { type ZoneId } from "../../server/data/packing";
 import { Card, type CardPositionState, type StackDirection } from "./Card";
 import {
   clearStackedState,
@@ -39,18 +39,18 @@ export class CardManager {
   private readonly splicing = new Set<number>();
 
   constructor(private readonly ctx: GameContext) {
-    for (const cardId of ctx.data.cards.current.keys()) {
+    for (const cardId of ctx.data.cardsLocal.keys()) {
       this.spawn(cardId);
     }
     // Spawn order is arbitrary so a child may have spawned before its
     // parent and missed setting its back-pointer. Repair once now that
     // every card is in the registry.
     this.repairBackPointers();
-    this.unsubscribe = ctx.data.cards.subscribe((change) => {
+    this.unsubscribe = ctx.data.subscribeLocalCard((change) => {
       if (change.kind === "added") this.spawn(change.key);
       else if (change.kind === "removed") this.destroy(change.key);
-      // "updated" — same id, just a new valid_at row. Cards subscribe to
-      // their own key for data changes; CardManager only cares about
+      // "updated" — same id, position/flag bits changed. Cards subscribe
+      // to their own key for data changes; CardManager only cares about
       // spawn/destroy transitions.
     });
   }
@@ -262,21 +262,15 @@ export class CardManager {
       // when world returns.
       return;
     }
-    // Optimistic client write: stamp a fresh `valid_at` and insert into the
-    // local `cards.server` map. Promote synchronously so the new row lands
-    // in `current` and fires the `updated` event before this function
-    // returns — without that, the layout would tween toward the OLD target
-    // for one or more frames before the per-tick promote catches up,
-    // showing as a visible snap-back of the dropped card. The server-side
-    // reducer call (still TODO) will eventually confirm with its own row
-    // whose `valid_at` reflects the server clock; promote will reconcile.
-    const nowSecs = Math.floor(Date.now() / 1000);
-    newRow = {
-      ...newRow,
-      validAt: packValidAt(row.cardId, nowSecs),
-    };
-    this.ctx.data.cards.insert(newRow);
-    this.ctx.data.cards.promote(nowSecs);
+    // Local-only write: store the new row in DataManager's local overlay.
+    // The server tier (`data.cards.server` / `data.cards.current`) is left
+    // untouched — pixel placement in inventory is a client concern.
+    // `setLocalCard` fires the local-cards subscribers, so the matching
+    // `Card.onDataChange` runs and applies the row to both halves
+    // (gameCard + layoutCard). It also marks the key as overridden so
+    // subsequent server pushes don't clobber the position fields (see
+    // `mirrorCard`).
+    this.ctx.data.setLocalCard(cardId, newRow);
   }
 
   get(cardId: number): Card | undefined {

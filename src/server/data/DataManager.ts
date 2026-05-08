@@ -1,7 +1,10 @@
 import type { Card, Player, Zone } from "../spacetime/bindings/types";
 import type { ConnectionManager } from "../spacetime/ConnectionManager";
 import { SubscriptionManager } from "../spacetime/SubscriptionManager";
-import { ValidAtTable, type TableChange } from "./ValidAtTable";
+import { unpackMicroZone } from "./packing";
+import { ValidAtTable, type TableChange, type TableListener } from "./ValidAtTable";
+
+const INVENTORY_LAYER = 1;
 
 /** Local data layer with two tiers:
  *
@@ -18,11 +21,12 @@ import { ValidAtTable, type TableChange } from "./ValidAtTable";
  *  events copy the row in, `removed` events delete the key. The overlay
  *  is what game code reads / writes for displayed state.
  *
- *  **Overrides** — calling `setLocal*(id, row)` writes to the overlay AND
- *  marks the key as overridden, so subsequent server-driven mirror events
- *  for that key are suppressed until `clearLocal*(id)` re-syncs from the
- *  server view. This lets client-side mutations (e.g. drag-drop position)
- *  survive across server pushes without polluting the server tier.
+ *  **Mirror policy** — server is authoritative; mirror events propagate
+ *  in full *except* when the cards-specific `mirrorCard` rule fires (see
+ *  there). `setLocalCard` simply writes to the overlay and emits a local
+ *  event; on the next server push for that key, `mirrorCard` decides
+ *  whether to keep position fields or not. There is no all-or-nothing
+ *  override flag — server changes never get dropped wholesale.
  *
  *  DataManager owns its own `SubscriptionManager` — the SDK ingress for
  *  this layer. `main.ts` only constructs `ConnectionManager` and hands it
@@ -35,17 +39,18 @@ export class DataManager {
   readonly subscriptions: SubscriptionManager;
 
   /** Local overlays — what game code reads/writes for displayed state.
-   *  Mirrors `<table>.current` until a `setLocal*` call marks a key as
-   *  overridden. */
+   *  Mirrors `<table>.current` via subscription. */
   readonly cardsLocal = new Map<number, Card>();
   readonly playersLocal = new Map<number, Player>();
   readonly zonesLocal = new Map<number, Zone>();
 
-  private readonly cardOverrides = new Set<number>();
-  private readonly playerOverrides = new Set<number>();
-  private readonly zoneOverrides = new Set<number>();
-
   private readonly unsubMirror: Array<() => void> = [];
+
+  /** Listeners on the local cards overlay. Fire on every overlay change —
+   *  mirror-driven (server pushes that pass through `mirrorCard`) AND
+   *  client-driven (`setLocalCard` / `clearLocalCard`). */
+  private readonly cardLocalListeners = new Set<TableListener<Card>>();
+  private readonly cardLocalKeyListeners = new Map<number, Set<TableListener<Card>>>();
 
   constructor(connection: ConnectionManager) {
     this.subscriptions = new SubscriptionManager(connection);
@@ -66,60 +71,67 @@ export class DataManager {
       onDelete: this.zones.delete,
     });
 
-    // Mirror server tier → local overlay. Overridden keys stay frozen
-    // (server changes for them are dropped on the floor until cleared).
+    // Mirror server tier → local overlay. Server pushes always propagate;
+    // `mirrorCard` may keep position fields from the local row in the
+    // inventory-loose case (see there).
+    this.unsubMirror.push(this.cards.subscribe((c) => this.mirrorCard(c)));
     this.unsubMirror.push(
-      this.cards.subscribe((c) => this.mirror(this.cardsLocal, this.cardOverrides, c)),
+      this.players.subscribe((c) => this.mirror(this.playersLocal, c)),
     );
     this.unsubMirror.push(
-      this.players.subscribe((c) => this.mirror(this.playersLocal, this.playerOverrides, c)),
-    );
-    this.unsubMirror.push(
-      this.zones.subscribe((c) => this.mirror(this.zonesLocal, this.zoneOverrides, c)),
+      this.zones.subscribe((c) => this.mirror(this.zonesLocal, c)),
     );
   }
 
-  /** Write a row into the local overlay and mark the key as overridden.
-   *  Subsequent server-driven mirror events for this key are suppressed
-   *  until `clearLocalCard(id)` is called. Use for client-side mutations
-   *  (e.g. optimistic position changes) that should survive server pushes. */
+  /** Write a row into the local cards overlay and fire the local-cards
+   *  listeners (added/updated as appropriate). Server is still
+   *  authoritative — the next mirror event will replace this row, except
+   *  for the position fields preserved by `mirrorCard`'s inventory-loose
+   *  rule. Use for client-driven row writes (e.g. drag-drop on commit). */
   setLocalCard(id: number, row: Card): void {
-    this.cardOverrides.add(id);
+    const prev = this.cardsLocal.get(id);
     this.cardsLocal.set(id, row);
+    if (prev === undefined) {
+      this.fireCardLocal({ kind: "added", key: id, row });
+    } else if (prev !== row) {
+      this.fireCardLocal({ kind: "updated", key: id, oldRow: prev, newRow: row });
+    }
   }
 
-  /** Drop the override for `id`, re-sync the overlay value from the server
-   *  view (`cards.current.get(id)`). Use after the server confirms the
-   *  client mutation, or to abandon a local change. */
-  clearLocalCard(id: number): void {
-    this.cardOverrides.delete(id);
-    const row = this.cards.current.get(id);
-    if (row) this.cardsLocal.set(id, row);
-    else this.cardsLocal.delete(id);
+  /** Subscribe to every local-cards-overlay change. Fires for both
+   *  mirror-driven server pushes and client-driven `setLocal`/`clearLocal`
+   *  calls. Returns an unsubscribe fn. */
+  subscribeLocalCard(listener: TableListener<Card>): () => void {
+    this.cardLocalListeners.add(listener);
+    return () => {
+      this.cardLocalListeners.delete(listener);
+    };
+  }
+
+  /** Subscribe to local-cards-overlay changes for a single id. Subscribing
+   *  to a not-yet-existing id is fine — the listener fires when the row
+   *  arrives. Returns an unsubscribe fn. */
+  subscribeLocalCardKey(key: number, listener: TableListener<Card>): () => void {
+    let set = this.cardLocalKeyListeners.get(key);
+    if (!set) {
+      set = new Set();
+      this.cardLocalKeyListeners.set(key, set);
+    }
+    set.add(listener);
+    return () => {
+      const s = this.cardLocalKeyListeners.get(key);
+      if (!s) return;
+      s.delete(listener);
+      if (s.size === 0) this.cardLocalKeyListeners.delete(key);
+    };
   }
 
   setLocalPlayer(id: number, row: Player): void {
-    this.playerOverrides.add(id);
     this.playersLocal.set(id, row);
   }
 
-  clearLocalPlayer(id: number): void {
-    this.playerOverrides.delete(id);
-    const row = this.players.current.get(id);
-    if (row) this.playersLocal.set(id, row);
-    else this.playersLocal.delete(id);
-  }
-
   setLocalZone(id: number, row: Zone): void {
-    this.zoneOverrides.add(id);
     this.zonesLocal.set(id, row);
-  }
-
-  clearLocalZone(id: number): void {
-    this.zoneOverrides.delete(id);
-    const row = this.zones.current.get(id);
-    if (row) this.zonesLocal.set(id, row);
-    else this.zonesLocal.delete(id);
   }
 
   /** Promote every table's `current` view to `now` (absolute seconds). */
@@ -142,21 +154,87 @@ export class DataManager {
     this.cardsLocal.clear();
     this.playersLocal.clear();
     this.zonesLocal.clear();
-    this.cardOverrides.clear();
-    this.playerOverrides.clear();
-    this.zoneOverrides.clear();
+    this.cardLocalListeners.clear();
+    this.cardLocalKeyListeners.clear();
   }
 
   private mirror<T>(
     map: Map<number, T>,
-    overrides: Set<number>,
     change: TableChange<T>,
   ): void {
-    if (overrides.has(change.key)) return;
     if (change.kind === "removed") {
       map.delete(change.key);
     } else {
       map.set(change.key, change.kind === "added" ? change.row : change.newRow);
+    }
+  }
+
+  /** Card-specific mirror: when the card is loose in inventory on both
+   *  sides (`surface === INVENTORY_LAYER` for the incoming server row AND
+   *  the existing local row, plus `unpackMicroZone(server.microZone).localQ
+   *  === 0`), preserve the local row's position fields (`macroZone`,
+   *  `microZone`, `microLocation`, `surface`) and only merge in the server's
+   *  non-position fields (`flags`, `packedDefinition`, `ownerId`, etc.).
+   *  Position in inventory is client-managed; the rest of the row stays
+   *  authoritative on the server. */
+  private mirrorCard(change: TableChange<Card>): void {
+    const prev = this.cardsLocal.get(change.key);
+
+    if (change.kind === "removed") {
+      if (prev === undefined) return;
+      this.cardsLocal.delete(change.key);
+      this.fireCardLocal({ kind: "removed", key: change.key, oldRow: prev });
+      return;
+    }
+
+    const serverRow = change.kind === "added" ? change.row : change.newRow;
+
+    const isLooseInInventory =
+      prev !== undefined &&
+      serverRow.surface === INVENTORY_LAYER &&
+      prev.surface === INVENTORY_LAYER &&
+      unpackMicroZone(serverRow.microZone).localQ === 0;
+
+    const nextRow: Card = isLooseInInventory && prev !== undefined
+      ? {
+          ...serverRow,
+          macroZone:     prev.macroZone,
+          microZone:     prev.microZone,
+          microLocation: prev.microLocation,
+          surface:       prev.surface,
+        }
+      : serverRow;
+
+    this.cardsLocal.set(change.key, nextRow);
+    if (prev === undefined) {
+      this.fireCardLocal({ kind: "added", key: change.key, row: nextRow });
+    } else if (prev !== nextRow) {
+      this.fireCardLocal({ kind: "updated", key: change.key, oldRow: prev, newRow: nextRow });
+    }
+  }
+
+  /** Snapshot listener sets before iterating so a listener that
+   *  (un)subscribes during firing doesn't break the loop. Per-listener
+   *  try/catch so one bad listener can't stop the others. */
+  private fireCardLocal(change: TableChange<Card>): void {
+    if (this.cardLocalListeners.size > 0) {
+      for (const l of [...this.cardLocalListeners]) {
+        try {
+          l(change);
+        } catch (err) {
+          console.error("[DataManager] cards local listener threw", err);
+        }
+      }
+    }
+    const set = this.cardLocalKeyListeners.get(change.key);
+    if (set && set.size > 0) {
+      for (const l of [...set]) {
+        try {
+          l(change);
+        } catch (err) {
+          console.error("[DataManager] cards local key listener threw", err);
+        }
+      }
     }
   }
 }
