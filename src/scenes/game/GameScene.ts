@@ -1,4 +1,4 @@
-// import { ActionManager } from "../actions/ActionManager";
+import { ActionManager } from "../../game/actions/ActionManager";
 import { ParticleManager } from "../../assets/ParticleManager";
 import { CardManager } from "../../game/cards/CardManager";
 import { GameInventory } from "../../game/inventory/InventoryGame";
@@ -22,7 +22,7 @@ export class GameScene extends Scene {
   private gameInventory!: GameInventory;
   private inputManager!: InputManager;
   private dragManager!: DragManager;
-  // private actionManager!: ActionManager;
+  private actionManager!: ActionManager;
   // private worldPanManager!: WorldPanManager;
   private particleManager!: ParticleManager;
   private releaseCards: (() => void) | null = null;
@@ -64,8 +64,10 @@ export class GameScene extends Scene {
 
     this.dragManager = new DragManager(ctx);
 
-    // this.actionManager = new ActionManager(ctx, inventoryZoneId);
-    // ctx.actions = this.actionManager;
+    // ActionManager must come after CardManager — it subscribes to
+    // CardManager's stack-change events and reads the card overlay.
+    this.actionManager = new ActionManager(ctx);
+    ctx.actions = this.actionManager;
 
     // this.worldPanManager = new WorldPanManager(ctx, this.gameLayout.worldView);
     // ctx.world = this.gameLayout.worldView;
@@ -94,7 +96,7 @@ export class GameScene extends Scene {
 
     this.particleManager.destroy();
     // this.worldPanManager.dispose();
-    // this.actionManager.dispose();
+    this.actionManager.dispose();
     this.dragManager.dispose();
     this.inputManager.dispose();
     this.gameManager.dispose();
@@ -107,7 +109,7 @@ export class GameScene extends Scene {
       this.ctxRef.layout = null;
       this.ctxRef.game = null;
       this.ctxRef.input = null;
-      // this.ctxRef.actions = null;
+      this.ctxRef.actions = null;
       // this.ctxRef.world = null;
       this.ctxRef = null;
     }

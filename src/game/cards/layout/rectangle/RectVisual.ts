@@ -1,5 +1,5 @@
 import { Container, Graphics, Text } from "pixi.js";
-import type { CardDefinition } from "../../../../definitions/DefinitionManager";
+import type { CardDefinition } from "../../../definitions/DefinitionManager";
 import {
   RECT_CARD_HEIGHT,
   RECT_CARD_TITLE_HEIGHT,
@@ -44,24 +44,26 @@ export class RectCardVisual extends Container {
   }
 
   draw(
-    _definition: CardDefinition | null,
+    definition: CardDefinition | null,
     titlePosition: RectCardTitlePosition = "top",
   ): void {
-    const style = FALLBACK_STYLE;
-    const [primary, secondary, outline] = style;
+    // style[0] = background fill, style[1] = title bar fill, style[2] = text
+    // (and outline). FALLBACK_STYLE follows the same ordering.
+    const [background, titleBar, textColor] = definition?.style ?? FALLBACK_STYLE;
+    const name = definition?.name ?? FALLBACK_NAME;
     const w = RECT_CARD_WIDTH;
     const h = RECT_CARD_HEIGHT;
     const titleY = titlePosition === "top" ? 0 : h - RECT_CARD_TITLE_HEIGHT;
 
     this.bg.clear();
-    this.bg.rect(0, 0, w, h).fill({ color: primary });
-    this.bg.rect(0, titleY, w, RECT_CARD_TITLE_HEIGHT).fill({ color: secondary });
+    this.bg.rect(0, 0, w, h).fill({ color: background });
+    this.bg.rect(0, titleY, w, RECT_CARD_TITLE_HEIGHT).fill({ color: titleBar });
 
-    this.nameText.text = FALLBACK_NAME;
-    this.nameText.style.fill = FALLBACK_STYLE[2];
+    this.nameText.text = name;
+    this.nameText.style.fill = textColor;
     this.nameText.position.set(w / 2, titleY + RECT_CARD_TITLE_HEIGHT / 2);
 
     this.cardOutline.clear();
-    this.cardOutline.rect(0, 0, w, h).stroke({ color: outline, width: 2 });
+    this.cardOutline.rect(0, 0, w, h).stroke({ color: textColor, width: 2 });
   }
 }

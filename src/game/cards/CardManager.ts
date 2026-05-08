@@ -70,7 +70,7 @@ export class CardManager {
   spliceCard(cardId: number): void {
     const card = this.cards.get(cardId);
     if (!card) return;
-    const row = this.ctx.data.cards.current.get(cardId);
+    const row = this.ctx.data.cardsLocal.get(cardId);
     if (!row) return;
 
     this.splicing.add(cardId);
@@ -226,7 +226,7 @@ export class CardManager {
    * built here don't propagate.
    */
   setCardPosition(cardId: number, state: CardPositionState): void {
-    const row = this.ctx.data.cards.current.get(cardId);
+    const row = this.ctx.data.cardsLocal.get(cardId);
     if (!row) return;
     let newRow: CardRow;
     if (state.kind === "loose") {
@@ -248,7 +248,7 @@ export class CardManager {
         state.direction === "top" ? STACKED_ON_RECT_X :
         state.direction === "bottom" ? STACKED_ON_RECT_Y :
         STACKED_ON_HEX;
-      const parentRow = this.ctx.data.cards.current.get(state.parentId);
+      const parentRow = this.ctx.data.cardsLocal.get(state.parentId);
       newRow = {
         ...row,
         macroZone:     parentRow?.macroZone ?? row.macroZone,
@@ -359,7 +359,7 @@ export class CardManager {
   rootOf(cardId: number): number {
     let id = cardId;
     for (let i = 0; i < FIND_ROOT_MAX_DEPTH; i++) {
-      const row = this.ctx.data.cards.current.get(id);
+      const row = this.ctx.data.cardsLocal.get(id);
       if (!row) return id;
       const state = getStackedState(row.microZone);
       if (state !== STACKED_ON_RECT_X && state !== STACKED_ON_RECT_Y) return id;
@@ -460,7 +460,7 @@ export class CardManager {
     if (childId === 0) return 0;
 
     const child = this.cards.get(childId);
-    const childRow = this.ctx.data.cards.current.get(childId);
+    const childRow = this.ctx.data.cardsLocal.get(childId);
     const expectedState =
       direction === "top" ? STACKED_ON_RECT_X : STACKED_ON_RECT_Y;
     if (
@@ -503,7 +503,7 @@ export class CardManager {
     }
 
     for (const id of chain) {
-      const row = this.ctx.data.cards.current.get(id);
+      const row = this.ctx.data.cardsLocal.get(id);
       if (!row) continue;
       this.setCardPosition(id, {
         kind: "stacked",
@@ -515,7 +515,7 @@ export class CardManager {
 
   private repairBackPointers(): void {
     for (const card of this.cards.values()) {
-      const row = this.ctx.data.cards.current.get(card.cardId);
+      const row = this.ctx.data.cardsLocal.get(card.cardId);
       if (!row) continue;
       const state = getStackedState(row.microZone);
       if (state === STACKED_ON_RECT_X) {

@@ -62,9 +62,12 @@ export class DragManager {
     if (!card) return;
     if (!(card.gameCard instanceof GameRectCard) && !(card.gameCard instanceof GameHexCard)) return;
 
-    // TODO: re-enable drag-block check when card-flag bit constants come
-    // back. The old check was: read the row, bail if
-    // `(row.flags & (FLAG_CARD_POSITION_HOLD | FLAG_CARD_POSITION_LOCKED)) !== 0`.
+    // Source flag check: position_hold (temporary, e.g. mid-animation /
+    // server-held while a magnetic action is using the card) or
+    // position_locked (permanent — world tiles, anchored event cards).
+    // Either bit blocks pickup. See content/cards/flags.json.
+    const row = this.ctx.data.cardsLocal.get(data.hit.cardId);
+    if (row && this.pickupBlocked(row.flags)) return;
 
     // Stacked cards are draggable too — dropping them on another card
     // re-stacks, dropping on empty space converts to loose (unstack). Both
@@ -107,7 +110,12 @@ export class DragManager {
     // card was parented to the hit-transparent overlay, so the up event's
     // hit-test fell through to whatever was beneath. Drop on a peeking title
     // returns the child; CardManager.stack walks to the actual leaf.
-    const target = this.targetCardFromHit(up.hit, card.cardId);
+    //
+    // Target flag check: drop_hold (temporary, mid-drop) or drop_locked
+    // (permanent reject of any drop) on the target makes this drop fall
+    // through to dropLoose as if there were no target at all.
+    const rawTarget = this.targetCardFromHit(up.hit, card.cardId);
+    const target = rawTarget && !this.targetBlocksDrop(rawTarget) ? rawTarget : null;
     if (target) {
       if (target.gameCard instanceof GameRectCard) {
         const direction = this.directionFromCursor(up, target);
@@ -185,5 +193,24 @@ export class DragManager {
     const g = target.layoutCard.container.getGlobalPosition();
     const localY = up.y - g.y;
     return localY < target.layoutCard.height / 2 ? "top" : "bottom";
+  }
+
+  /** True if the source card's `flags` has either `position_hold` or
+   *  `position_locked` set — both block pickup. */
+  private pickupBlocked(flags: number): boolean {
+    const def = this.ctx.definitions;
+    return def.hasCardFlag(flags, "position_hold")
+        || def.hasCardFlag(flags, "position_locked");
+  }
+
+  /** True if the target card's `flags` has either `drop_hold` or
+   *  `drop_locked` set — both reject incoming drops. Reads the row from
+   *  `cardsLocal` (the displayed-state overlay). */
+  private targetBlocksDrop(target: Card): boolean {
+    const row = this.ctx.data.cardsLocal.get(target.cardId);
+    if (!row) return false;
+    const def = this.ctx.definitions;
+    return def.hasCardFlag(row.flags, "drop_hold")
+        || def.hasCardFlag(row.flags, "drop_locked");
   }
 }

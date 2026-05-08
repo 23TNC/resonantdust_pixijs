@@ -7,14 +7,14 @@
  * Edit `config` here to toggle subsystems.
  */
 const config: readonly (readonly [string, number])[] = [
-  ["actions",     3],
-  ["spacetime",   3],
-  ["zone",        3],
-  ["vite",        3],
-  ["definitions", 3],
-  ["layout",      3],
-  ["particles",   3],
-  ["cards",       3],
+  ["actions",     0],
+  ["spacetime",   5],
+  ["zone",        5],
+  ["vite",        5],
+  ["definitions", 5],
+  ["layout",      5],
+  ["particles",   5],
+  ["cards",       5],
 ] as const;
 
 function shouldPrint(tags: string[], level: number): boolean {

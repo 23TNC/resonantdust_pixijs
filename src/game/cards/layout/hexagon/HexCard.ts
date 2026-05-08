@@ -117,9 +117,7 @@ export class LayoutHexCard extends LayoutCard {
   applyData(row: CardRow): void {
     if (row.packedDefinition !== this.currentPackedDefinition) {
       this.currentPackedDefinition = row.packedDefinition;
-      // TODO: stubbed pending wasm-built definitions.
-      // Restore: const def = this.ctx.definitions.decode(row.packedDefinition) ?? null;
-      const def = null;
+      const def = this.ctx.definitions.decode(row.packedDefinition) ?? null;
       this.hexSprite.texture = this.ctx.textures.getHexTexture(def, row.packedDefinition);
       this.invalidate();
     }

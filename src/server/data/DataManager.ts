@@ -5,6 +5,16 @@ import { unpackMicroZone } from "./packing";
 import { ValidAtTable, type TableChange, type TableListener } from "./ValidAtTable";
 
 const INVENTORY_LAYER = 1;
+const FLAG_ACTION_DEAD = 1 << 7;
+
+/** Local-overlay row: server `Card` plus a client-only `dead` marker.
+ *  - `1` — mirror saw `flags & FLAG_ACTION_DEAD`. Triggers the death
+ *    animation on the layout side.
+ *  - `2` — layout has finished the death animation and wrote back. The
+ *    mirror preserves `2` even on subsequent pushes that still carry the
+ *    flag, so we don't replay the animation.
+ *  - absent — alive, or never been dead. */
+export type LocalCard = Card & { dead?: 1 | 2 };
 
 /** Local data layer with two tiers:
  *
@@ -40,7 +50,7 @@ export class DataManager {
 
   /** Local overlays — what game code reads/writes for displayed state.
    *  Mirrors `<table>.current` via subscription. */
-  readonly cardsLocal = new Map<number, Card>();
+  readonly cardsLocal = new Map<number, LocalCard>();
   readonly playersLocal = new Map<number, Player>();
   readonly zonesLocal = new Map<number, Zone>();
 
@@ -88,7 +98,7 @@ export class DataManager {
    *  authoritative — the next mirror event will replace this row, except
    *  for the position fields preserved by `mirrorCard`'s inventory-loose
    *  rule. Use for client-driven row writes (e.g. drag-drop on commit). */
-  setLocalCard(id: number, row: Card): void {
+  setLocalCard(id: number, row: LocalCard): void {
     const prev = this.cardsLocal.get(id);
     this.cardsLocal.set(id, row);
     if (prev === undefined) {
@@ -195,7 +205,7 @@ export class DataManager {
       prev.surface === INVENTORY_LAYER &&
       unpackMicroZone(serverRow.microZone).localQ === 0;
 
-    const nextRow: Card = isLooseInInventory && prev !== undefined
+    const baseRow: Card = isLooseInInventory && prev !== undefined
       ? {
           ...serverRow,
           macroZone:     prev.macroZone,
@@ -204,6 +214,16 @@ export class DataManager {
           surface:       prev.surface,
         }
       : serverRow;
+    // Preserve `dead: 2` once the layout has finished its animation —
+    // otherwise a subsequent server push with the flag still set would
+    // regress us to `1` and replay the animation.
+    const flagDead = (serverRow.flags & FLAG_ACTION_DEAD) !== 0;
+    const dead: 1 | 2 | undefined = flagDead
+      ? (prev?.dead === 2 ? 2 : 1)
+      : undefined;
+    const nextRow: LocalCard = dead !== undefined
+      ? { ...baseRow, dead }
+      : baseRow;
 
     this.cardsLocal.set(change.key, nextRow);
     if (prev === undefined) {

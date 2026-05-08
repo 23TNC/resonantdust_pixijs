@@ -18,13 +18,10 @@ export const EMPTY_TILE_PACKED = 0x1FFFE;
 // Fake definition used to drive HexCardVisual when rendering empty world tiles.
 // secondary === primary so the inner band is invisible; name is blank.
 const EMPTY_TILE_DEF: CardDefinition = {
-  packed:       EMPTY_TILE_PACKED,
-  typeId:       0,
-  categoryId:   0,
+  cardType:     0,
+  cardCategory: 0,
   definitionId: 0,
   key:          "",
-  typeName:     "",
-  categoryName: "",
   name:         "",
   style:        ["#141e28", "#141e28", "#243040"],
   aspects:      [],
@@ -43,13 +40,10 @@ const CUSTOM_PACKED: Record<CustomCard, number> = {
 const CUSTOM_DEFS: Record<CustomCard, CardDefinition> = {
   // Same neutral palette as the empty hex world tile.
   empty: {
-    packed:       CUSTOM_PACKED.empty,
-    typeId:       0,
-    categoryId:   0,
+    cardType:     0,
+    cardCategory: 0,
     definitionId: 0,
     key:          "",
-    typeName:     "",
-    categoryName: "",
     name:         "",
     style:        ["#141e28", "#141e28", "#243040"],
     aspects:      [],

@@ -1,7 +1,6 @@
-// Action / definition subsystems are stripped for now — restore these
-// imports when those subsystems come back online:
+// Action subsystem is stripped for now — restore when online:
 //   import type { CachedAction } from "../actions/ActionManager";
-//   import { DefinitionManager } from "../definitions/DefinitionManager";
+import { DefinitionManager } from "../definitions/DefinitionManager";
 import { debug } from "../../debug";
 import type { GameContext } from "../../GameContext";
 import type { LayoutNode } from "../layout/LayoutNode";
@@ -88,16 +87,13 @@ export class Card {
     ctx: GameContext,
     cardManager: CardManager,
   ): Card | null {
-    const row = ctx.data.cards.current.get(cardId);
+    const row = ctx.data.cardsLocal.get(cardId);
     if (!row) {
       debug.warn(["cards"], `[Card] no row for card ${cardId}, skipping spawn`);
       return null;
     }
-    // TODO: shape selection requires DefinitionManager.unpack(row.packedDefinition)
-    // + ctx.definitions.shape(typeId), both stripped right now. Defaulting all
-    // cards to rect until those subsystems come back. The cast widens the
-    // literal type so the `=== "hex"` branch stays reachable for restoration.
-    const shape = "rect" as "rect" | "hex";
+    const { typeId } = DefinitionManager.unpack(row.packedDefinition);
+    const shape = ctx.definitions.shape(typeId) ?? "rect";
     if (shape === "hex") {
       return new Card(
         cardId,
@@ -128,7 +124,7 @@ export class Card {
     this.gameCard = gameCard;
     this.layoutCard = layoutCard;
 
-    const initialRow = ctx.data.cards.current.get(cardId);
+    const initialRow = ctx.data.cardsLocal.get(cardId);
     this.currentZoneId = initialRow
       ? packZoneId(initialRow.macroZone, initialRow.surface)
       : Number.NaN;
@@ -143,7 +139,7 @@ export class Card {
       let row: CardRow = initialRow;
       if (this.currentParentId !== 0 && !cardManager.get(this.currentParentId)) {
         this.fallbackToInventory(initialRow);
-        row = ctx.data.cards.current.get(cardId) ?? initialRow;
+        row = ctx.data.cardsLocal.get(cardId) ?? initialRow;
         this.currentZoneId = packZoneId(row.macroZone, row.surface);
         this.currentParentId = 0;
         this.currentStackDirection = null;

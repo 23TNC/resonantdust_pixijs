@@ -1,6 +1,7 @@
 import { Container, Graphics, ParticleContainer } from "pixi.js";
 import type { GameContext } from "../../../../GameContext";
 import type { Card as CardRow } from "../../../../server/spacetime/bindings/types";
+import type { LocalCard } from "../../../../server/data/DataManager";
 import { ParticleManager, type ParticleHandle } from "../../../../assets/ParticleManager";
 import {
   decodeLooseXY,
@@ -104,6 +105,19 @@ export class LayoutRectCard extends LayoutCard {
       this.invalidate();
     }
 
+    // `dead === 1` is set by `DataManager.mirrorCard` when the server row's
+    // FLAG_ACTION_DEAD bit is observed. Start the death animation once on
+    // that transition; `this.dying` guards re-entry, and once we write back
+    // `dead: 2` (in the layout completion branch) the mirror preserves the
+    // 2 across further pushes so we don't replay.
+    if ((row as LocalCard).dead === 1 && !this.dying) {
+      this.dying = true;
+      this.deathProgress = 0;
+      this.visual.mask = this.deathMask;
+      this._spawnDeathEffect();
+      this.invalidate();
+    }
+
     const stacked = getStackedState(row.microZone);
 
     if (stacked === STACKED_LOOSE) {
@@ -112,7 +126,7 @@ export class LayoutRectCard extends LayoutCard {
       this.setTarget(x, y);
     } else if (stacked === STACKED_ON_RECT_X || stacked === STACKED_ON_RECT_Y) {
       const parentId = row.microLocation;
-      if (!this.ctx.data.cards.current.get(parentId)) {
+      if (!this.ctx.data.cardsLocal.get(parentId)) {
         this.ctx.cards?.get(this.cardId)?.setPosition({
           kind: "loose",
           x: this.targetX,
@@ -139,7 +153,7 @@ export class LayoutRectCard extends LayoutCard {
         this.setTarget(x - RECT_CARD_WIDTH / 2, y - RECT_CARD_HEIGHT / 2);
       } else {
         const parentId = row.microLocation;
-        if (!this.ctx.data.cards.current.get(parentId)) {
+        if (!this.ctx.data.cardsLocal.get(parentId)) {
           this.ctx.cards?.get(this.cardId)?.setPosition({
             kind: "loose",
             x: this.targetX,
@@ -165,11 +179,9 @@ export class LayoutRectCard extends LayoutCard {
   }
 
   protected override layout(): boolean | void {
-    // TODO: stubbed pending wasm-built definitions. Restore via:
-    //   const def = this.currentPackedDefinition !== null
-    //     ? this.ctx.definitions.decode(this.currentPackedDefinition) ?? null
-    //     : null;
-    const def = null;
+    const def = this.currentPackedDefinition !== null
+      ? this.ctx.definitions.decode(this.currentPackedDefinition) ?? null
+      : null;
 
     this.rectVisual.draw(def, this.titlePosition);
 
@@ -220,10 +232,11 @@ export class LayoutRectCard extends LayoutCard {
         }
 
         this.ctx.cards?.spliceCard(this.cardId);
-        // TODO: `data.advanceCardDeath` is gone — wire to whatever the new
-        // architecture exposes for "tell the server this card finished its
-        // death animation" once that's defined.
-        // queueMicrotask(() => this.ctx.data.advanceCardDeath(this.cardId));
+        // Mark the local row as "animation complete". The mirror preserves
+        // `dead: 2` even when the server row still carries FLAG_ACTION_DEAD,
+        // so we don't replay this branch on the next push.
+        const cur = this.ctx.data.cardsLocal.get(this.cardId);
+        if (cur) this.ctx.data.setLocalCard(this.cardId, { ...cur, dead: 2 });
       }
     }
     this.visual.alpha = this.state.dragging ? 0.7 : 1;
@@ -248,13 +261,10 @@ export class LayoutRectCard extends LayoutCard {
     pc.position.set(this.width / 2, this.height);
     this.container.addChild(pc);
     this.deathParticleContainer = pc;
-    // TODO: stubbed pending wasm-built definitions. While definitions are
-    // stubbed, `primary` always falls through to the default. Restore via:
-    //   const def = this.currentPackedDefinition !== null
-    //     ? this.ctx.definitions.decode(this.currentPackedDefinition) ?? null
-    //     : null;
-    //   const primary = def?.style[0] ?? "#3a3a4a";
-    const primary = "#3a3a4a";
+    const def = this.currentPackedDefinition !== null
+      ? this.ctx.definitions.decode(this.currentPackedDefinition) ?? null
+      : null;
+    const primary = def?.style[0] ?? "#3a3a4a";
     this.deathParticleHandle = pm.createEmitter(pc, "ascend", { startColor: primary });
   }
 

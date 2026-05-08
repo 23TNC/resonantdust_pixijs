@@ -1,5 +1,4 @@
 import { debug } from "../../debug";
-//import type { InventoryStack } from "./bindings/types";
 import type { ConnectionManager } from "./ConnectionManager";
 
 /**
@@ -12,22 +11,30 @@ export class ReducerManager {
   constructor(private readonly connection: ConnectionManager) {}
 
   /**
-   * Submit inventory stacks to trigger recipe matching on the server.
-   * The server runs the upgrade machinery (`process_top_branch` /
-   * `process_bottom_branch`) over each submitted stack — start, keep,
-   * cancel, or upgrade decisions all flow from this single reducer.
-   * There is intentionally no separate cancel reducer: the only way a
-   * client influences action state is by submitting validated stacks
-   * (or by causing card creation, which fires the on_create matcher).
+   * Propose a stack action against a matched recipe. The server validates
+   * recipe eligibility (hex / root / slot entities) and the proposed
+   * location, then sets `slot_hold` on every slot card and `position_hold`
+   * on the actor / root / non-actor slots according to the rules in
+   * `actions.rs::propose_action` — see that doc for the exact flag
+   * derivation. Pass `0` for `hex` / `root` when the recipe has no
+   * `hex` / `root` constraint.
    */
-  /* async submitStacks(stacks: InventoryStack[]): Promise<void> {
+  async proposeAction(args: {
+    hex: number;
+    root: number;
+    slots: number[];
+    surface: number;
+    macroZone: number;
+    microZone: number;
+    microLocation: number;
+    recipeId: number;
+  }): Promise<void> {
     debug.log(
       ["spacetime"],
-      `[spacetime] submitStacks count=${stacks.length}`,
-      2,
+      `[spacetime] proposeAction recipe=${args.recipeId} hex=${args.hex} root=${args.root} slots=[${args.slots.join(",")}]`,
+      5,
     );
     const conn = await this.connection.connect();
-    //await conn.reducers.submitInventoryStacks({ stacks });
-  } */
-} 
-  
+    await conn.reducers.proposeAction(args);
+  }
+}

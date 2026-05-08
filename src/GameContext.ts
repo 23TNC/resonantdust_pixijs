@@ -1,9 +1,9 @@
 import type { Application } from "pixi.js";
-// import type { ActionManager } from "./actions/ActionManager";
+import type { ActionManager } from "./game/actions/ActionManager";
 import type { TextureManager } from "./assets/TextureManager";
 import type { CardManager } from "./game/cards/CardManager";
 import type { DrawCallCounter } from "./debug/DrawCallCounter";
-// import type { DefinitionManager } from "./definitions/DefinitionManager";
+import type { DefinitionManager } from "./game/definitions/DefinitionManager";
 // import type { RecipeManager } from "./definitions/RecipeManager";
 import type { PlayerManager } from "./server/player/PlayerManager";
 import type { GameManager } from "./scenes/game/GameManager";
@@ -21,7 +21,7 @@ export interface GameContext {
   readonly textures: TextureManager;
   readonly drawCallCounter: DrawCallCounter;
   readonly scenes: SceneManager;
-  // readonly definitions: DefinitionManager;
+  readonly definitions: DefinitionManager;
   // readonly recipes: RecipeManager;
   readonly connection: ConnectionManager;
   readonly reducers: ReducerManager;
@@ -37,5 +37,5 @@ export interface GameContext {
   /** Scene-scoped: set by GameScene on enter, cleared on exit. Null otherwise. */
   input: InputManager | null;
   /** Scene-scoped: set by GameScene on enter, cleared on exit. Null otherwise. */
-  // actions: ActionManager | null;
+  actions: ActionManager | null;
 }

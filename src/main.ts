@@ -2,7 +2,7 @@ import { Application } from "pixi.js";
 import { debug } from "./debug";
 import { DrawCallCounter } from "./debug/DrawCallCounter";
 import { TextureManager } from "./assets/TextureManager";
-// import { DefinitionManager } from "./definitions/DefinitionManager";
+import { DefinitionManager, initDefinitions } from "./game/definitions/DefinitionManager";
 // import { RecipeManager } from "./definitions/RecipeManager";
 import { PlayerManager } from "./server/player/PlayerManager";
 import type { GameContext } from "./GameContext";
@@ -40,7 +40,12 @@ async function main(): Promise<Runtime> {
   const textures = new TextureManager(app.renderer);
   const drawCallCounter = new DrawCallCounter();
   drawCallCounter.patch(app.renderer);
-  // const definitions = new DefinitionManager();
+
+  // Bootstrap the wasm-built content crate before any code calls into the
+  // definitions API. `initDefinitions` is idempotent — safe to await
+  // multiple times.
+  await initDefinitions();
+  const definitions = new DefinitionManager();
   // const recipes = new RecipeManager(definitions);
   const zones = new ZoneManager();
 
@@ -87,7 +92,7 @@ async function main(): Promise<Runtime> {
     scenes,
     textures,
     drawCallCounter,
-    // definitions,
+    definitions,
     // recipes,
     connection,
     reducers,
@@ -98,7 +103,7 @@ async function main(): Promise<Runtime> {
     layout: null,
     game: null,
     input: null,
-    // actions: null,
+    actions: null,
   };
   scenes.setContext(ctx);
 

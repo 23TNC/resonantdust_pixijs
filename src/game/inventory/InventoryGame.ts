@@ -230,7 +230,7 @@ export class GameInventory {
   private findRoot(card: Card): Card | null {
     let current: Card = card;
     for (let i = 0; i < FIND_ROOT_MAX_DEPTH; i++) {
-      const row = this.ctx.data.cards.current.get(current.cardId);
+      const row = this.ctx.data.cardsLocal.get(current.cardId);
       if (!row) return null;
       const state = getStackedState(row.microZone);
       if (state === STACKED_LOOSE) return current;
@@ -263,6 +263,13 @@ export class GameInventory {
 
   private tryPush(a: Card, b: Card): void {
     if (a.isDragging() || b.isDragging()) return;
+    // Skip dying cards. They linger in `cardsLocal` (still at their old
+    // position) until the server reaps them, but their just-spliced
+    // children land on top of them this same frame — without this guard
+    // the perfectly-overlapping pair hits the `dist < 0.01` tie-break in
+    // `tryPush` and shoves the survivor sideways.
+    if (this.ctx.data.cardsLocal.get(a.cardId)?.dead) return;
+    if (this.ctx.data.cardsLocal.get(b.cardId)?.dead) return;
     const acb = this.getChainBounds(a);
     const bcb = this.getChainBounds(b);
     const arb = this.getBounds(a);
