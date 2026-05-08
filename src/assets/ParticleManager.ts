@@ -1,6 +1,6 @@
 import { Assets, ParticleContainer, Texture } from "pixi.js";
 import { type EmitterConfigV3, Emitter, upgradeConfig } from "@spd789562/particle-emitter";
-import { LayoutNode } from "../layout/LayoutNode";
+import { LayoutNode } from "../game/layout/LayoutNode";
 import { debug } from "../debug";
 
 // Eagerly load all effect JSON configs from the effects folder.

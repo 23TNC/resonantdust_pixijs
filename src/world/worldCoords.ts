@@ -1,5 +1,5 @@
-import type { Zone } from "../server/bindings/types";
-import { DefinitionManager, type CardDefinition } from "../definitions/DefinitionManager";
+import type { Zone } from "../server/spacetime/bindings/types";
+import { DefinitionManager, type CardDefinition } from "../game/definitions/DefinitionManager";
 import { debug } from "../debug";
 
 /**
@@ -12,11 +12,10 @@ export const ZONE_SIZE = 8;
 /** Pointy-top hex tile: distance from center to corner, in pixels. */
 export const TILE_SIZE = 80;
 
-/**
- * Layer value for world zones. World ZoneIds are packed as
- * packZoneId(macroZone, WORLD_LAYER). Inventory/card zones use layer < 64.
- */
-export const WORLD_LAYER = 64;
+/** `WORLD_LAYER` is a server-protocol constant — its canonical home is
+ *  `server/data/packing`. Re-exported here for game-code callers that
+ *  already import other world-coord helpers from this module. */
+export { WORLD_LAYER } from "../server/data/packing";
 
 // Server packs macro_zone as: ((zone_q as i16 as u16) << 16) | (zone_r as i16 as u16)
 // where zone_q/zone_r are the chunk indices (signed, not biased).

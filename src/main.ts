@@ -2,22 +2,22 @@ import { Application } from "pixi.js";
 import { debug } from "./debug";
 import { DrawCallCounter } from "./debug/DrawCallCounter";
 import { TextureManager } from "./assets/TextureManager";
-import { DefinitionManager } from "./definitions/DefinitionManager";
-import { RecipeManager } from "./definitions/RecipeManager";
-import { PlayerSession } from "./features/PlayerSession";
+// import { DefinitionManager } from "./definitions/DefinitionManager";
+// import { RecipeManager } from "./definitions/RecipeManager";
+import { PlayerManager } from "./server/player/PlayerManager";
 import type { GameContext } from "./GameContext";
-import { LoginScene } from "./scenes/LoginScene";
+import { LoginScene } from "./scenes/login/LoginScene";
 import { SceneManager } from "./scenes/SceneManager";
-import { DbConnection } from "./server/bindings";
-import { SpacetimeManager } from "./server/SpacetimeManager";
-import { DataManager } from "./state/DataManager";
-import { ZoneManager } from "./zones/ZoneManager";
+import { ConnectionManager } from "./server/spacetime/ConnectionManager";
+import { ReducerManager } from "./server/spacetime/ReducerManager";
+import { DataManager } from "./server/data/DataManager";
+import { ZoneManager } from "./game/zones/ZoneManager";
 
 interface Runtime {
   app: Application;
   scenes: SceneManager;
-  spacetime: SpacetimeManager;
-  playerSession: PlayerSession;
+  connection: ConnectionManager;
+  playerSession: PlayerManager;
   data: DataManager;
   zones: ZoneManager;
 }
@@ -40,16 +40,15 @@ async function main(): Promise<Runtime> {
   const textures = new TextureManager(app.renderer);
   const drawCallCounter = new DrawCallCounter();
   drawCallCounter.patch(app.renderer);
-  const definitions = new DefinitionManager();
-  const recipes = new RecipeManager(definitions);
-  const data = new DataManager();
+  // const definitions = new DefinitionManager();
+  // const recipes = new RecipeManager(definitions);
   const zones = new ZoneManager();
 
-  const spacetime = new SpacetimeManager({
+  const connection = new ConnectionManager({
     uri: import.meta.env.VITE_SPACETIME_URI ?? "http://localhost:3000",
     databaseName: import.meta.env.VITE_SPACETIME_DB ?? "resonantdust-dev",
-    builderFactory: () => DbConnection.builder(),
-    data,
+  });
+  connection.addListener({
     onConnected: (_conn, identity) => {
       debug.log(["spacetime"], `[spacetime] connected as ${identity.toHexString()}`);
     },
@@ -61,20 +60,37 @@ async function main(): Promise<Runtime> {
       else debug.log(["spacetime"], "[spacetime] disconnected");
     },
   });
+  const reducers = new ReducerManager(connection);
+  const data = new DataManager(connection);
 
-  data.attachSpacetime(spacetime);
-  data.attachZones(zones);
+  // Per-frame promote: lifts elapsed `valid_at` rows from each table's
+  // `server` map into `current` and fires `added`/`updated`/`removed` events
+  // to subscribers. Without this, subscribers never see inbound data and
+  // anything waiting on `current` (e.g. PlayerManager.waitForPlayer) hangs.
+  app.ticker.add(() => data.promote(Date.now() / 1000));
 
-  const playerSession = new PlayerSession(spacetime, data);
+  // Drive per-zone SDK subscriptions off the ZoneManager refcount. Anything
+  // that calls `zones.ensure(zoneId)` (GameScene for the inventory zone, etc.)
+  // bumps the zone to "active" → we open the matching `cards` subscription so
+  // the server starts pushing rows. Mirror unsubscribe on removed.
+  zones.onAdded("active", (zoneId) => {
+    void data.subscriptions.subscribeCards(zoneId);
+  });
+  zones.onRemoved("active", (zoneId) => {
+    data.subscriptions.unsubscribeCards(zoneId);
+  });
+
+  const playerSession = new PlayerManager(connection, data);
 
   const ctx: GameContext = {
     app,
     scenes,
     textures,
     drawCallCounter,
-    definitions,
-    recipes,
-    spacetime,
+    // definitions,
+    // recipes,
+    connection,
+    reducers,
     playerSession,
     data,
     zones,
@@ -82,15 +98,15 @@ async function main(): Promise<Runtime> {
     layout: null,
     game: null,
     input: null,
-    actions: null,
+    // actions: null,
   };
   scenes.setContext(ctx);
 
-  spacetime.connect().catch(() => undefined);
+  connection.connect().catch(() => undefined);
 
   await scenes.change(new LoginScene());
 
-  return { app, scenes, spacetime, playerSession, data, zones };
+  return { app, scenes, connection, playerSession, data, zones };
 }
 
 function showFatalError(error: unknown): void {
@@ -122,7 +138,7 @@ if (import.meta.hot) {
     rt.zones.dispose();
     rt.data.dispose();
     rt.playerSession.dispose();
-    rt.spacetime.disconnect();
+    rt.connection.disconnect();
     await rt.scenes.dispose();
     rt.app.destroy(true, { children: true, texture: true });
     document

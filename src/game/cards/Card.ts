@@ -1,11 +1,13 @@
-import type { CachedAction } from "../actions/ActionManager";
-import { DefinitionManager } from "../game/definitions/DefinitionManager";
+// Action / definition subsystems are stripped for now — restore these
+// imports when those subsystems come back online:
+//   import type { CachedAction } from "../actions/ActionManager";
+//   import { DefinitionManager } from "../definitions/DefinitionManager";
 import { debug } from "../../debug";
 import type { GameContext } from "../../GameContext";
-import type { LayoutNode } from "../../layout/LayoutNode";
+import type { LayoutNode } from "../layout/LayoutNode";
 import type { Card as CardRow } from "../../server/spacetime/bindings/types";
-import type { ShadowedChange } from "../server/ShadowedStore";
-import { packZoneId, type ZoneId } from "../../zones/zoneId";
+import { packZoneId, type ZoneId } from "../../server/data/packing";
+import type { TableChange } from "../../server/data/ValidAtTable";
 import {
   getStackedState,
   STACKED_ON_HEX,
@@ -13,19 +15,21 @@ import {
   STACKED_ON_RECT_Y,
 } from "./cardData";
 import type { CardManager } from "./CardManager";
-import type { GameCard } from "./GameCard";
-import { GameHexCard, LayoutHexCard } from "./layout/hexagon/HexagonCard";
-import type { LayoutCard } from "./layout/LayoutCard";
-import { GameRectCard, LayoutRectCard } from "./layout/rectangle/RectangleCard";
+import type { GameCard } from "./game/CardGame";
+import { GameHexCard, LayoutHexCard } from "./layout/hexagon/HexCard";
+import type { LayoutCard } from "./layout/CardLayout";
+import { GameRectCard, LayoutRectCard } from "./layout/rectangle/RectCard";
 
 const INVENTORY_LAYER = 1;
 
 export type StackDirection = "top" | "bottom" | "hex";
 
 /** What `Card.setPosition` accepts. Loose = freely placed inventory xy;
- *  inventory = return to owner's inventory at given xy (resets layer/zone);
+ *  inventory = return to owner's inventory at given xy (resets surface/zone);
  *  stacked = pinned to another card's stack-host with a direction;
- *  world = placed at a specific world hex tile (q, r axial coords). */
+ *  world = placed at a specific world hex tile (q, r axial coords). World
+ *  is unused while world tier is stripped, but kept on the type so the
+ *  CardManager.setCardPosition switch stays exhaustive. */
 export type CardPositionState =
   | { kind: "loose"; x: number; y: number }
   | { kind: "inventory"; x: number; y: number }
@@ -36,11 +40,11 @@ export class Card {
   readonly cardId: number;
   readonly gameCard: GameCard;
   readonly layoutCard: LayoutCard;
-  public currentAction: CachedAction | null = null;
+  // public currentAction: CachedAction | null = null;  // actions stripped
   private readonly cardManager: CardManager;
   private unsubscribe: (() => void) | null = null;
-  private unsubAction: (() => void) | null = null;
-  private unsubActionPending: (() => void) | null = null;
+  // private unsubAction: (() => void) | null = null;            // actions stripped
+  // private unsubActionPending: (() => void) | null = null;     // actions stripped
   private currentZoneId: ZoneId;
   /** card_id we're stacked on, or 0 when loose. Drives layout-side parenting:
    *  loose → zone surface, stacked → parent card's stackHost. */
@@ -84,16 +88,16 @@ export class Card {
     ctx: GameContext,
     cardManager: CardManager,
   ): Card | null {
-    const row = ctx.data.get("cards", cardId);
+    const row = ctx.data.cards.current.get(cardId);
     if (!row) {
       debug.warn(["cards"], `[Card] no row for card ${cardId}, skipping spawn`);
       return null;
     }
-    const { typeId } = DefinitionManager.unpack(row.packedDefinition);
-    const shape = ctx.definitions.shape(typeId);
-    if (shape === undefined) {
-      debug.warn(["cards"], `[Card] unknown shape for typeId=${typeId} (card ${cardId}); defaulting to rect`);
-    }
+    // TODO: shape selection requires DefinitionManager.unpack(row.packedDefinition)
+    // + ctx.definitions.shape(typeId), both stripped right now. Defaulting all
+    // cards to rect until those subsystems come back. The cast widens the
+    // literal type so the `=== "hex"` branch stays reachable for restoration.
+    const shape = "rect" as "rect" | "hex";
     if (shape === "hex") {
       return new Card(
         cardId,
@@ -124,9 +128,9 @@ export class Card {
     this.gameCard = gameCard;
     this.layoutCard = layoutCard;
 
-    const initialRow = ctx.data.get("cards", cardId);
+    const initialRow = ctx.data.cards.current.get(cardId);
     this.currentZoneId = initialRow
-      ? packZoneId(initialRow.macroZone, initialRow.layer)
+      ? packZoneId(initialRow.macroZone, initialRow.surface)
       : Number.NaN;
 
     if (initialRow) {
@@ -139,8 +143,8 @@ export class Card {
       let row: CardRow = initialRow;
       if (this.currentParentId !== 0 && !cardManager.get(this.currentParentId)) {
         this.fallbackToInventory(initialRow);
-        row = ctx.data.get("cards", cardId) ?? initialRow;
-        this.currentZoneId = packZoneId(row.macroZone, row.layer);
+        row = ctx.data.cards.current.get(cardId) ?? initialRow;
+        this.currentZoneId = packZoneId(row.macroZone, row.surface);
         this.currentParentId = 0;
         this.currentStackDirection = null;
       }
@@ -155,39 +159,37 @@ export class Card {
       }
     }
 
-    this.unsubscribe = ctx.data.subscribeKey("cards", cardId, (change) => {
-      this.onDataChange(change as ShadowedChange<CardRow>);
+    this.unsubscribe = ctx.data.cards.subscribeKey(cardId, (change) => {
+      this.onDataChange(change);
     });
 
-    if (ctx.actions) {
-      this.unsubAction = ctx.actions.subscribeCard(cardId, (action) => {
-        this.currentAction = action;
-        this.layoutCard.invalidate();
-      });
-    }
-
-    // Pending-action progress: layout reads `data.actions.pendingValues()`
-    // each frame, but only re-runs when something invalidates it. Subscribe
-    // to the parallel pending channel so a buffered action insert kicks the
-    // card back into the animation loop and the bar starts ticking.
-    this.unsubActionPending = ctx.data.actions.subscribePending((change) => {
-      const row = change.newValue ?? change.oldValue;
-      if (row && row.cardId === this.cardId) {
-        this.layoutCard.invalidate();
-      }
-    });
+    // Action subscriptions stripped while ActionManager is offline. Restore
+    // when the actions subsystem returns:
+    //   if (ctx.actions) {
+    //     this.unsubAction = ctx.actions.subscribeCard(cardId, (action) => {
+    //       this.currentAction = action;
+    //       this.layoutCard.invalidate();
+    //     });
+    //   }
+    //   this.unsubActionPending = ctx.data.actions.subscribePending((change) => {
+    //     const row = change.newValue ?? change.oldValue;
+    //     if (row && row.cardId === this.cardId) this.layoutCard.invalidate();
+    //   });
   }
 
   /**
-   * Canonical setter for a card's position. Always go through here so we
-   * (a) flow through the same setClient → onDataChange path the rest of the
-   * system uses, which keeps the layout-side re-parent + tween + back-pointer
-   * maintenance in lockstep with the data, and (b) callers don't need to
-   * know about flag bit-fiddling or which slot to touch on which neighbor.
+   * Canonical setter for a card's position. Always go through here so the
+   * layout-side re-parent + tween + back-pointer maintenance stay in
+   * lockstep with the data, and callers don't need to know about flag
+   * bit-fiddling or which slot to touch on which neighbor.
    *
    * The back-pointer cleanup (clearing our slot on the old parent if any,
    * claiming our slot on the new parent if stacked) happens in onDataChange
    * — single funnel for both our writes here and any server-driven update.
+   *
+   * Note: write-back through `CardManager.setCardPosition` is currently a
+   * no-op pending the outbound reducer wire. Until that lands, calls here
+   * compute the new row but don't propagate.
    */
   setPosition(state: CardPositionState): void {
     this.cardManager.setCardPosition(this.cardId, state);
@@ -266,21 +268,23 @@ export class Card {
   }
 
   /**
-   * Stacked card whose parent doesn't exist — orphan. Writes a corrected
-   * loose row into DataManager. `setClientCard` fires subscribers, so the
-   * post-init data path will see the fixed row through onDataChange too.
+   * Stacked card whose parent doesn't exist — orphan. Was a `setClientCard`
+   * path that wrote a corrected loose row and let the post-init data path
+   * see the fix through onDataChange. With client-side mutations gone, this
+   * is currently a no-op pending reducer routing — orphans stay visually
+   * stranded until the new outbound path is wired.
    */
   private fallbackToInventory(row: CardRow): void {
-    this.layoutCard.ctx.data.setClientCard({
-      ...row,
-      macroZone: row.ownerId,
-      layer: INVENTORY_LAYER,
-      // microZone: 0 clears localQ/localR/stackedState — fully resets the
-      // packed sub-fields since none of them are meaningful for a loose card
-      // dropped into the owner's inventory.
-      microZone: 0,
-      microLocation: 0,
-    });
+    void row;
+    // TODO: route through a reducer when the outbound API is ready. The old
+    // path was:
+    //   this.layoutCard.ctx.data.setClientCard({
+    //     ...row,
+    //     macroZone:     row.ownerId,
+    //     surface:       INVENTORY_LAYER,
+    //     microZone:     0,
+    //     microLocation: 0,
+    //   });
   }
 
   zoneId(): ZoneId {
@@ -343,10 +347,10 @@ export class Card {
   destroy(): void {
     this.unsubscribe?.();
     this.unsubscribe = null;
-    this.unsubAction?.();
-    this.unsubAction = null;
-    this.unsubActionPending?.();
-    this.unsubActionPending = null;
+    // this.unsubAction?.();        // actions stripped
+    // this.unsubAction = null;
+    // this.unsubActionPending?.();
+    // this.unsubActionPending = null;
     // Free our slot on the parent so its back-pointer doesn't dangle.
     if (this.currentParentId !== 0 && this.currentStackDirection) {
       this.clearBackPointerOn(this.currentParentId, this.currentStackDirection);
@@ -355,12 +359,11 @@ export class Card {
     this.layoutCard.destroy();
   }
 
-  private onDataChange(change: ShadowedChange<CardRow>): void {
-    if (change.kind === "delete") return;
-    const row = change.newValue;
-    if (!row) return;
+  private onDataChange(change: TableChange<CardRow>): void {
+    if (change.kind === "removed") return;
+    const row = change.kind === "added" ? change.row : change.newRow;
 
-    const newZoneId = packZoneId(row.macroZone, row.layer);
+    const newZoneId = packZoneId(row.macroZone, row.surface);
     const newParentId = Card.stackParentOf(row);
     const newStackDirection = Card.stackDirectionOf(row);
     const zoneChanged = newZoneId !== this.currentZoneId;
