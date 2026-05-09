@@ -19,4 +19,5 @@ export default {
   microZone: __t.u8(),
   microLocation: __t.u32(),
   recipeId: __t.u16(),
+  rootDist: __t.u8(),
 };

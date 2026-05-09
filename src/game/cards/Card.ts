@@ -8,11 +8,14 @@ import type { Card as CardRow } from "../../server/spacetime/bindings/types";
 import { packZoneId, type ZoneId } from "../../server/data/packing";
 import type { TableChange } from "../../server/data/ValidAtTable";
 import {
+  getStackDirection,
   getStackedState,
   getStackPosition,
+  STACK_DIRECTION_DOWN,
+  STACK_DIRECTION_UP,
   STACKED_ON_HEX,
-  STACKED_ON_RECT_X,
-  STACKED_ON_RECT_Y,
+  STACKED_ON_ROOT,
+  STACKED_SLOT,
 } from "./cardData";
 import type { LocalCard } from "../../server/data/DataManager";
 import type { CardManager } from "./CardManager";
@@ -70,14 +73,16 @@ export class Card {
 
   /** Resolve the IMMEDIATE parent's card_id for this row.
    *
-   *  - `STACKED_ON_HEX`: `microLocation` is the parent hex card_id (legacy
-   *    parent-pointer model; hex chains haven't been migrated).
-   *  - `STACKED_ON_RECT_X` / `STACKED_ON_RECT_Y`: `microLocation` is the
-   *    chain ROOT, and the immediate parent is the chain member at
-   *    `position - 1` in the same direction. If `position == 1`, the
-   *    parent is the root itself. Falls back to the root if the
-   *    expected predecessor isn't in the overlay (gap-tolerant — Phase 5
-   *    rendering handles missing positions).
+   *  - `STACKED_ON_HEX`: `microLocation` is the parent hex card_id
+   *    (legacy parent-pointer model).
+   *  - `STACKED_SLOT`: `microLocation` IS the immediate parent
+   *    (parent-pointer model — server-written for recipe slots above
+   *    the actor).
+   *  - `STACKED_ON_ROOT`: `microLocation` is the chain ROOT. The
+   *    immediate parent is the chain member at `position - 1` in the
+   *    same direction. If `position == 1`, the parent is the root
+   *    itself. Falls back to the root if the expected predecessor
+   *    isn't in the overlay (gap-tolerant).
    *  - `STACKED_LOOSE`: no parent. */
   private static stackParentOf(
     row: CardRow,
@@ -85,13 +90,22 @@ export class Card {
   ): number {
     const state = getStackedState(row.microZone);
     if (state === STACKED_ON_HEX) return row.microLocation;
-    if (state !== STACKED_ON_RECT_X && state !== STACKED_ON_RECT_Y) return 0;
+    if (state === STACKED_SLOT) return row.microLocation;
+    if (state !== STACKED_ON_ROOT) return 0;
     const rootId = row.microLocation;
     const position = getStackPosition(row.microZone);
+    const direction = getStackDirection(row.microZone);
     if (position <= 1) return rootId;
     for (const [id, r] of cardsLocal) {
       if (r.microLocation !== rootId) continue;
-      if (getStackedState(r.microZone) !== state) continue;
+      if (getStackedState(r.microZone) !== STACKED_ON_ROOT) continue;
+      if (getStackDirection(r.microZone) !== direction) continue;
+      // Skip cards whose death animation has finished (`dead === 2`).
+      // They linger in `cardsLocal` until the server reap and shouldn't
+      // claim chain-sibling status for parent lookups — otherwise a
+      // dying card at position N keeps being identified as the
+      // "position N sibling" of a renumbered survivor at position N+1.
+      if ((r as LocalCard).dead === 2) continue;
       if (getStackPosition(r.microZone) === position - 1) return id;
     }
     return rootId;
@@ -99,10 +113,9 @@ export class Card {
 
   private static stackDirectionOf(row: CardRow): StackDirection | null {
     const state = getStackedState(row.microZone);
-    if (state === STACKED_ON_RECT_X) return "top";
-    if (state === STACKED_ON_RECT_Y) return "bottom";
     if (state === STACKED_ON_HEX) return "hex";
-    return null;
+    if (state !== STACKED_ON_ROOT && state !== STACKED_SLOT) return null;
+    return getStackDirection(row.microZone) === STACK_DIRECTION_UP ? "top" : "bottom";
   }
 
   static create(
@@ -388,16 +401,13 @@ export class Card {
     const zoneChanged = newZoneId !== this.currentZoneId;
     const parentChanged = newParentId !== this.currentParentId;
     const directionChanged = newStackDirection !== this.currentStackDirection;
-    // [diag] onDataChange entry — investigating teleport-on-stack repro.
-    console.log(
-      `[diag] onData id=${this.cardId} kind=${change.kind}`
-      + ` row.state=${row.microZone & 0x3} row.mz=${row.microZone} row.ml=${row.microLocation}`
-      + ` oldParent=${this.currentParentId} newParent=${newParentId}`
-      + ` oldDir=${this.currentStackDirection ?? "-"} newDir=${newStackDirection ?? "-"}`
-      + ` zoneChanged=${zoneChanged} parentChanged=${parentChanged} directionChanged=${directionChanged}`,
-    );
 
     if (zoneChanged || parentChanged || directionChanged) {
+      debug.log(
+        ["splice"],
+        `[splice] onDataChange card=${this.cardId} state=${getStackedState(row.microZone)} microZone=0x${row.microZone.toString(16)} microLocation=${row.microLocation} zone=${this.currentZoneId}->${newZoneId} parent=${this.currentParentId}->${newParentId} dir=${this.currentStackDirection}->${newStackDirection}`,
+        2,
+      );
       // Resolve the new attach target before mutating state, so we can early-
       // out cleanly on orphan without leaving currentZoneId / currentParentId
       // in a half-updated state. Direction-only changes (same parent, top↔

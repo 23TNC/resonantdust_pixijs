@@ -58,6 +58,11 @@ These build SQL only; SDK row events fan out via `registerTableHandlers`. World/
 ### Tier-rule pitfall (load-bearing)
 Reading `data.cards.current` from game code looks fine — the row exists, the fields are populated — but for any inventory-loose card the server's `microLocation` is **always 0** (the server doesn't track inventory pixel coords; that's exactly what the `mirrorCard` preserve rule exists for). So `decodeLooseXY(currentRow.microLocation)` returns `(0, 0)` regardless of where the player actually placed the card. Symptoms when this rule is broken: surviving children of a spliced card snap to (0,0); orphan-fallback paths reposition cards to the corner; chain-walking helpers (`rootOf`, `validatedSlot`, `flipChain`) get the wrong parent during a drag because the server tier hasn't been told yet. Anything that needs to know "where the player can see this card right now" reads `cardsLocal`. The only legitimate `data.cards.*` consumers are `mirrorCard` itself, `promote(now)`, and the `subscribeCards` SQL helpers.
 
+### `promote(now)`'s `knownIds` guard (load-bearing)
+SpacetimeDB's `schedule_delete_cards` sweep deletes the OLD validAt row in a separate transaction from the new write that triggered it. The SDK can deliver these out of order at the client (`onDelete` before `onInsert`, with a frame in between). Without a guard, `promote` between the two events would fire `removed` for the id (no row in `best`), then `added` once the insert lands — `mirrorCard` would propagate that as `removed` then `added`, `CardManager` would destroy and respawn the Card, and `LayoutCard.setTarget`'s first-call snap would land the new Card at (0, 0). That was the corpus + corpus teleport bug.
+
+`ValidAtTable.promote` therefore collects `knownIds` (every id with **any** server-map row, regardless of validAt) before computing `best`. When sweeping `current` to fire `removed`, ids still in `knownIds` are skipped — the card's row hasn't really gone away, the server just shifted it to a different validAt. The `current` entry stays put; the next `promote` that sees the new row in `best` fires `updated` instead. Robust to whatever order the SDK delivers events.
+
 ### `mirrorCard` rule (cards only)
 When the server pushes an updated card row, `mirrorCard` checks:
 - Existing `cardsLocal` row exists for this id, AND
@@ -66,6 +71,24 @@ When the server pushes an updated card row, `mirrorCard` checks:
 - `unpackMicroZone(serverRow.microZone).localQ === 0`.
 
 If all true → **position fields preserved from local** (`macroZone`, `microZone`, `microLocation`, `surface`); other fields (`flags`, `packedDefinition`, `ownerId`, `validAt`, `cardId`) merge from server. Otherwise → server row replaces local in full (e.g. card transitions out of inventory, gets stacked, dies). Server is always authoritative for everything except inventory pixel placement, which is a client concern.
+
+### Stack states (4 values in `microZone` low 2 bits)
+
+| state | name        | `microLocation` semantics                     | who writes it                              |
+| ----- | ----------- | --------------------------------------------- | ------------------------------------------ |
+| 0     | `Free`      | encoded `(x, y)` loose XY                     | client (drag-drop) + server (release)      |
+| 1     | `Slot`      | **immediate parent's** card_id                | **server only** (`propose_action`)         |
+| 2     | `OnRoot`    | chain root's card_id                          | client (drag-drop) + server (rooted recipes) |
+| 3     | `OnHex`     | parent hex card_id                            | server (hex anchoring)                     |
+
+`Slot` rows (state-1) are **server-WRITTEN, client-MAINTAINED**. The server emits Slot rows from `propose_action` and clears them in `action_completion` — `is_stack_layout` returns false for them so the mirror's preserve gate doesn't fire on the position fields. But the server has **no view of the local chain** beyond what the client passed into `propose_action`, so it can't run client-side splice or recovery: when a Slot card's parent dies, or arrives orphaned at the mirror, the client must release it. Two recovery paths cover this:
+
+- **`spliceCard` → `releaseSlotDescendants`** — when the dying card has state-1 descendants, walk the slot subtree and force each back to inventory loose (`{kind: "inventory", x: 0, y: 0}` via `setCardPosition`).
+- **`mirrorCard` orphan-slot check** — when an incoming state-1 row's `microLocation` parent isn't present in `cardsLocal`, rewrite the row to inventory loose (`macroZone = ownerId`, `surface = 1`, state = `STACKED_LOOSE`) at the mirror boundary instead of writing the orphaned slot. Same recovery shape, different trigger.
+
+`OnRoot` (state-2) carries `position` and `direction` in `microZone`; `Slot` (state-1) carries only `direction` (position is implicit via parent-pointer walk).
+
+The "server is forcing this position" signal lives in `flags` bit 11 (`force_position`). It's set on every row that gets spatial fields rewritten by `propose_action` and cleared by `action_completion`'s release path.
 
 ### Dead-card extension (`LocalCard.dead`)
 `LocalCard = Card & { dead?: 1 | 2 }`. The `dead` field is a client-only marker, not part of the SDK row:

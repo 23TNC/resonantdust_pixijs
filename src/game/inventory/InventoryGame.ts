@@ -2,8 +2,8 @@ import type { Card } from "../cards/Card";
 import {
   getStackedState,
   STACKED_LOOSE,
-  STACKED_ON_RECT_X,
-  STACKED_ON_RECT_Y,
+  STACKED_ON_ROOT,
+  STACKED_SLOT,
 } from "../cards/cardData";
 import { GameHexCard, HEX_HEIGHT, HEX_WIDTH } from "../cards/layout/hexagon/HexCard";
 import {
@@ -178,8 +178,9 @@ export class GameInventory {
 
   /**
    * Returns the bounding box of the full visual chain rooted at `root`,
-   * accounting for cards stacked above (STACKED_ON_RECT_X) and below
-   * (STACKED_ON_RECT_Y). Each stacked card extends the chain by
+   * accounting for cards stacked above (`STACKED_ON_ROOT` +
+   * `STACK_DIRECTION_UP`) and below (`STACKED_ON_ROOT` +
+   * `STACK_DIRECTION_DOWN`). Each stacked card extends the chain by
    * RECT_CARD_TITLE_HEIGHT in its direction.
    *
    * `rootOffsetY` is the distance from the chain's top edge to the root
@@ -222,10 +223,18 @@ export class GameInventory {
   }
 
   /**
-   * Walks `card` up via `microLocation` while its stack-state is 1 (top) or
-   * 2 (bottom) and returns the root — the card whose state is 0 (loose).
-   * Hex cards are always loose, so they return immediately. Returns null for
-   * hex-anchored rect cards (state 3) or if the chain is broken.
+   * Walks `card` up via `microLocation` until we hit a `STACKED_LOOSE`
+   * card (the chain root). Mixed-mode walker:
+   *
+   *  - `STACKED_LOOSE`: return as the root.
+   *  - `STACKED_ON_ROOT`: one-hop — `microLocation` is the chain root.
+   *  - `STACKED_SLOT`: walk via `microLocation` (parent could be
+   *    another Slot, an OnRoot, or Free).
+   *  - `STACKED_ON_HEX`: returns null — hex-anchored rect cards aren't
+   *    inventory chain members.
+   *
+   * Returns null if the chain is broken (parent missing) or if we
+   * exceed `FIND_ROOT_MAX_DEPTH`.
    */
   private findRoot(card: Card): Card | null {
     let current: Card = card;
@@ -234,7 +243,7 @@ export class GameInventory {
       if (!row) return null;
       const state = getStackedState(row.microZone);
       if (state === STACKED_LOOSE) return current;
-      if (state !== STACKED_ON_RECT_X && state !== STACKED_ON_RECT_Y) return null;
+      if (state !== STACKED_ON_ROOT && state !== STACKED_SLOT) return null;
       const parent = this.ctx.cards?.get(row.microLocation);
       if (!parent) return null;
       current = parent;

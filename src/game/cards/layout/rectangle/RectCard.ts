@@ -5,11 +5,13 @@ import type { LocalCard } from "../../../../server/data/DataManager";
 import { ParticleManager, type ParticleHandle } from "../../../../assets/ParticleManager";
 import {
   decodeLooseXY,
+  getStackDirection,
   getStackedState,
+  STACK_DIRECTION_UP,
   STACKED_LOOSE,
   STACKED_ON_HEX,
-  STACKED_ON_RECT_X,
-  STACKED_ON_RECT_Y,
+  STACKED_ON_ROOT,
+  STACKED_SLOT,
   type LooseXY,
 } from "../../cardData";
 import { HEX_HEIGHT, HEX_RADIUS, HEX_WIDTH } from "../hexagon/HexVisual";
@@ -19,6 +21,38 @@ import { RectCardVisual } from "./RectVisual";
 import { unpackMacroZone } from "../../../../server/data/packing";
 
 const DEATH_SPEED = 0.04;
+
+/** How far to shift the title-bar color toward black/white for the
+ *  action-debounce progress fill. The fill picks brighter when the
+ *  base is dark and darker when the base is light, so the bar
+ *  always contrasts against the unfilled remainder. */
+const PROGRESS_LUMA_SHIFT = 0.35;
+
+/** Parse a `#rrggbb` hex string into a 24-bit integer. Returns
+ *  `0x7a7a8a` (the fallback title color) if the string is malformed. */
+function parseHexColor(hex: string): number {
+  if (hex.length === 7 && hex[0] === "#") {
+    const n = parseInt(hex.slice(1), 16);
+    if (!Number.isNaN(n)) return n & 0xffffff;
+  }
+  return 0x7a7a8a;
+}
+
+/** Shift a color's luminance toward black or white by
+ *  `PROGRESS_LUMA_SHIFT`. Brightens when the input is dark, darkens
+ *  when it's light — the result always sits visibly off the original. */
+function shiftLuminance(hex: string): number {
+  const rgb = parseHexColor(hex);
+  const r = (rgb >> 16) & 0xff;
+  const g = (rgb >> 8) & 0xff;
+  const b = rgb & 0xff;
+  // Rec. 709 luma (0..255).
+  const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  const target = luma < 128 ? 255 : 0;
+  const t = PROGRESS_LUMA_SHIFT;
+  const shift = (c: number) => Math.round(c + (target - c) * t);
+  return (shift(r) << 16) | (shift(g) << 8) | shift(b);
+}
 
 export const CARD_SCALE = 1;
 export const RECT_CARD_WIDTH        = 72 * CARD_SCALE;
@@ -56,6 +90,7 @@ export class LayoutRectCard extends LayoutCard {
 
   private readonly visual       = new Container();
   private readonly rectVisual   = new RectCardVisual();
+  private readonly progressBar  = new Graphics();
   private readonly stateOverlay = new Graphics();
   private currentPackedDefinition: number | null = null;
   private titlePosition: RectCardTitlePosition = "top";
@@ -83,9 +118,13 @@ export class LayoutRectCard extends LayoutCard {
     //   }
     // });
     // rectVisual owns body fill + title bar fill + outline.
-    // nameText is re-parented here so it floats above the title bar fill.
-    // stateOverlay draws hover/pending indicators above everything.
+    // progressBar paints over the title bar to show the
+    // ActionManager debounce countdown — between rectVisual (so it
+    // covers the title fill) and nameText (so the name stays
+    // readable). stateOverlay draws hover/pending indicators above
+    // everything.
     this.visual.addChild(this.rectVisual);
+    this.visual.addChild(this.progressBar);
     this.visual.addChild(this.rectVisual.nameText);
     this.visual.addChild(this.stateOverlay);
     this.container.addChild(this.deathMask);
@@ -124,17 +163,28 @@ export class LayoutRectCard extends LayoutCard {
       this.setTitlePosition("top");
       const { x, y } = decodeLooseXY(row.microLocation);
       this.setTarget(x, y);
-    } else if (stacked === STACKED_ON_RECT_X || stacked === STACKED_ON_RECT_Y) {
+    } else if (stacked === STACKED_ON_ROOT || stacked === STACKED_SLOT) {
+      // Both modes draw at the same offset from the parent — Pixi
+      // parent-child does the heavy lifting via `Card.stackParentOf`,
+      // which returns the immediate predecessor for state-1 (Slot,
+      // parent-pointer) and the chain root or position-1 sibling for
+      // state-2 (OnRoot, distance-from-root). The visual hierarchy is
+      // identical: the layout card is parented to the predecessor's
+      // top/bottom stack host, so a single offset places it correctly
+      // for either mode.
       const parentId = row.microLocation;
       if (!this.ctx.data.cardsLocal.get(parentId)) {
+        // Defensive — `mirrorCard` already rewrites orphan state-1 at
+        // the mirror boundary, but if a parent vanishes after the row
+        // landed (mid-tween destroy), fall back to inventory loose.
         this.ctx.cards?.get(this.cardId)?.setPosition({
-          kind: "loose",
+          kind: "inventory",
           x: this.targetX,
           y: this.targetY,
         });
         return;
       }
-      if (stacked === STACKED_ON_RECT_X) {
+      if (getStackDirection(row.microZone) === STACK_DIRECTION_UP) {
         this.setTitlePosition("top");
         this.setTarget(0, -RECT_CARD_TITLE_HEIGHT);
       } else {
@@ -185,10 +235,50 @@ export class LayoutRectCard extends LayoutCard {
 
     this.rectVisual.draw(def, this.titlePosition);
 
-    // Progress-bar logic stripped — when actions come back online, the
-    // action-row fetch + progressFill / pendingFill computation + draws on
-    // a `progressBar: Graphics` child go here, between the rectVisual.draw
-    // and the stateOverlay block.
+    // Progress bar: prefer the server-side recipe indicator over the
+    // client-side debounce indicator (last-write-wins; the local row's
+    // `progress` array is populated by `mirrorCard` whenever a future
+    // `progress_style`-bearing row is in `cards.server`). Today we
+    // render the first entry only — the array is forward-looking for
+    // multi-event stacking.
+    //
+    // Style codes (`progress_style` u3 from `flags`):
+    //   1 = ltr / cw default — fill from left to right
+    //   2 = rtl / ccw default — fill from right to left
+    // 3..=7 are reserved for future variants.
+    this.progressBar.clear();
+    const local = this.ctx.data.cardsLocal.get(this.cardId);
+    const serverProgress = local?.progress?.[0];
+    let fraction: number | null = null;
+    let style: number = 1;
+    if (serverProgress !== undefined) {
+      const span = serverProgress.endSecs - serverProgress.startSecs;
+      if (span > 0) {
+        const elapsed = Date.now() / 1000 - serverProgress.startSecs;
+        fraction = Math.max(0, Math.min(1, elapsed / span));
+        style = serverProgress.style;
+      }
+    } else {
+      const debounce = this.ctx.actions?.progressFor(this.cardId) ?? null;
+      if (debounce !== null) {
+        fraction = debounce;
+        style = 1;
+      }
+    }
+    if (fraction !== null) {
+      const titleColor = def?.style[1] ?? "#7a7a8a";
+      const fillColor = shiftLuminance(titleColor);
+      const titleY = this.titlePosition === "top"
+        ? 0
+        : this.height - RECT_CARD_TITLE_HEIGHT;
+      const fillW = this.width * fraction;
+      if (fillW > 0) {
+        const fillX = style === 2 ? this.width - fillW : 0;
+        this.progressBar
+          .rect(fillX, titleY, fillW, RECT_CARD_TITLE_HEIGHT)
+          .fill({ color: fillColor });
+      }
+    }
 
     this.stateOverlay.clear();
     if (this.state.selected) {
@@ -231,12 +321,20 @@ export class LayoutRectCard extends LayoutCard {
           this.deathParticleContainer = null;
         }
 
-        this.ctx.cards?.spliceCard(this.cardId);
-        // Mark the local row as "animation complete". The mirror preserves
-        // `dead: 2` even when the server row still carries FLAG_ACTION_DEAD,
-        // so we don't replay this branch on the next push.
+        // Mark the local row as "animation complete" BEFORE splice runs.
+        // Splice's chain-walking via `stackParentOf` filters out
+        // `dead === 2` cards so this dying row doesn't show up as a
+        // sibling candidate for any survivor's parent lookup. Writing
+        // dead=2 first also means the splice doesn't have to detach
+        // the dying card to a loose 0,0 position — keeping it in
+        // place avoids InventoryGame.tryPush kicking it across the
+        // board before the server reaps. The mirror preserves
+        // `dead: 2` even when the server row still carries
+        // FLAG_ACTION_DEAD, so we don't replay this branch on the
+        // next push.
         const cur = this.ctx.data.cardsLocal.get(this.cardId);
         if (cur) this.ctx.data.setLocalCard(this.cardId, { ...cur, dead: 2 });
+        this.ctx.cards?.spliceCard(this.cardId);
       }
     }
     this.visual.alpha = this.state.dragging ? 0.7 : 1;
@@ -251,7 +349,10 @@ export class LayoutRectCard extends LayoutCard {
       }
     }
     const moving = this.tweenTo(effX, effY);
-    return this.state.dragging || moving || this.dying;
+    // Re-run next frame while progress is mid-fill so the bar
+    // animates smoothly rather than only updating on data changes.
+    const showingProgress = fraction !== null && fraction < 1;
+    return this.state.dragging || moving || this.dying || showingProgress;
   }
 
   private _spawnDeathEffect(): void {

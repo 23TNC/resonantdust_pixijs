@@ -19,20 +19,9 @@ export const Card = __t.object("Card", {
   microLocation: __t.u32(),
   ownerId: __t.u32(),
   packedDefinition: __t.u16(),
-  flags: __t.u8(),
+  flags: __t.u32(),
 });
 export type Card = __Infer<typeof Card>;
-
-export const CardStack = __t.object("CardStack", {
-  root: __t.u32(),
-  surface: __t.u8(),
-  macroZone: __t.u32(),
-  microZone: __t.u8(),
-  microLocation: __t.u32(),
-  stackUp: __t.array(__t.u32()),
-  stackDown: __t.array(__t.u32()),
-});
-export type CardStack = __Infer<typeof CardStack>;
 
 export const Player = __t.object("Player", {
   validAt: __t.u64(),

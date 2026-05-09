@@ -3,18 +3,32 @@ import type { GameContext } from "../../GameContext";
 import type { Card } from "../cards/Card";
 import {
   getStackedState,
+  STACK_DIRECTION_DOWN,
+  STACK_DIRECTION_UP,
   STACKED_LOOSE,
   STACKED_ON_HEX,
 } from "../cards/cardData";
 
-/** Bound on chain walks — defensive against pointer cycles or pathological
- *  stacks. Mirrors `FIND_ROOT_MAX_DEPTH` in CardManager. */
-const CHAIN_MAX_DEPTH = 64;
+/** Defensive cap on the phase loop. Each iteration that finds a match
+ *  adds at least one card to the in-pass held set, which is bounded by
+ *  the total chain length — so a correct matcher terminates well before
+ *  this limit. The cap exists only to bound a buggy matcher returning
+ *  the same match repeatedly. */
+const MATCH_LOOP_CAP = 64;
 
 /** Default fire-after-match delay. Matches stay queued for this long
  *  before being submitted to the server, giving the player a window to
  *  break the chain (drag a card off, etc.) and abort. */
 const DEFAULT_DELAY_MS = 5000;
+
+/** Maximum allowed `rootDist + consumed.length` for a rooted match.
+ *  State-2 (`OnRoot`) rows pack `position` into a u5 (0..31); any
+ *  rooted recipe whose actor + slot window would reach past chain
+ *  index 31 must be rejected client-side, since the server's
+ *  `pack_stack_micro_zone(position & 0x1f, ...)` would silently
+ *  truncate and corrupt chain layout. Same constraint that
+ *  `DragManager` enforces at drop-time, restated for the matcher. */
+const MAX_PIN_DEPTH = 31;
 
 export type StackDirection = "up" | "down";
 
@@ -40,39 +54,44 @@ export interface ActionManagerOptions {
   delayMs?: number;
 }
 
-/** A recipe match the client has detected on a chain segment. The queue
- *  is keyed on `(subRootId, direction)`. A "sub-root" is the first
- *  non-held card of a segment — either the loose root itself, or the
- *  first card after a `slot_hold` block in the larger chain. The
- *  matcher's actor-sliding handles intra-segment shifting so we only
- *  enqueue one entry per segment per direction.
+/** A recipe match the client has detected on a chain segment.
  *
- *  Sub-roots that aren't the loose root carry `hexParentId = 0` /
- *  `hasHex = false` since they aren't anchored to a hex. */
+ *  Queue keys are `${looseRootId}:${direction}:${recipeIndex}:${actorId}`.
+ *  Multiple entries per (root, direction) are normal — every recipe
+ *  that fits somewhere in a chain fires independently. The per-entry
+ *  identity is "this recipe at this actor card"; a chain mutation that
+ *  preserves both keeps the entry, otherwise it's replaced.
+ */
 export interface QueuedAction {
-  /** First card of the matched segment (`chain[0]`). */
-  subRootId: number;
-  /** Loose root of the larger chain this segment belongs to. Used by
-   *  `evaluateRoot` to scope cluster-pruning to its own loose root. */
+  /** Loose root of the chain this match lives in. Always passed as the
+   *  recipe's root tier when `hasRoot` is true. */
   looseRootId: number;
-  /** Which side of `subRootId` the segment extends. */
+  /** Direction of the chain (`up` = top stack, `down` = bottom stack). */
   direction: StackDirection;
   /** Stable packed recipe id (`u16`). */
   recipeIndex: number;
-  /** Card ids in segment order: `[subRoot, slot0, slot1, …]`. The slot
-   *  window the recipe matched is `[slotStart, slotStart + slotCount)`. */
+  /** Actor card id — the first card of the matched slot window. The
+   *  recipe's `slots[0]` binds here. UI ties the per-card debounce
+   *  progress bar to this card. */
+  actorId: number;
+  /** Card ids of the matched slot window in chain order, from actor
+   *  outward. Passed directly as `slots` to `propose_action`. For
+   *  rootless matches whose window started at the root tier slot, R
+   *  appears at `chain[0]` here. */
   chain: readonly number[];
-  /** `card_id` of the hex card the loose root is stacked on, or `0` if
-   *  the segment isn't anchored on a hex (which is the case for any
-   *  sub-root past a held block, plus loose roots not on a hex). */
+  /** Actor's chain distance from `looseRootId`. `0` if the actor is
+   *  the loose root itself (rootless match consuming R); otherwise
+   *  the actor's index in the full direction chain plus 1. Server
+   *  reads this as the actor's `position` on `OnRoot` rows when
+   *  `hasRoot` is true; ignored when `hasRoot` is false. */
+  rootDist: number;
+  /** `card_id` of the hex card the loose root is stacked on, or `0`
+   *  if R isn't on a hex. Forwarded to `propose_action.hex` only when
+   *  `hasHex` is true. */
   hexParentId: number;
-  /** Start index of the matched slot window within `chain`. */
-  slotStart: number;
-  /** Number of cards in the matched slot window. */
-  slotCount: number;
-  /** Whether the recipe pins a `root` definition. */
+  /** Whether the matched recipe constrains a `root` tier. */
   hasRoot: boolean;
-  /** Whether the recipe pins a `hex` definition. */
+  /** Whether the matched recipe constrains a `hex` tier. */
   hasHex: boolean;
   /** True between `proposeAction` dispatch and its round-trip
    *  resolution. While submitted, `evaluateRoot` and the
@@ -80,27 +99,37 @@ export interface QueuedAction {
    *  committed to the action and the client may not cancel or
    *  upgrade it. The `.then` / `.catch` handlers clean up. */
   submitted: boolean;
+  /** `performance.now()` value at the moment the fire-after-match
+   *  timer was last (re)started. UI uses this with `delayMs` to draw
+   *  the per-card debounce-progress indicator. `0` while the entry
+   *  hasn't been scheduled (i.e. just constructed). */
+  scheduledAt: number;
 }
 
 /**
  * Scene-scoped recipe pre-filter and submission queue.
  *
  * Listens to stack-change events from `CardManager`. For each affected
- * loose root, walks the chain in both stack directions, partitions on
- * `slot_hold` cards (which are part of an in-flight or accepted recipe
- * and must not participate in further matching), and asks the wasm
- * `matchStackRecipe` whether each non-held segment matches a recipe.
+ * loose root R, runs a multi-phase, restart-on-match evaluation that
+ * yields every recipe match against R's chains — in both directions,
+ * across sub-chains split by `slot_hold` blocks, with per-evaluation
+ * in-pass holds that prevent the same card being consumed by two
+ * matches in one pass.
  *
- * - **New / updated match**: a queue entry is added or replaced under
- *   `(subRootId, direction)` and a fire timer is (re)started.
- * - **No match**: any prior entry under that key is cleared and its
- *   timer cancelled — a stack that *was* matching but no longer does
- *   drops off the queue, so we never submit a stale recipe.
- * - **Submitted entries are locked**: once `proposeAction` has been
- *   dispatched, the queue entry is marked `submitted` and is no
- *   longer touched by `evaluateRoot` or cluster-pruning. The promise's
- *   `then` / `catch` handlers remove the entry on round-trip
- *   resolution.
+ * R is the recipe's root tier for every match attempt; there is no
+ * "sub-root" concept. Recipes that don't constrain root match via the
+ * Phase 2 rootless retry, where R is prepended into the slot list.
+ *
+ * Chain construction goes through `CardManager.buildChain(R, dir)`
+ * which threads state-1 (Slot) cards into the visual chain order
+ * alongside state-2 (OnRoot) cards. Sub-chains are runs of contiguous
+ * unheld cards within those chains, partitioned by
+ * `CardManager.splitChainByHeld`.
+ *
+ * Phase ordering (top before bottom at each tier; restart on every match):
+ *   1. Rooted firsts.   `match(hex, R.def, firstSubChain.defs, dir)`
+ *   2. Rootless firsts. `match(hex, 0, [R, ...firstSubChain].defs, dir)` — only if R is unheld.
+ *   3. Rooted subsequents (interleaved by sub-chain index across directions).
  *
  * After `delayMs` elapses without the entry being mutated, the action
  * is submitted via `ctx.reducers.proposeAction`. Hex / root args are
@@ -161,32 +190,28 @@ export class ActionManager {
     return this.queue.values();
   }
 
-  /** Number of queued actions across all sub-roots and directions. */
+  /** Number of queued actions across all roots, directions, and recipes. */
   pendingCount(): number {
     return this.queue.size;
   }
 
-  /** Re-evaluate the chain anchored at `looseRootId`.
-   *
-   *  Algorithm:
-   *  - The loose root is *the* root. It evaluates in BOTH directions —
-   *    its top stack (cards above, walked bounded by held) is matched
-   *    against `Stack(Up)` recipes; its bottom stack is matched against
-   *    `Stack(Down)` recipes. Each direction is one matcher call: rooted
-   *    *and* root-as-slot recipes are evaluated together inside the
-   *    matcher via actor-sliding (see `recipe_core::match_stack_recipe`).
-   *    Up recipes are NEVER matched against the bottom stack and vice
-   *    versa.
-   *  - Sub-roots past held blocks: the first non-held card on the far
-   *    side of a held block is a sub-root, but only in the direction
-   *    extending *away* from the block. A card whose neighbour
-   *    immediately below is held is an "up" sub-root only; one whose
-   *    neighbour immediately above is held is a "down" sub-root only.
-   *    This keeps the same physical segment from being evaluated as
-   *    both an up-chain AND a mirror down-chain (which is what was
-   *    producing duplicate corpus_up + corpus_down hits previously).
-   *  - The loose root, if held, contributes no matches; its cluster's
-   *    sub-roots past held blocks are still evaluated. */
+  /** Per-card debounce progress in `[0, 1]`, or `null` if `cardId` isn't
+   *  the actor of any pending (non-submitted) queued action. The actor
+   *  is `chain[0]` of the matched slot window; only it shows the
+   *  progress bar so the visual indicator is unambiguous about which
+   *  card "owns" the action. */
+  progressFor(cardId: number): number | null {
+    for (const entry of this.queue.values()) {
+      if (entry.submitted) continue;
+      if (entry.actorId !== cardId) continue;
+      const elapsed = performance.now() - entry.scheduledAt;
+      return Math.max(0, Math.min(1, elapsed / this.delayMs));
+    }
+    return null;
+  }
+
+  /** Re-evaluate every recipe match anchored at the loose root R. See
+   *  the class docstring for the phase ordering. */
   private evaluateRoot(looseRootId: number): void {
     const cards = this.ctx.cards;
     if (!cards) return;
@@ -202,36 +227,109 @@ export class ActionManager {
       return;
     }
 
+    const hexParentId =
+      getStackedState(rootRow.microZone) === STACKED_ON_HEX
+        ? rootRow.microLocation
+        : 0;
+    const hexDef =
+      hexParentId !== 0
+        ? this.ctx.data.cardsLocal.get(hexParentId)?.packedDefinition ?? 0
+        : 0;
+    const rootDef = rootRow.packedDefinition;
+
+    // Chains built once per evaluation. The held set grows as in-pass
+    // matches consume cards; sub-chain splitting is re-derived on each
+    // iteration of the phase loop.
+    const topChain = cards.buildChain(looseRootId, STACK_DIRECTION_UP);
+    const botChain = cards.buildChain(looseRootId, STACK_DIRECTION_DOWN);
+
+    const inPassHeld = new Set<number>();
+    const isHeld = (c: Card): boolean => {
+      if (inPassHeld.has(c.cardId)) return true;
+      return this.serverHeld(c.cardId);
+    };
+
     const wanted = new Map<string, QueuedAction>();
 
-    // Loose root — both directions (only this card walks both ways).
-    if (!this.isHeld(looseRootId)) {
-      const hexParentId =
-        getStackedState(rootRow.microZone) === STACKED_ON_HEX
-          ? rootRow.microLocation
-          : 0;
-      const hexDef =
-        hexParentId !== 0
-          ? this.ctx.data.cardsLocal.get(hexParentId)?.packedDefinition ?? 0
-          : 0;
-      this.matchAtRoot({
-        rootCard: looseRoot,
-        rootDef: rootRow.packedDefinition,
-        hexDef,
-        hexParentId,
-        directions: ["up", "down"] as const,
-        looseRootId,
-        wanted,
-      });
-    }
+    phaseLoop: for (let safety = 0; safety < MATCH_LOOP_CAP; safety++) {
+      const top = cards.splitChainByHeld(topChain, isHeld);
+      const bot = cards.splitChainByHeld(botChain, isHeld);
 
-    // Held-block sub-roots — only the direction extending away from
-    // the held block. Walk up from the loose root looking for held →
-    // non-held transitions: each transition's non-held card is an
-    // up-only sub-root. Symmetrically walking down yields down-only
-    // sub-roots.
-    this.findHeldBlockSubRoots(looseRoot, looseRootId, "up", wanted);
-    this.findHeldBlockSubRoots(looseRoot, looseRootId, "down", wanted);
+      // Phase 1 — rooted firsts (top before bottom).
+      if (top.firstSubChain && top.firstSubChain.length > 0) {
+        if (this.tryMatch({
+          subChainCards: top.firstSubChain,
+          fullChain: topChain,
+          rootCard: looseRoot, rootDef, hexDef, hexParentId,
+          looseRootId, direction: "up", rootless: false,
+          inPassHeld, wanted,
+        })) continue phaseLoop;
+      }
+      if (bot.firstSubChain && bot.firstSubChain.length > 0) {
+        if (this.tryMatch({
+          subChainCards: bot.firstSubChain,
+          fullChain: botChain,
+          rootCard: looseRoot, rootDef, hexDef, hexParentId,
+          looseRootId, direction: "down", rootless: false,
+          inPassHeld, wanted,
+        })) continue phaseLoop;
+      }
+
+      // Phase 2 — rootless firsts. Skipped when R is held (a prior
+      // match already consumed R as a slot, so it can't appear again).
+      if (!isHeld(looseRoot)) {
+        if (top.firstSubChain && top.firstSubChain.length > 0) {
+          if (this.tryMatch({
+            subChainCards: top.firstSubChain,
+            fullChain: topChain,
+            rootCard: looseRoot, rootDef, hexDef, hexParentId,
+            looseRootId, direction: "up", rootless: true,
+            inPassHeld, wanted,
+          })) continue phaseLoop;
+        }
+        if (bot.firstSubChain && bot.firstSubChain.length > 0) {
+          if (this.tryMatch({
+            subChainCards: bot.firstSubChain,
+            fullChain: botChain,
+            rootCard: looseRoot, rootDef, hexDef, hexParentId,
+            looseRootId, direction: "down", rootless: true,
+            inPassHeld, wanted,
+          })) continue phaseLoop;
+        }
+      }
+
+      // Phase 3+ — rooted subsequents, interleaved by sub-chain index
+      // across directions.
+      const maxSubsequent = Math.max(
+        top.subsequentSubChains.length,
+        bot.subsequentSubChains.length,
+      );
+      for (let i = 0; i < maxSubsequent; i++) {
+        const topSub = top.subsequentSubChains[i];
+        if (topSub && topSub.length > 0) {
+          if (this.tryMatch({
+            subChainCards: topSub,
+            fullChain: topChain,
+            rootCard: looseRoot, rootDef, hexDef, hexParentId,
+            looseRootId, direction: "up", rootless: false,
+            inPassHeld, wanted,
+          })) continue phaseLoop;
+        }
+        const botSub = bot.subsequentSubChains[i];
+        if (botSub && botSub.length > 0) {
+          if (this.tryMatch({
+            subChainCards: botSub,
+            fullChain: botChain,
+            rootCard: looseRoot, rootDef, hexDef, hexParentId,
+            looseRootId, direction: "down", rootless: false,
+            inPassHeld, wanted,
+          })) continue phaseLoop;
+        }
+      }
+
+      // No phase produced a match this iteration — fixed point reached.
+      break;
+    }
 
     // Reconcile: drop cluster entries that are no longer wanted (and
     // not submitted), then add / update wanted entries.
@@ -260,127 +358,132 @@ export class ActionManager {
         this.scheduleTimer(key);
         debug.log(
           ["actions"],
-          `[ActionManager] queue ${existing ? "update" : "add"}: subRoot=${action.subRootId} dir=${action.direction} recipe=${action.recipeIndex} chain=[${action.chain.join(",")}] window=[${action.slotStart},${action.slotStart + action.slotCount})${action.hexParentId ? ` hex=${action.hexParentId}` : ""}`,
+          `[ActionManager] queue ${existing ? "update" : "add"}: root=${action.looseRootId} dir=${action.direction} recipe=${action.recipeIndex} actor=${action.actorId} chain=[${action.chain.join(",")}] rootDist=${action.rootDist}${action.hexParentId ? ` hex=${action.hexParentId}` : ""}`,
           2,
         );
       }
     }
   }
 
-  /** For each `direction`, walk a stack from `rootCard` bounded by held
-   *  cards, run the matcher on the resulting slot list, and populate
-   *  `wanted` with any match. The chain handed to the matcher is
-   *  `[rootCard, ...slots]` — actor sliding inside the matcher decides
-   *  whether the recipe's `root` binds to `rootCard` (rooted recipe) or
-   *  whether `rootCard` itself fills `slots[0]` (rootless recipe). */
-  private matchAtRoot(args: {
+  /** Run one matcher call against `subChainCards` (with R prepended if
+   *  `rootless`), then map the result back to consumed cards, the
+   *  actor, and the actor's chain distance from R. On a hit, mutate
+   *  `inPassHeld` (adds consumed cards) and `wanted` (records the
+   *  match) and return `true`. On no match, return `false`. */
+  private tryMatch(args: {
+    subChainCards: Card[];
+    fullChain: Card[];
     rootCard: Card;
     rootDef: number;
     hexDef: number;
     hexParentId: number;
-    directions: readonly StackDirection[];
     looseRootId: number;
+    direction: StackDirection;
+    rootless: boolean;
+    inPassHeld: Set<number>;
     wanted: Map<string, QueuedAction>;
-  }): void {
-    const { rootCard, rootDef, hexDef, hexParentId, directions, looseRootId, wanted } = args;
-    for (const direction of directions) {
-      const stack = this.walkBoundedByHeld(rootCard, direction);
-      if (stack.length === 0) continue;
-      const slotDefs = stack.map((c) => {
-        return this.ctx.data.cardsLocal.get(c.cardId)?.packedDefinition ?? 0;
-      });
-      const match = this.ctx.definitions.matchStackRecipe(
-        hexDef,
-        rootDef,
-        slotDefs,
-        direction,
-      );
-      if (match === null) continue;
-      wanted.set(this.queueKey(rootCard.cardId, direction), {
-        subRootId: rootCard.cardId,
-        looseRootId,
-        direction,
-        recipeIndex: match.recipeIndex,
-        chain: [rootCard.cardId, ...stack.map((c) => c.cardId)],
-        hexParentId,
-        slotStart: match.slotStart,
-        slotCount: match.slotCount,
-        hasRoot: match.hasRoot,
-        hasHex: match.hasHex,
-        submitted: false,
-      });
-    }
-  }
+  }): boolean {
+    const {
+      subChainCards, fullChain, rootCard, rootDef, hexDef, hexParentId,
+      looseRootId, direction, rootless, inPassHeld, wanted,
+    } = args;
 
-  /** Walk from `from` in `walkDir` looking for held → non-held
-   *  transitions. Each non-held card immediately past a held block is
-   *  a sub-root, evaluated *only* in `walkDir` (so an up-walk only
-   *  produces up sub-roots, and they only match up recipes against
-   *  their top stack). Sub-roots are not on hexes, so `hexDef` and
-   *  `hexParentId` are zero. */
-  private findHeldBlockSubRoots(
-    from: Card,
-    looseRootId: number,
-    walkDir: StackDirection,
-    wanted: Map<string, QueuedAction>,
-  ): void {
-    const cards = this.ctx.cards;
-    if (!cards) return;
-    let current = from;
-    let lastWasHeld = this.isHeld(from.cardId);
-    for (let i = 0; i < CHAIN_MAX_DEPTH; i++) {
-      const nextId = walkDir === "up" ? current.stackedTop : current.stackedBottom;
-      if (nextId === 0) return;
-      const next = cards.get(nextId);
-      if (!next) return;
-      const nextHeld = this.isHeld(next.cardId);
-      if (!nextHeld && lastWasHeld) {
-        const subRow = this.ctx.data.cardsLocal.get(next.cardId);
-        if (subRow) {
-          this.matchAtRoot({
-            rootCard: next,
-            rootDef: subRow.packedDefinition,
-            hexDef: 0,
-            hexParentId: 0,
-            directions: [walkDir],
-            looseRootId,
-            wanted,
-          });
+    const slotCards = rootless ? [rootCard, ...subChainCards] : subChainCards;
+    if (slotCards.length === 0) return false;
+
+    const slotDefs = slotCards.map((c) =>
+      this.ctx.data.cardsLocal.get(c.cardId)?.packedDefinition ?? 0,
+    );
+
+    const matchRoot = rootless ? 0 : rootDef;
+    const match = this.ctx.definitions.matchStackRecipe(
+      hexDef,
+      matchRoot,
+      slotDefs,
+      direction,
+    );
+    if (match === null) return false;
+
+    // Map the matcher's slot window back to consumed cards.
+    //
+    // Internal chain seen by matcher = [root_card_or_None, ...slot_cards]:
+    //   index 0 = root tier (R for rooted attempts; None for rootless).
+    //   index i ≥ 1 = slot_cards[i - 1].
+    //
+    // For rooted attempts the matcher CAN match a rootless recipe
+    // (recipe.root is None) starting at index 0, in which case R is
+    // consumed at the head of the window. For rootless attempts
+    // chain[0] is None, so any window touching index 0 fails the
+    // Some-check; slotStart ≥ 1 always there.
+    const winStart = match.slotStart;
+    const winEnd = winStart + match.slotCount;
+    const consumed: Card[] = [];
+    for (let i = winStart; i < winEnd; i++) {
+      if (i === 0) {
+        if (rootless) {
+          // Defensive: rootless attempt shouldn't reach index 0.
+          return false;
         }
+        consumed.push(rootCard);
+      } else {
+        const idx = i - 1;
+        if (idx < 0 || idx >= slotCards.length) return false;
+        consumed.push(slotCards[idx]);
       }
-      lastWasHeld = nextHeld;
-      current = next;
     }
-  }
+    if (consumed.length === 0) return false;
 
-  /** Walk in `direction` from `start` along `stackedTop` / `stackedBottom`
-   *  pointers, stopping at the first held card (which is excluded from
-   *  the result) or end-of-chain. Returns the slots above (up) or below
-   *  (down) `start`, NOT including `start` itself. Bounded by
-   *  `CHAIN_MAX_DEPTH` against pointer cycles. */
-  private walkBoundedByHeld(start: Card, direction: StackDirection): Card[] {
-    const cards = this.ctx.cards;
-    if (!cards) return [];
-    const chain: Card[] = [];
-    let current = start;
-    for (let i = 0; i < CHAIN_MAX_DEPTH; i++) {
-      const nextId = direction === "up" ? current.stackedTop : current.stackedBottom;
-      if (nextId === 0) break;
-      const next = cards.get(nextId);
-      if (!next) break;
-      if (this.isHeld(next.cardId)) break;
-      chain.push(next);
-      current = next;
+    const actor = consumed[0];
+    let rootDist: number;
+    if (actor.cardId === looseRootId) {
+      rootDist = 0;
+    } else {
+      const idx = fullChain.indexOf(actor);
+      if (idx < 0) return false; // shouldn't happen — actor must be in the chain
+      rootDist = idx + 1;
     }
-    return chain;
+
+    // Rooted recipes pin the actor at chain distance `rootDist` from R
+    // as a state-2 row, with the recipe's slots above stacking from
+    // there. The state-2 `position` field is u5 — `pack_stack_micro_zone`
+    // will silently truncate `position & 0x1f` if `rootDist` is too
+    // deep, corrupting chain layout. Reject the match when the
+    // chain-tail position the slots would occupy exceeds 31. (We
+    // include all consumed slots in the bound, not just the actor's
+    // index, so the rejection is monotone with chain depth even
+    // though only `slot[0]` carries the position field today —
+    // future server changes that pack additional slots into state-2
+    // would inherit the same constraint.)
+    if (match.hasRoot && rootDist + consumed.length > MAX_PIN_DEPTH) {
+      return false;
+    }
+
+    for (const c of consumed) {
+      inPassHeld.add(c.cardId);
+    }
+
+    const key = this.queueKey(looseRootId, direction, match.recipeIndex, actor.cardId);
+    wanted.set(key, {
+      looseRootId,
+      direction,
+      recipeIndex: match.recipeIndex,
+      actorId: actor.cardId,
+      chain: consumed.map((c) => c.cardId),
+      rootDist,
+      hexParentId,
+      hasRoot: match.hasRoot,
+      hasHex: match.hasHex,
+      submitted: false,
+      scheduledAt: 0,
+    });
+    return true;
   }
 
   /** Whether `cardId`'s row carries the `slot_hold` flag — i.e. it's a
    *  slot in an in-flight or accepted recipe and must not participate
    *  in further matching. False if the row is missing or the flag bit
-   *  is undefined in the registry (in which case nothing is ever held,
-   *  matching the current pre-flag-system behavior). */
-  private isHeld(cardId: number): boolean {
+   *  is undefined in the registry. */
+  private serverHeld(cardId: number): boolean {
     if (this.slotHoldMask === 0) return false;
     const row = this.ctx.data.cardsLocal.get(cardId);
     if (!row) return false;
@@ -404,15 +507,15 @@ export class ActionManager {
     }
   }
 
-  /** Drop every queue entry that names `cardId` as either its sub-root
-   *  or its cluster's loose root — used when the card itself is removed
-   *  from `cardsLocal`. Submitted entries are dropped too: with the card
-   *  gone there's nothing to clean up against, and the server side has
-   *  already resolved one way or another. */
+  /** Drop every queue entry that names `cardId` as its loose root or
+   *  carries it in its chain — used when the card itself is removed
+   *  from `cardsLocal`. Submitted entries are dropped too: with the
+   *  card gone there's nothing to clean up against, and the server
+   *  side has already resolved one way or another. */
   private dropForCard(cardId: number): void {
     const toDelete: string[] = [];
     for (const [key, entry] of this.queue) {
-      if (entry.subRootId === cardId || entry.looseRootId === cardId) {
+      if (entry.looseRootId === cardId || entry.chain.includes(cardId)) {
         toDelete.push(key);
       }
     }
@@ -429,9 +532,19 @@ export class ActionManager {
 
   /** (Re)start the fire timer for `key`. Always cancels the existing
    *  timer first — a queue update should restart the countdown rather
-   *  than fire on the original schedule. */
+   *  than fire on the original schedule. Also stamps `scheduledAt` on
+   *  the entry so UI (`progressFor`) can show debounce-progress, and
+   *  invalidates the actor's layout so the progress bar starts being
+   *  drawn — the actor's row may not have changed (e.g. when the
+   *  player drops a child onto the actor; only the child's row is
+   *  written), so without this kick its `layout()` would never fire. */
   private scheduleTimer(key: string): void {
     this.cancelTimer(key);
+    const entry = this.queue.get(key);
+    if (entry) {
+      entry.scheduledAt = performance.now();
+      this.invalidateActor(entry);
+    }
     const handle = setTimeout(() => {
       this.timers.delete(key);
       this.fireAction(key);
@@ -445,6 +558,18 @@ export class ActionManager {
       clearTimeout(handle);
       this.timers.delete(key);
     }
+    // Kick the actor's layout so any in-flight progress bar is
+    // erased on the next frame.
+    const entry = this.queue.get(key);
+    if (entry) this.invalidateActor(entry);
+  }
+
+  /** Mark the actor of `entry` as needing a fresh layout pass.
+   *  `progressFor` reads the queue each frame, but `LayoutCard.layout`
+   *  only runs while the node is invalidated — so we kick it whenever
+   *  the queue's progress visibility for this entry changes. */
+  private invalidateActor(entry: QueuedAction): void {
+    this.ctx.cards?.get(entry.actorId)?.layoutCard.invalidate();
   }
 
   /** Submit the queued action for `key` via `ctx.reducers.proposeAction`.
@@ -458,30 +583,30 @@ export class ActionManager {
     const action = this.queue.get(key);
     if (!action || action.submitted) return;
 
-    const subRootRow = this.ctx.data.cardsLocal.get(action.subRootId);
-    if (!subRootRow) {
+    const rootRow = this.ctx.data.cardsLocal.get(action.looseRootId);
+    if (!rootRow) {
       debug.log(
         ["actions"],
-        `[ActionManager] fire abort: subRoot=${action.subRootId} dir=${action.direction} (sub-root row gone)`,
+        `[ActionManager] fire abort: root=${action.looseRootId} dir=${action.direction} (root row gone)`,
         2,
       );
       this.queue.delete(key);
       return;
     }
 
-    const slots = action.chain.slice(
-      action.slotStart,
-      action.slotStart + action.slotCount,
-    );
+    const slots = action.chain.slice();
     const hex = action.hasHex ? action.hexParentId : 0;
-    const root = action.hasRoot ? action.subRootId : 0;
+    const root = action.hasRoot ? action.looseRootId : 0;
 
     const submittedEntry: QueuedAction = { ...action, submitted: true };
     this.queue.set(key, submittedEntry);
+    // Kick the actor's layout so its progress bar disappears on the
+    // next frame — `progressFor` skips submitted entries.
+    this.invalidateActor(submittedEntry);
 
     debug.log(
       ["actions"],
-      `[ActionManager] attempting action: recipe=${action.recipeIndex} root=${root} hex=${hex} slots=[${slots.join(",")}] dir=${action.direction}`,
+      `[ActionManager] attempting action: recipe=${action.recipeIndex} root=${root} hex=${hex} slots=[${slots.join(",")}] rootDist=${action.rootDist} dir=${action.direction}`,
       2,
     );
 
@@ -498,11 +623,12 @@ export class ActionManager {
         hex,
         root,
         slots,
-        surface: subRootRow.surface,
-        macroZone: subRootRow.macroZone,
-        microZone: subRootRow.microZone,
-        microLocation: subRootRow.microLocation,
+        surface: rootRow.surface,
+        macroZone: rootRow.macroZone,
+        microZone: rootRow.microZone,
+        microLocation: rootRow.microLocation,
         recipeId: action.recipeIndex,
+        rootDist: action.rootDist,
       })
       .then(() => {
         debug.log(
@@ -522,16 +648,21 @@ export class ActionManager {
       });
   }
 
-  private queueKey(subRootId: number, direction: StackDirection): string {
-    return `${subRootId}:${direction}`;
+  private queueKey(
+    looseRootId: number,
+    direction: StackDirection,
+    recipeIndex: number,
+    actorId: number,
+  ): string {
+    return `${looseRootId}:${direction}:${recipeIndex}:${actorId}`;
   }
 }
 
 function queueActionDiffers(a: QueuedAction, b: QueuedAction): boolean {
   return (
     a.recipeIndex !== b.recipeIndex ||
-    a.slotStart !== b.slotStart ||
-    a.slotCount !== b.slotCount ||
+    a.actorId !== b.actorId ||
+    a.rootDist !== b.rootDist ||
     a.hasRoot !== b.hasRoot ||
     a.hasHex !== b.hasHex ||
     a.hexParentId !== b.hexParentId ||

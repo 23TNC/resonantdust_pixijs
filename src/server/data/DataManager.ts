@@ -7,19 +7,55 @@ import {
   unpackMicroZone,
   unpackStackMicroZone,
 } from "./packing";
+import { idOf, validAtOf } from "./packing";
 import { ValidAtTable, type TableChange, type TableListener } from "./ValidAtTable";
 
 const INVENTORY_LAYER = 1;
 const FLAG_ACTION_DEAD = 1 << 7;
+// `progress_style` is the u3 field at bits 8..=10 of `Card.flags`. See
+// `content/cards/flags.json`. Set on the actor's completion row by
+// `action_completion`; the client reads it to render a progress bar
+// during the in-flight window.
+const FLAG_PROGRESS_STYLE_SHIFT = 8;
+const FLAG_PROGRESS_STYLE_MASK = 0b111;
+// `force_position` (bit 11): server is asserting this row's
+// microZone / microLocation verbatim. Used to live as a `force_flag`
+// bit inside `microZone` itself; moved to `flags` to free the bit for
+// chain `direction`. See `content/cards/flags.json`.
+const FLAG_FORCE_POSITION = 1 << 11;
 
-/** Local-overlay row: server `Card` plus a client-only `dead` marker.
- *  - `1` — mirror saw `flags & FLAG_ACTION_DEAD`. Triggers the death
- *    animation on the layout side.
- *  - `2` — layout has finished the death animation and wrote back. The
- *    mirror preserves `2` even on subsequent pushes that still carry the
- *    flag, so we don't replay the animation.
- *  - absent — alive, or never been dead. */
-export type LocalCard = Card & { dead?: 1 | 2 };
+/** A single progress indicator on a card. Today the `progress` array on
+ *  `LocalCard` is populated with at most one entry (the future
+ *  completion row with the highest `valid_at`, last-write-wins). The
+ *  list shape is forward-looking — when a card has multiple in-flight
+ *  events, `mirrorCard` will fill out one entry per future completion
+ *  row and the renderer will stack them. */
+export interface ProgressInfo {
+  /** u3 `progress_style` field from the completion row's `flags`.
+   *  Values: 0 = no bar (filtered out before insertion into the list),
+   *  1 = ltr / cw, 2 = rtl / ccw, 3..=7 reserved. */
+  style: number;
+  /** unix-seconds when this progress started — the `valid_at` of the
+   *  card's currently-in-effect row (the held / in-flight one). */
+  startSecs: number;
+  /** unix-seconds when this progress ends — the `valid_at` of the
+   *  completion row that carries `progress_style`. */
+  endSecs: number;
+}
+
+/** Local-overlay row: server `Card` plus client-only annotations.
+ *  - `dead = 1` — mirror saw `flags & FLAG_ACTION_DEAD`. Triggers the
+ *    death animation on the layout side.
+ *  - `dead = 2` — layout has finished the death animation and wrote
+ *    back. The mirror preserves `2` even on subsequent pushes that
+ *    still carry the flag, so we don't replay the animation.
+ *  - `progress` — array of in-flight progress indicators sourced from
+ *    future-validAt rows in `data.cards.server` whose `progress_style`
+ *    bits are non-zero. Populated by `mirrorCard` on every update;
+ *    cleared when no eligible future row exists. Today the list is
+ *    populated with at most one entry; long-term it'll hold one per
+ *    queued event. */
+export type LocalCard = Card & { dead?: 1 | 2; progress?: ProgressInfo[] };
 
 /** Local data layer with two tiers:
  *
@@ -194,23 +230,25 @@ export class DataManager {
    *    client-managed; preserve local's `macroZone` / `microZone` /
    *    `microLocation` / `surface`.
    *
-   *  - **Stack preserve** (stack layout): `state ∈ {STACKED_ON_RECT_X,
-   *    STACKED_ON_RECT_Y}` AND `unpackStackMicroZone(serverRow.microZone)
-   *    .forceFlag === false`. Same preservation — the server isn't
-   *    forcing a position so client wins.
+   *  - **Stack preserve** (stack layout): `state === STACKED_ON_ROOT`
+   *    AND `(serverRow.flags & FLAG_FORCE_POSITION) === 0`. Same
+   *    preservation — the server isn't forcing a position so client
+   *    wins. The `force_position` bit lives in `flags` (bit 11) and is
+   *    set/cleared by the server explicitly; it used to live inside
+   *    `microZone` as a bit-2 `force_flag`, freed when `microZone`
+   *    bit 2 was repurposed as the chain `direction`.
    *
-   *  When the **stack layout** applies AND `forceFlag === true`, the
-   *  server is asserting a specific chain position. We take server's
-   *  position as-is AND renumber any *other* client-only cards in the
-   *  same `(root_id, direction)` group whose position ≥ the forced one
-   *  by +1 — they "stack after" the server's confirmed position. */
+   *  When the **stack layout** applies AND the `force_position` flag is
+   *  set, the server is asserting a specific chain position. We take
+   *  server's position as-is AND renumber any *other* client-only
+   *  cards in the same `(root_id, direction)` group whose position ≥
+   *  the forced one by +1 — they "stack after" the server's confirmed
+   *  position. */
   private mirrorCard(change: TableChange<Card>): void {
     const prev = this.cardsLocal.get(change.key);
 
     if (change.kind === "removed") {
       if (prev === undefined) return;
-      // [diag] mirror remove
-      console.log(`[diag] mirror remove id=${change.key} prev.mz=${prev.microZone} prev.ml=${prev.microLocation} prev.flags=${prev.flags}`);
       this.cardsLocal.delete(change.key);
       this.fireCardLocal({ kind: "removed", key: change.key, oldRow: prev });
       return;
@@ -218,12 +256,19 @@ export class DataManager {
 
     const serverRow = change.kind === "added" ? change.row : change.newRow;
     const serverState = serverRow.microZone & 0x3;
-    // [diag] mirror added/updated — full pre/post snapshot for the bit-layout audit.
-    console.log(
-      `[diag] mirror ${change.kind} id=${change.key}`
-      + ` prev.state=${prev ? (prev.microZone & 0x3) : "-"} prev.mz=${prev?.microZone ?? "-"} prev.ml=${prev?.microLocation ?? "-"} prev.flags=${prev?.flags ?? "-"} prev.surface=${prev?.surface ?? "-"}`
-      + ` srv.state=${serverState} srv.mz=${serverRow.microZone} srv.ml=${serverRow.microLocation} srv.flags=${serverRow.flags} srv.surface=${serverRow.surface}`,
-    );
+
+    // Defensive: state-1 (Slot) requires a present parent row at
+    // `microLocation`. The server can't see the client's local overlay
+    // — if for any reason the parent isn't here (subscription gap,
+    // server bug, deletion race) the slot is an orphan and would
+    // never render correctly. Force back to owner-inventory loose
+    // (macroZone = ownerId, surface = 1, state = STACKED_LOOSE) so
+    // the card is visible and recoverable. Same recovery shape that
+    // `CardManager.releaseSlotDescendants` uses on the splice path.
+    const orphanSlot =
+      serverState === 1 /* STACKED_SLOT */ &&
+      serverRow.microLocation !== change.key &&
+      !this.cardsLocal.has(serverRow.microLocation);
 
     const bothInventory =
       prev !== undefined &&
@@ -232,20 +277,31 @@ export class DataManager {
 
     let preservePosition = false;
     let serverForcesStackPosition = false;
-    if (bothInventory) {
+    if (bothInventory && !orphanSlot) {
       if (serverState === 0 /* STACKED_LOOSE */) {
         // Legacy layout — gate on localQ === 0.
         preservePosition = unpackMicroZone(serverRow.microZone).localQ === 0;
       } else if (isStackLayout(serverState, serverRow.surface)) {
-        // Stack layout — gate on forceFlag === false.
-        const { forceFlag } = unpackStackMicroZone(serverRow.microZone);
-        preservePosition = !forceFlag;
-        serverForcesStackPosition = forceFlag;
+        // Stack layout — gate on the `force_position` flag (bit 11 of
+        // `flags`). Used to live in `microZone` bit 2 alongside
+        // `position` / `direction`; moved out to `flags` so `microZone`
+        // could carry the chain `direction` instead.
+        const forced = (serverRow.flags & FLAG_FORCE_POSITION) !== 0;
+        preservePosition = !forced;
+        serverForcesStackPosition = forced;
       }
       // STACKED_ON_HEX (3) — no special preserve; server is authoritative.
     }
 
-    const baseRow: Card = preservePosition && prev !== undefined
+    const baseRow: Card = orphanSlot
+      ? {
+          ...serverRow,
+          macroZone:     serverRow.ownerId,
+          surface:       INVENTORY_LAYER,
+          microLocation: 0, // encodeLooseXY(0, 0) === 0
+          microZone:     serverRow.microZone & ~0x3, // state → STACKED_LOOSE
+        }
+      : preservePosition && prev !== undefined
       ? {
           ...serverRow,
           macroZone:     prev.macroZone,
@@ -261,15 +317,20 @@ export class DataManager {
     const dead: 1 | 2 | undefined = flagDead
       ? (prev?.dead === 2 ? 2 : 1)
       : undefined;
-    const nextRow: LocalCard = dead !== undefined
-      ? { ...baseRow, dead }
-      : baseRow;
+    // Scan the server tier for any future-validAt row of this card_id
+    // whose `progress_style` bits are non-zero — those are completion
+    // rows announcing an in-flight event for the client to render. With
+    // last-write-wins, pick the row with the highest `validAt` (the
+    // latest written, in time). The list shape on `LocalCard.progress`
+    // is forward-looking: a later iteration can return all matching
+    // rows for stacked indicators.
+    const progress = this.scanProgress(change.key, baseRow);
+    const nextRow: LocalCard = {
+      ...baseRow,
+      ...(dead !== undefined ? { dead } : {}),
+      ...(progress !== undefined ? { progress } : {}),
+    };
 
-    // [diag] mirror decision + final row.
-    console.log(
-      `[diag] mirror decide id=${change.key} preserve=${preservePosition} forced=${serverForcesStackPosition}`
-      + ` next.state=${nextRow.microZone & 0x3} next.mz=${nextRow.microZone} next.ml=${nextRow.microLocation} next.flags=${nextRow.flags} next.dead=${(nextRow as LocalCard).dead ?? "-"}`,
-    );
     this.cardsLocal.set(change.key, nextRow);
     if (serverForcesStackPosition) {
       this.renumberAfterForcedStackPosition(change.key, nextRow);
@@ -281,9 +342,45 @@ export class DataManager {
     }
   }
 
+  /** Build the `progress` array for a card by scanning the server tier
+   *  for future-validAt rows of this `cardId` whose `progress_style`
+   *  bits are non-zero. Today picks the single row with the highest
+   *  `validAt` (last-write-wins by time) and returns a one-element
+   *  array; returns `undefined` if no eligible row exists so the
+   *  field is omitted from the local row entirely.
+   *
+   *  `currentRow` is the row that's about to land in `cardsLocal` —
+   *  its `validAt` is the `startSecs` for any progress entry (the
+   *  in-flight row's start; the future row's `validAt` is `endSecs`).
+   *
+   *  When stacked indicators land, this function will return the full
+   *  list (one entry per eligible future row, ordered however the
+   *  renderer wants) and the caller's logic doesn't change. */
+  private scanProgress(
+    cardId: number,
+    currentRow: Card,
+  ): ProgressInfo[] | undefined {
+    const startSecs = validAtOf(currentRow.validAt);
+    let bestValidAt = -1;
+    let bestStyle = 0;
+    for (const [packed, row] of this.cards.server) {
+      if (idOf(packed) !== cardId) continue;
+      const validAt = validAtOf(packed);
+      if (validAt <= startSecs) continue;
+      const style = (row.flags >>> FLAG_PROGRESS_STYLE_SHIFT) & FLAG_PROGRESS_STYLE_MASK;
+      if (style === 0) continue;
+      if (validAt > bestValidAt) {
+        bestValidAt = validAt;
+        bestStyle = style;
+      }
+    }
+    if (bestValidAt < 0) return undefined;
+    return [{ style: bestStyle, startSecs, endSecs: bestValidAt }];
+  }
+
   /** Bump every other client-only card in `forced`'s chain group whose
-   *  position ≥ the forced position by +1. Called after a `forceFlag = 1`
-   *  server row lands so client cards "stack after" the server's
+   *  position ≥ the forced position by +1. Called after a server row
+   *  with the `force_position` flag set lands so client cards "stack after" the server's
    *  confirmed position. Saturates at position 31 (any card pushed past
    *  31 stays at 31 — gap-tolerant rendering still draws everything; a
    *  later cleanup pass can compact). Each bump fires `fireCardLocal`
@@ -291,7 +388,7 @@ export class DataManager {
   private renumberAfterForcedStackPosition(forcedId: number, forced: LocalCard): void {
     const forcedState = forced.microZone & 0x3;
     if (!isStackLayout(forcedState, forced.surface)) return;
-    const { position: forcedPos } = unpackStackMicroZone(forced.microZone);
+    const { position: forcedPos, direction: forcedDir } = unpackStackMicroZone(forced.microZone);
     const forcedRoot = forced.microLocation;
     if (forcedPos === 0) return;
 
@@ -301,18 +398,18 @@ export class DataManager {
       if ((row.microZone & 0x3) !== forcedState) continue;
       if (!isStackLayout(forcedState, row.surface)) continue;
       if (row.microLocation !== forcedRoot) continue;
-      const { position, forceFlag } = unpackStackMicroZone(row.microZone);
+      const { position, direction } = unpackStackMicroZone(row.microZone);
+      // Only bump cards in the SAME direction — top and bottom chains
+      // have independent position spaces under the same root.
+      if (direction !== forcedDir) continue;
       if (position < forcedPos) continue;
       const newPos = Math.min(position + 1, 31);
       if (newPos === position) continue;
-      const newMz = packStackMicroZone(newPos, forceFlag, forcedState);
+      const newMz = packStackMicroZone(newPos, direction, forcedState);
       const newRow: LocalCard = { ...row, microZone: newMz };
       bumps.push({ id, oldRow: row, newRow });
     }
-    // [diag] renumber bump scope.
-    console.log(`[diag] bump forced=${forcedId} pos=${forcedPos} root=${forcedRoot} state=${forcedState} → ${bumps.length} bumps`);
     for (const { id, oldRow, newRow } of bumps) {
-      console.log(`[diag]   bumped id=${id} mz ${oldRow.microZone} → ${newRow.microZone}`);
       this.cardsLocal.set(id, newRow);
       this.fireCardLocal({ kind: "updated", key: id, oldRow, newRow });
     }

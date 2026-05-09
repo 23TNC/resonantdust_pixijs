@@ -19,5 +19,5 @@ export default __t.row({
   microLocation: __t.u32().name("micro_location"),
   ownerId: __t.u32().name("owner_id"),
   packedDefinition: __t.u16().name("packed_definition"),
-  flags: __t.u8(),
+  flags: __t.u32(),
 });

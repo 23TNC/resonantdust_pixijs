@@ -37,7 +37,6 @@ import {
 import AddCardReducer from "./add_card_reducer";
 import ClaimOrLoginReducer from "./claim_or_login_reducer";
 import ProposeActionReducer from "./propose_action_reducer";
-import SubmitActionReducer from "./submit_action_reducer";
 
 // Import all procedure arg schemas
 
@@ -58,6 +57,9 @@ const tablesSchema = __schema({
       ] },
       { accessor: 'macro_zone', name: 'cards_macro_zone_idx_btree', algorithm: 'btree', columns: [
         'macroZone',
+      ] },
+      { accessor: 'owner_id', name: 'cards_owner_id_idx_btree', algorithm: 'btree', columns: [
+        'ownerId',
       ] },
       { accessor: 'valid_at', name: 'cards_valid_at_idx_btree', algorithm: 'btree', columns: [
         'validAt',
@@ -111,7 +113,6 @@ const reducersSchema = __reducers(
   __reducerSchema("add_card", AddCardReducer),
   __reducerSchema("claim_or_login", ClaimOrLoginReducer),
   __reducerSchema("propose_action", ProposeActionReducer),
-  __reducerSchema("submit_action", SubmitActionReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

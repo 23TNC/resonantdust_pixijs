@@ -28,10 +28,16 @@ export class ReducerManager {
     microZone: number;
     microLocation: number;
     recipeId: number;
+    /** Distance of the actor (`slots[0]`) from `root` in the chain.
+     *  Used by the server only when `root != 0` — pinned actor's
+     *  `OnRoot` row gets `position = rootDist`. For a fresh chain
+     *  (no held cards above the root) this is `1`; for sub-roots
+     *  past held blocks, the full distance from the chain root. */
+    rootDist: number;
   }): Promise<void> {
     debug.log(
       ["spacetime"],
-      `[spacetime] proposeAction recipe=${args.recipeId} hex=${args.hex} root=${args.root} slots=[${args.slots.join(",")}]`,
+      `[spacetime] proposeAction recipe=${args.recipeId} hex=${args.hex} root=${args.root} slots=[${args.slots.join(",")}] rootDist=${args.rootDist}`,
       5,
     );
     const conn = await this.connection.connect();

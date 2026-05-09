@@ -1,10 +1,26 @@
 import type { Card, StackDirection } from "../cards/Card";
+import {
+  STACK_DIRECTION_DOWN,
+  STACK_DIRECTION_UP,
+} from "../cards/cardData";
 import { GameHexCard } from "../cards/layout/hexagon/HexCard";
 import { LayoutCard } from "../cards/layout/CardLayout";
 import { GameRectCard } from "../cards/layout/rectangle/RectCard";
 import type { GameContext } from "../../GameContext";
 import type { LayoutNode } from "../layout/LayoutNode";
 import type { PointerEventData } from "./InputManager";
+
+/** Maximum allowed chain depth from root to leaf, exclusive of the
+ *  root itself. State-2 (`OnRoot`) rows pack `position` into a u5
+ *  (0..31), so any chain card whose distance from root would exceed
+ *  31 can't be addressed by a state-2 write. Client drag-stack writes
+ *  are state-1 today (no position field) and so don't directly hit
+ *  this limit, but a future rooted recipe activating on the chain
+ *  would pin its actor as state-2 with `position = rootDist` — and if
+ *  that pushes any card past 31, the server's
+ *  `pack_stack_micro_zone(position & 0x1f, ...)` silently truncates,
+ *  corrupting chain layout. We reject the drop preemptively. */
+const MAX_CHAIN_DEPTH = 31;
 
 interface DragState {
   card: Card;
@@ -119,6 +135,14 @@ export class DragManager {
     if (target) {
       if (target.gameCard instanceof GameRectCard) {
         const direction = this.directionFromCursor(up, target);
+        if (this.wouldExceedChainDepth(card, target, direction)) {
+          // Combined chain (target's existing chain in `direction`
+          // plus dragged card + its chain) would push some card past
+          // chain index 31. Fall through to dropLoose so the dragged
+          // card lands free in the same zone.
+          this.dropLoose(card, up, offsetX, offsetY);
+          return;
+        }
         this.ctx.cards?.stack(card.cardId, target.cardId, direction);
         return;
       }
@@ -201,6 +225,40 @@ export class DragManager {
     const def = this.ctx.definitions;
     return def.hasCardFlag(flags, "position_hold")
         || def.hasCardFlag(flags, "position_locked");
+  }
+
+  /** True if the merged chain (target's existing chain in `direction`,
+   *  plus the dragged card and everything stacked on it) would exceed
+   *  `MAX_CHAIN_DEPTH` — which would force a state-2 actor pin into
+   *  the truncating `position & 0x1f` path. Counts:
+   *
+   *  - `existing`: cards from the target's chain root outward in
+   *    `direction`, excluding the root itself. (`buildChain` returns
+   *    chain members only, not the root.)
+   *  - `dragged`: the dragged card + every chain descendant in either
+   *    direction. `CardManager.stack` flips opposite-direction
+   *    descendants before attaching, so the entire dragged subtree
+   *    ends up stacked in `direction`; we sum both directions to
+   *    capture that.
+   *
+   *  Reject when `existing + dragged > MAX_CHAIN_DEPTH` — the new
+   *  leaf would sit at chain index `existing + dragged`, which must
+   *  be ≤ 31. */
+  private wouldExceedChainDepth(
+    card: Card,
+    target: Card,
+    direction: StackDirection,
+  ): boolean {
+    const cards = this.ctx.cards;
+    if (!cards) return false;
+    const targetRoot = cards.rootOf(target.cardId);
+    const dirNum = direction === "top" ? STACK_DIRECTION_UP : STACK_DIRECTION_DOWN;
+    const existing = cards.buildChain(targetRoot, dirNum).length;
+    const dragged =
+      1
+      + cards.buildChain(card.cardId, STACK_DIRECTION_UP).length
+      + cards.buildChain(card.cardId, STACK_DIRECTION_DOWN).length;
+    return existing + dragged > MAX_CHAIN_DEPTH;
   }
 
   /** True if the target card's `flags` has either `drop_hold` or

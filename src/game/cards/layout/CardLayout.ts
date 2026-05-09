@@ -57,15 +57,17 @@ export abstract class LayoutCard extends LayoutNode {
   protected readonly state: CardVisualState = { ...DEFAULT_STATE };
 
   /**
-   * Host for top-stacked children (STACKED_ON_RECT_X). Drawn above
-   * stackBottomHost so top-stack titlebars render over bottom-stack ones
-   * if they ever overlap. Both hosts sit behind the card's own visual
-   * layers so stacked children peek out from behind the parent.
+   * Host for top-stacked children (`STACKED_ON_ROOT` with
+   * `direction == STACK_DIRECTION_UP`). Drawn above stackBottomHost so
+   * top-stack titlebars render over bottom-stack ones if they ever
+   * overlap. Both hosts sit behind the card's own visual layers so
+   * stacked children peek out from behind the parent.
    */
   readonly stackTopHost: LayoutNode = new StackHost();
   /**
-   * Host for bottom-stacked children (STACKED_ON_RECT_Y). Drawn below
-   * stackTopHost — bottom stacks are always under top stacks in z-order.
+   * Host for bottom-stacked children (`STACKED_ON_ROOT` with
+   * `direction == STACK_DIRECTION_DOWN`). Drawn below stackTopHost —
+   * bottom stacks are always under top stacks in z-order.
    */
   readonly stackBottomHost: LayoutNode = new StackHost();
 
@@ -208,9 +210,6 @@ export abstract class LayoutCard extends LayoutNode {
     this.targetX = x;
     this.targetY = y;
     if (!this.hasTarget) {
-      // [diag] first setTarget — snaps display=target. If you see this for
-      // an existing card it means destroy+respawn happened.
-      console.log(`[diag] setTarget(SNAP) id=${this.cardId} → (${x.toFixed(1)}, ${y.toFixed(1)})`);
       this.hasTarget = true;
       this.displayX = x;
       this.displayY = y;
@@ -227,9 +226,6 @@ export abstract class LayoutCard extends LayoutNode {
    * the target.
    */
   setDisplayPosition(x: number, y: number): void {
-    // [diag] setDisplayPosition — surface-bypass-tween moves on reparent /
-    // drag start / drag stop. Useful for finding "card snapped to N" bugs.
-    console.log(`[diag] setDisplayPosition id=${this.cardId} → (${x.toFixed(1)}, ${y.toFixed(1)})`);
     this.displayX = x;
     this.displayY = y;
     this.hasTarget = true;
