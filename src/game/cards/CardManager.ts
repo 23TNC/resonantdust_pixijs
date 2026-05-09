@@ -1,12 +1,13 @@
 import type { GameContext } from "../../GameContext";
 import type { Card as CardRow } from "../../server/spacetime/bindings/types";
-import { type ZoneId } from "../../server/data/packing";
+import { packStackMicroZone, type ZoneId } from "../../server/data/packing";
 import { Card, type CardPositionState, type StackDirection } from "./Card";
 import {
   clearStackedState,
   decodeLooseXY,
   encodeLooseXY,
   getStackedState,
+  getStackPosition,
   setStackedState,
   STACKED_LOOSE,
   STACKED_ON_HEX,
@@ -80,36 +81,79 @@ export class CardManager {
     // `row.surface >= WORLD_LAYER` to a different release path here.
 
     if (state === STACKED_LOOSE) {
-      const topId    = card.stackedTop;
-      const bottomId = card.stackedBottom;
-      const hexId    = card.stackedHex;
-      // Make the top child the new root, then re-stack the bottom child onto
-      // it so the two survivors stay paired rather than scattering loose.
+      // Loose root dying. Every chain member had `microLocation = cardId`
+      // and now needs re-rooting under whichever survivor we promote.
       const { x, y } = decodeLooseXY(row.microLocation);
-      if (topId !== 0) {
-        this.setCardPosition(topId, { kind: "loose", x, y });
-        if (bottomId !== 0) this.stack(bottomId, topId, "bottom");
-      } else if (bottomId !== 0) {
-        this.setCardPosition(bottomId, { kind: "loose", x, y });
+      const topMembers = this.collectChainMembers(cardId, STACKED_ON_RECT_X);
+      const bottomMembers = this.collectChainMembers(cardId, STACKED_ON_RECT_Y);
+      const hexChildId = card.stackedHex;
+
+      let newRootId = 0;
+      if (topMembers.length > 0) {
+        newRootId = topMembers[0];
+        this.setCardPosition(newRootId, { kind: "loose", x, y });
+        let parent = newRootId;
+        for (let i = 1; i < topMembers.length; i++) {
+          this.setCardPosition(topMembers[i], { kind: "stacked", parentId: parent, direction: "top" });
+          parent = topMembers[i];
+        }
+      } else if (bottomMembers.length > 0) {
+        newRootId = bottomMembers[0];
+        this.setCardPosition(newRootId, { kind: "loose", x, y });
+        let parent = newRootId;
+        for (let i = 1; i < bottomMembers.length; i++) {
+          this.setCardPosition(bottomMembers[i], { kind: "stacked", parentId: parent, direction: "bottom" });
+          parent = bottomMembers[i];
+        }
       }
-      if (hexId !== 0) {
+
+      // If we used top members for the new root and there are also
+      // bottom members, re-stack the bottom chain onto the new root
+      // (each bottom member onto its predecessor, starting from the
+      // new root).
+      if (topMembers.length > 0 && bottomMembers.length > 0) {
+        let parent = newRootId;
+        for (const id of bottomMembers) {
+          this.setCardPosition(id, { kind: "stacked", parentId: parent, direction: "bottom" });
+          parent = id;
+        }
+      }
+
+      if (hexChildId !== 0) {
         const dest = this.releasedHexChildPosition(row);
-        if (dest) this.setCardPosition(hexId, dest);
+        if (dest) this.setCardPosition(hexChildId, dest);
       }
     } else if (state === STACKED_ON_RECT_X || state === STACKED_ON_RECT_Y) {
-      // stack() does a leaf walk from the parent which still sees this card
-      // as a live child, so attach the continuation child directly instead.
-      const dir: StackDirection = state === STACKED_ON_RECT_X ? "top" : "bottom";
-      const continuationId = dir === "top" ? card.stackedTop : card.stackedBottom;
-      this.setCardPosition(continuationId, {
-        kind: "stacked",
-        parentId: row.microLocation,
-        direction: dir,
-      });
-      // Detach this card from its parent so it is no longer part of the chain.
+      // Mid-chain death. `microLocation` is the chain root and stays put
+      // for survivors; the only change is renumbering positions down by
+      // 1 for every chain member past the gap. Detach the dying card
+      // first so it's not at any chain position when we renumber, then
+      // walk surviving members in ascending old-position order.
+      const dyingPos = getStackPosition(row.microZone);
+      const dyingRoot = row.microLocation;
+      const renumber: { id: number; oldPos: number }[] = [];
+      for (const [id, r] of this.ctx.data.cardsLocal) {
+        if (id === cardId) continue;
+        if (r.microLocation !== dyingRoot) continue;
+        if (getStackedState(r.microZone) !== state) continue;
+        const pos = getStackPosition(r.microZone);
+        if (pos > dyingPos) renumber.push({ id, oldPos: pos });
+      }
+      renumber.sort((a, b) => a.oldPos - b.oldPos);
+
       this.setCardPosition(cardId, { kind: "loose", x: 0, y: 0 });
-      // Cross child left for orphan-detection.
+      for (const { id } of renumber) {
+        const r = this.ctx.data.cardsLocal.get(id);
+        if (!r) continue;
+        const newPos = getStackPosition(r.microZone) - 1;
+        this.ctx.data.setLocalCard(id, {
+          ...r,
+          microZone: packStackMicroZone(newPos, false, state),
+        });
+      }
     } else if (state === STACKED_ON_HEX) {
+      // Hex chains kept on the legacy parent-pointer model; the
+      // back-pointer cache here is the source of truth.
       const hexId = row.microLocation;
       const topId = card.stackedTop;
       const bottomId = card.stackedBottom;
@@ -131,6 +175,23 @@ export class CardManager {
     card.stackedBottom = 0;
     card.stackedHex = 0;
     this.splicing.delete(cardId);
+  }
+
+  /** Collect every card currently rooted at `rootId` in `direction`,
+   *  sorted by `position` ascending. Filters `cardsLocal` directly —
+   *  slower than walking the back-pointer cache but tolerates gaps and
+   *  is independent of cache state (used by `spliceCard` where the
+   *  cache may still hold stale predecessors). `direction` is a
+   *  `STACKED_ON_RECT_X` / `STACKED_ON_RECT_Y` value. */
+  private collectChainMembers(rootId: number, direction: number): number[] {
+    const members: { id: number; pos: number }[] = [];
+    for (const [id, r] of this.ctx.data.cardsLocal) {
+      if (r.microLocation !== rootId) continue;
+      if (getStackedState(r.microZone) !== direction) continue;
+      members.push({ id, pos: getStackPosition(r.microZone) });
+    }
+    members.sort((a, b) => a.pos - b.pos);
+    return members.map((m) => m.id);
   }
 
   /**
@@ -193,8 +254,8 @@ export class CardManager {
     if (!this.cards.get(bId)) return;
 
     const oppositeDir: StackDirection = direction === "top" ? "bottom" : "top";
-    const aRequestedSlot = this.validatedSlot(aId, direction);
-    const aOppositeSlot = this.validatedSlot(aId, oppositeDir);
+    const aRequestedSlot = this.slot(aId, direction);
+    const aOppositeSlot = this.slot(aId, oppositeDir);
 
     if (aRequestedSlot !== 0 && aOppositeSlot !== 0) return;
 
@@ -206,15 +267,40 @@ export class CardManager {
     while (true) {
       const leaf = this.cards.get(leafId);
       if (!leaf) return;
-      // Check for self-stack before validatedSlot can repair the pointer away.
+      // Self-stack check: if A is already in B's chain at this slot,
+      // the stack is a no-op and we'd loop infinitely otherwise.
       const raw = direction === "top" ? leaf.stackedTop : leaf.stackedBottom;
       if (raw === aId) break;
-      const next = this.validatedSlot(leafId, direction);
+      const next = this.slot(leafId, direction);
       if (next === 0) break;
       leafId = next;
     }
 
+    // Collect A's chain in `direction` BEFORE moving A — once A's row
+    // changes, A's children still point at A as root (microLocation = aId)
+    // so they're discoverable by walking the back-pointer cache from A.
+    // After A's microLocation flips to B's root, the children's chain-
+    // root reference is stale; we re-stack each one onto its predecessor
+    // so `setCardPosition` re-computes its (root_id, position) from the
+    // freshly-written predecessor row.
+    const aChain: number[] = [];
+    {
+      let cursor = aId;
+      while (true) {
+        const next = this.slot(cursor, direction);
+        if (next === 0) break;
+        aChain.push(next);
+        cursor = next;
+      }
+    }
+
     this.setCardPosition(aId, { kind: "stacked", parentId: leafId, direction });
+
+    let parentForChild = aId;
+    for (const childId of aChain) {
+      this.setCardPosition(childId, { kind: "stacked", parentId: parentForChild, direction });
+      parentForChild = childId;
+    }
   }
 
   /**
@@ -249,13 +335,46 @@ export class CardManager {
         state.direction === "bottom" ? STACKED_ON_RECT_Y :
         STACKED_ON_HEX;
       const parentRow = this.ctx.data.cardsLocal.get(state.parentId);
-      newRow = {
-        ...row,
-        macroZone:     parentRow?.macroZone ?? row.macroZone,
-        surface:       parentRow?.surface   ?? row.surface,
-        microLocation: state.parentId,
-        microZone:     setStackedState(row.microZone, stateBits),
-      };
+      if (state.direction === "hex" || stateBits === STACKED_ON_HEX) {
+        // Hex chains keep the legacy parent-pointer model.
+        newRow = {
+          ...row,
+          macroZone:     parentRow?.macroZone ?? row.macroZone,
+          surface:       parentRow?.surface   ?? row.surface,
+          microLocation: state.parentId,
+          microZone:     setStackedState(row.microZone, stateBits),
+        };
+      } else {
+        // Rect chains use the (root_id, position) model. Translate the
+        // caller's "I'm stacking on `parentId`" into "my chain root is
+        // R; my position is P+1 above the parent's position (or 1 if
+        // the parent IS the root)". forceFlag = false: this is a
+        // client-driven write, server isn't forcing anything.
+        let rootId: number;
+        let position: number;
+        if (parentRow !== undefined) {
+          const parentState = getStackedState(parentRow.microZone);
+          if (parentState === STACKED_ON_RECT_X || parentState === STACKED_ON_RECT_Y) {
+            rootId = parentRow.microLocation;
+            position = getStackPosition(parentRow.microZone) + 1;
+          } else {
+            // Parent is loose root (or hex-mounted, which we don't
+            // chain past). Use the parent itself as chain root.
+            rootId = state.parentId;
+            position = 1;
+          }
+        } else {
+          rootId = state.parentId;
+          position = 1;
+        }
+        newRow = {
+          ...row,
+          macroZone:     parentRow?.macroZone ?? row.macroZone,
+          surface:       parentRow?.surface   ?? row.surface,
+          microLocation: rootId,
+          microZone:     packStackMicroZone(position, false, stateBits),
+        };
+      }
     } else {
       // World position — stripped while world tier is gone. Restore the
       // packMacroZone / packMicroZone path from `server/data/packing` here
@@ -349,21 +468,32 @@ export class CardManager {
   }
 
   /**
-   * Walk up the stack chain from `cardId` via row data and return the loose
-   * root (the first ancestor whose stackedState is 0). Doesn't depend on
-   * local back-pointers — uses microZone+microLocation directly so it's
-   * usable from `onDataChange` after the local pointers have been updated
-   * (since the data is the source of truth for `microLocation`/parent, and
-   * only THIS card's row changed in any given onDataChange firing).
+   * Resolve the loose root of `cardId`'s chain.
+   *
+   * - Rect chains (state = `STACKED_ON_RECT_X` / `STACKED_ON_RECT_Y`):
+   *   one read — `microLocation` IS the root id under the new layout.
+   *   Falls back to the card itself if the named root isn't in the
+   *   overlay (broken chain).
+   * - Hex chains (state = `STACKED_ON_HEX`): walk up via parent pointers
+   *   the legacy way until we hit a loose card. Bounded by
+   *   `FIND_ROOT_MAX_DEPTH` against pathological cycles.
+   * - Loose: returns the card itself.
    */
   rootOf(cardId: number): number {
+    const row = this.ctx.data.cardsLocal.get(cardId);
+    if (!row) return cardId;
+    const state = getStackedState(row.microZone);
+    if (state === STACKED_LOOSE) return cardId;
+    if (state === STACKED_ON_RECT_X || state === STACKED_ON_RECT_Y) {
+      return this.cards.get(row.microLocation) ? row.microLocation : cardId;
+    }
+    // STACKED_ON_HEX: legacy walk.
     let id = cardId;
     for (let i = 0; i < FIND_ROOT_MAX_DEPTH; i++) {
-      const row = this.ctx.data.cardsLocal.get(id);
-      if (!row) return id;
-      const state = getStackedState(row.microZone);
-      if (state !== STACKED_ON_RECT_X && state !== STACKED_ON_RECT_Y) return id;
-      const parentId = row.microLocation;
+      const r = this.ctx.data.cardsLocal.get(id);
+      if (!r) return id;
+      if (getStackedState(r.microZone) !== STACKED_ON_HEX) return id;
+      const parentId = r.microLocation;
       if (!this.cards.get(parentId)) return id;
       id = parentId;
     }
@@ -398,11 +528,18 @@ export class CardManager {
     if (!card) return;
     this.cards.set(cardId, card);
     this.addToZone(card.zoneId(), card);
+    // [diag] spawn — investigating teleport-on-stack repro.
+    const row = this.ctx.data.cardsLocal.get(cardId);
+    console.log(
+      `[diag] spawn id=${cardId} state=${row ? (row.microZone & 0x3) : "-"} mz=${row?.microZone ?? "-"} ml=${row?.microLocation ?? "-"} flags=${row?.flags ?? "-"}`,
+    );
   }
 
   private destroy(cardId: number): void {
     const card = this.cards.get(cardId);
     if (!card) return;
+    // [diag] destroy.
+    console.log(`[diag] destroy id=${cardId}`);
     this.removeFromZone(card.zoneId(), card);
     card.destroy();
     this.cards.delete(cardId);
@@ -447,46 +584,29 @@ export class CardManager {
   }
 
   /**
-   * Returns the validated child card-id stacked on `parentId` in `direction`,
-   * or 0 if there is none. Validates the local pointer against current data
-   * (does the candidate exist? does its row still claim to be stacked here
-   * in the same direction?) and repairs the pointer to 0 when stale. Used by
-   * `stack`'s leaf walk and by `flipChain`'s collection step.
+   * Read the immediate child stacked on `parentId` in `direction`, or 0
+   * if the cache says none. The back-pointer cache is maintained from
+   * data by `Card.onDataChange` (via `Card.stackParentOf` which resolves
+   * to the immediate parent under the stack layout), so a direct read
+   * is trustworthy — no validation/repair pass needed.
    */
-  private validatedSlot(parentId: number, direction: StackDirection): number {
+  private slot(parentId: number, direction: StackDirection): number {
     const parent = this.cards.get(parentId);
     if (!parent) return 0;
-    const childId = direction === "top" ? parent.stackedTop : parent.stackedBottom;
-    if (childId === 0) return 0;
-
-    const child = this.cards.get(childId);
-    const childRow = this.ctx.data.cardsLocal.get(childId);
-    const expectedState =
-      direction === "top" ? STACKED_ON_RECT_X : STACKED_ON_RECT_Y;
-    if (
-      !child ||
-      !childRow ||
-      getStackedState(childRow.microZone) !== expectedState ||
-      childRow.microLocation !== parentId
-    ) {
-      if (direction === "top") parent.stackedTop = 0;
-      else parent.stackedBottom = 0;
-      return 0;
-    }
-    return childId;
+    if (direction === "top") return parent.stackedTop;
+    if (direction === "bottom") return parent.stackedBottom;
+    return parent.stackedHex;
   }
 
   /**
-   * Walks the chain rooted at `rootId` in `fromDir` and rewrites every link
-   * to `toDir`. Each card stays stacked on the same parent — only the
-   * stackedState bits in `microZone` flip (and the titlebar swaps top↔bottom
-   * via applyData). Used to keep a card's chain uniform when accepting a
-   * stack opposite to what it currently holds.
+   * Walks the chain rooted at `rootId` in `fromDir` and rewrites every
+   * link to `toDir`. Each chain member's `stackedState` bits flip; the
+   * `position` field is rebuilt from 1..N in walk order so position 1
+   * stays adjacent to root after the flip.
    *
-   * Collects the chain ids before mutating so each setPosition sees a
-   * coherent pre-flip view. setPosition fires onDataChange synchronously
-   * which clears the from-side back-pointer and sets the to-side pointer,
-   * so the chain ends up consistent in `toDir` after the loop completes.
+   * Collects ids first via the back-pointer cache so each setCardPosition
+   * sees a coherent pre-flip view. Each write fires onDataChange and
+   * shuffles the cache; by loop end the chain is uniform in `toDir`.
    */
   private flipChain(
     rootId: number,
@@ -496,38 +616,67 @@ export class CardManager {
     const chain: number[] = [];
     let currentId = rootId;
     while (true) {
-      const childId = this.validatedSlot(currentId, fromDir);
+      const childId = this.slot(currentId, fromDir);
       if (childId === 0) break;
       chain.push(childId);
       currentId = childId;
     }
-
+    // Walk the collected chain in order and re-stack each one onto its
+    // predecessor in `toDir`. setCardPosition recomputes the position
+    // field from the parent's row, so positions naturally renumber 1..N.
+    let parentId = rootId;
     for (const id of chain) {
-      const row = this.ctx.data.cardsLocal.get(id);
-      if (!row) continue;
       this.setCardPosition(id, {
         kind: "stacked",
-        parentId: row.microLocation,
+        parentId,
         direction: toDir,
       });
+      parentId = id;
     }
   }
 
+  /** Rebuild back-pointer cache from data. Called once after the
+   *  initial spawn pass — spawn order is arbitrary, so a child may have
+   *  spawned before its parent and missed the immediate-parent's
+   *  `Card.stackedTop` setter. After every chain mutation, individual
+   *  `Card.onDataChange` runs maintain the cache incrementally; this
+   *  pass is the start-of-life seed. */
   private repairBackPointers(): void {
     for (const card of this.cards.values()) {
       const row = this.ctx.data.cardsLocal.get(card.cardId);
       if (!row) continue;
       const state = getStackedState(row.microZone);
-      if (state === STACKED_ON_RECT_X) {
-        const parent = this.cards.get(row.microLocation);
-        if (parent) parent.stackedTop = card.cardId;
-      } else if (state === STACKED_ON_RECT_Y) {
-        const parent = this.cards.get(row.microLocation);
-        if (parent) parent.stackedBottom = card.cardId;
-      } else if (state === STACKED_ON_HEX) {
-        const parent = this.cards.get(row.microLocation);
-        if (parent) parent.stackedHex = card.cardId;
+      if (state !== STACKED_ON_RECT_X && state !== STACKED_ON_RECT_Y && state !== STACKED_ON_HEX) {
+        continue;
       }
+      // Resolve immediate parent: for hex, microLocation IS the parent.
+      // For rect chains, the immediate parent is the card at position-1
+      // in the same direction (or the chain root if position == 1).
+      let parentId: number;
+      if (state === STACKED_ON_HEX) {
+        parentId = row.microLocation;
+      } else {
+        const position = getStackPosition(row.microZone);
+        if (position <= 1) {
+          parentId = row.microLocation;
+        } else {
+          parentId = 0;
+          for (const [otherId, otherRow] of this.ctx.data.cardsLocal) {
+            if (otherRow.microLocation !== row.microLocation) continue;
+            if (getStackedState(otherRow.microZone) !== state) continue;
+            if (getStackPosition(otherRow.microZone) === position - 1) {
+              parentId = otherId;
+              break;
+            }
+          }
+          if (parentId === 0) parentId = row.microLocation;
+        }
+      }
+      const parent = this.cards.get(parentId);
+      if (!parent) continue;
+      if (state === STACKED_ON_RECT_X) parent.stackedTop = card.cardId;
+      else if (state === STACKED_ON_RECT_Y) parent.stackedBottom = card.cardId;
+      else parent.stackedHex = card.cardId;
     }
   }
 

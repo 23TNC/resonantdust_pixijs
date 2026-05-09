@@ -85,10 +85,21 @@ export class ValidAtTable<T> {
    *  align the view to the server's valid_at timeline. */
   promote(now: number): void {
     const best = new Map<number, { row: T; validAt: number }>();
+    // Track every id that has ANY row in the server map (regardless of
+    // validAt). Used below to suppress spurious `removed` events when the
+    // server is mid-replacement: SpacetimeDB's schedule_delete_cards
+    // sweeps delete the old row in a separate transaction from the
+    // propose_action insert, and the SDK can deliver the resulting
+    // onDelete before onInsert. Without this guard, the row's id falls
+    // out of `best` between the two events and `removed` fires, causing
+    // CardManager to destroy + respawn the Card (and snap to its first
+    // setTarget — typically (0,0) for a fresh server row).
+    const knownIds = new Set<number>();
     for (const [packed, row] of this.server) {
+      const id = idOf(packed);
+      knownIds.add(id);
       const validAt = validAtOf(packed);
       if (validAt > now) continue;
-      const id = idOf(packed);
       const prev = best.get(id);
       if (prev === undefined || validAt > prev.validAt) {
         best.set(id, { row, validAt });
@@ -107,6 +118,13 @@ export class ValidAtTable<T> {
     }
     for (const id of [...this.current.keys()]) {
       if (!best.has(id)) {
+        // If the server map still holds *any* row for this id (even one
+        // at a future validAt that hasn't elapsed yet), the card isn't
+        // truly removed — it's just shifted to a row we can't promote
+        // yet. Keep the existing `current` entry so a subsequent
+        // promote produces an `updated` event when the replacement
+        // becomes eligible.
+        if (knownIds.has(id)) continue;
         const oldRow = this.current.get(id)!;
         this.current.delete(id);
         this.fire({ kind: "removed", key: id, oldRow });

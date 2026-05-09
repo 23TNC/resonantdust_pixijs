@@ -9,10 +9,12 @@ import { packZoneId, type ZoneId } from "../../server/data/packing";
 import type { TableChange } from "../../server/data/ValidAtTable";
 import {
   getStackedState,
+  getStackPosition,
   STACKED_ON_HEX,
   STACKED_ON_RECT_X,
   STACKED_ON_RECT_Y,
 } from "./cardData";
+import type { LocalCard } from "../../server/data/DataManager";
 import type { CardManager } from "./CardManager";
 import type { GameCard } from "./game/CardGame";
 import { GameHexCard, LayoutHexCard } from "./layout/hexagon/HexCard";
@@ -66,12 +68,33 @@ export class Card {
   /** Rect card mounted on top of us (state 3, STACKED_ON_HEX), or 0 if none. */
   public stackedHex = 0;
 
-  private static stackParentOf(row: CardRow): number {
+  /** Resolve the IMMEDIATE parent's card_id for this row.
+   *
+   *  - `STACKED_ON_HEX`: `microLocation` is the parent hex card_id (legacy
+   *    parent-pointer model; hex chains haven't been migrated).
+   *  - `STACKED_ON_RECT_X` / `STACKED_ON_RECT_Y`: `microLocation` is the
+   *    chain ROOT, and the immediate parent is the chain member at
+   *    `position - 1` in the same direction. If `position == 1`, the
+   *    parent is the root itself. Falls back to the root if the
+   *    expected predecessor isn't in the overlay (gap-tolerant — Phase 5
+   *    rendering handles missing positions).
+   *  - `STACKED_LOOSE`: no parent. */
+  private static stackParentOf(
+    row: CardRow,
+    cardsLocal: Map<number, LocalCard>,
+  ): number {
     const state = getStackedState(row.microZone);
-    if (state === STACKED_ON_RECT_X || state === STACKED_ON_RECT_Y || state === STACKED_ON_HEX) {
-      return row.microLocation;
+    if (state === STACKED_ON_HEX) return row.microLocation;
+    if (state !== STACKED_ON_RECT_X && state !== STACKED_ON_RECT_Y) return 0;
+    const rootId = row.microLocation;
+    const position = getStackPosition(row.microZone);
+    if (position <= 1) return rootId;
+    for (const [id, r] of cardsLocal) {
+      if (r.microLocation !== rootId) continue;
+      if (getStackedState(r.microZone) !== state) continue;
+      if (getStackPosition(r.microZone) === position - 1) return id;
     }
-    return 0;
+    return rootId;
   }
 
   private static stackDirectionOf(row: CardRow): StackDirection | null {
@@ -134,7 +157,7 @@ export class Card {
       // so applyData's setTarget calls are interpreted in the correct coord
       // space. Orphan stacked cards (parent missing) get rewritten loose to
       // the owner's inventory and then attached there.
-      this.currentParentId = Card.stackParentOf(initialRow);
+      this.currentParentId = Card.stackParentOf(initialRow, ctx.data.cardsLocal);
       this.currentStackDirection = Card.stackDirectionOf(initialRow);
       let row: CardRow = initialRow;
       if (this.currentParentId !== 0 && !cardManager.get(this.currentParentId)) {
@@ -360,11 +383,19 @@ export class Card {
     const row = change.kind === "added" ? change.row : change.newRow;
 
     const newZoneId = packZoneId(row.macroZone, row.surface);
-    const newParentId = Card.stackParentOf(row);
+    const newParentId = Card.stackParentOf(row, this.layoutCard.ctx.data.cardsLocal);
     const newStackDirection = Card.stackDirectionOf(row);
     const zoneChanged = newZoneId !== this.currentZoneId;
     const parentChanged = newParentId !== this.currentParentId;
     const directionChanged = newStackDirection !== this.currentStackDirection;
+    // [diag] onDataChange entry — investigating teleport-on-stack repro.
+    console.log(
+      `[diag] onData id=${this.cardId} kind=${change.kind}`
+      + ` row.state=${row.microZone & 0x3} row.mz=${row.microZone} row.ml=${row.microLocation}`
+      + ` oldParent=${this.currentParentId} newParent=${newParentId}`
+      + ` oldDir=${this.currentStackDirection ?? "-"} newDir=${newStackDirection ?? "-"}`
+      + ` zoneChanged=${zoneChanged} parentChanged=${parentChanged} directionChanged=${directionChanged}`,
+    );
 
     if (zoneChanged || parentChanged || directionChanged) {
       // Resolve the new attach target before mutating state, so we can early-

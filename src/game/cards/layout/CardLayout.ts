@@ -208,6 +208,9 @@ export abstract class LayoutCard extends LayoutNode {
     this.targetX = x;
     this.targetY = y;
     if (!this.hasTarget) {
+      // [diag] first setTarget — snaps display=target. If you see this for
+      // an existing card it means destroy+respawn happened.
+      console.log(`[diag] setTarget(SNAP) id=${this.cardId} → (${x.toFixed(1)}, ${y.toFixed(1)})`);
       this.hasTarget = true;
       this.displayX = x;
       this.displayY = y;
@@ -224,6 +227,9 @@ export abstract class LayoutCard extends LayoutNode {
    * the target.
    */
   setDisplayPosition(x: number, y: number): void {
+    // [diag] setDisplayPosition — surface-bypass-tween moves on reparent /
+    // drag start / drag stop. Useful for finding "card snapped to N" bugs.
+    console.log(`[diag] setDisplayPosition id=${this.cardId} → (${x.toFixed(1)}, ${y.toFixed(1)})`);
     this.displayX = x;
     this.displayY = y;
     this.hasTarget = true;

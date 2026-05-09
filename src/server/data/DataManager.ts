@@ -1,7 +1,12 @@
 import type { Card, Player, Zone } from "../spacetime/bindings/types";
 import type { ConnectionManager } from "../spacetime/ConnectionManager";
 import { SubscriptionManager } from "../spacetime/SubscriptionManager";
-import { unpackMicroZone } from "./packing";
+import {
+  isStackLayout,
+  packStackMicroZone,
+  unpackMicroZone,
+  unpackStackMicroZone,
+} from "./packing";
 import { ValidAtTable, type TableChange, type TableListener } from "./ValidAtTable";
 
 const INVENTORY_LAYER = 1;
@@ -179,33 +184,68 @@ export class DataManager {
     }
   }
 
-  /** Card-specific mirror: when the card is loose in inventory on both
-   *  sides (`surface === INVENTORY_LAYER` for the incoming server row AND
-   *  the existing local row, plus `unpackMicroZone(server.microZone).localQ
-   *  === 0`), preserve the local row's position fields (`macroZone`,
-   *  `microZone`, `microLocation`, `surface`) and only merge in the server's
-   *  non-position fields (`flags`, `packedDefinition`, `ownerId`, etc.).
-   *  Position in inventory is client-managed; the rest of the row stays
-   *  authoritative on the server. */
+  /** Card-specific mirror with two preserve cases for inventory cards.
+   *  Both require `serverRow.surface === INVENTORY_LAYER` AND
+   *  `prev.surface === INVENTORY_LAYER`. The check on `state` and the
+   *  layout-specific bit determines which gate fires:
+   *
+   *  - **Loose preserve** (legacy layout): `state === STACKED_LOOSE` AND
+   *    `unpackMicroZone(serverRow.microZone).localQ === 0`. Position is
+   *    client-managed; preserve local's `macroZone` / `microZone` /
+   *    `microLocation` / `surface`.
+   *
+   *  - **Stack preserve** (stack layout): `state ∈ {STACKED_ON_RECT_X,
+   *    STACKED_ON_RECT_Y}` AND `unpackStackMicroZone(serverRow.microZone)
+   *    .forceFlag === false`. Same preservation — the server isn't
+   *    forcing a position so client wins.
+   *
+   *  When the **stack layout** applies AND `forceFlag === true`, the
+   *  server is asserting a specific chain position. We take server's
+   *  position as-is AND renumber any *other* client-only cards in the
+   *  same `(root_id, direction)` group whose position ≥ the forced one
+   *  by +1 — they "stack after" the server's confirmed position. */
   private mirrorCard(change: TableChange<Card>): void {
     const prev = this.cardsLocal.get(change.key);
 
     if (change.kind === "removed") {
       if (prev === undefined) return;
+      // [diag] mirror remove
+      console.log(`[diag] mirror remove id=${change.key} prev.mz=${prev.microZone} prev.ml=${prev.microLocation} prev.flags=${prev.flags}`);
       this.cardsLocal.delete(change.key);
       this.fireCardLocal({ kind: "removed", key: change.key, oldRow: prev });
       return;
     }
 
     const serverRow = change.kind === "added" ? change.row : change.newRow;
+    const serverState = serverRow.microZone & 0x3;
+    // [diag] mirror added/updated — full pre/post snapshot for the bit-layout audit.
+    console.log(
+      `[diag] mirror ${change.kind} id=${change.key}`
+      + ` prev.state=${prev ? (prev.microZone & 0x3) : "-"} prev.mz=${prev?.microZone ?? "-"} prev.ml=${prev?.microLocation ?? "-"} prev.flags=${prev?.flags ?? "-"} prev.surface=${prev?.surface ?? "-"}`
+      + ` srv.state=${serverState} srv.mz=${serverRow.microZone} srv.ml=${serverRow.microLocation} srv.flags=${serverRow.flags} srv.surface=${serverRow.surface}`,
+    );
 
-    const isLooseInInventory =
+    const bothInventory =
       prev !== undefined &&
       serverRow.surface === INVENTORY_LAYER &&
-      prev.surface === INVENTORY_LAYER &&
-      unpackMicroZone(serverRow.microZone).localQ === 0;
+      prev.surface === INVENTORY_LAYER;
 
-    const baseRow: Card = isLooseInInventory && prev !== undefined
+    let preservePosition = false;
+    let serverForcesStackPosition = false;
+    if (bothInventory) {
+      if (serverState === 0 /* STACKED_LOOSE */) {
+        // Legacy layout — gate on localQ === 0.
+        preservePosition = unpackMicroZone(serverRow.microZone).localQ === 0;
+      } else if (isStackLayout(serverState, serverRow.surface)) {
+        // Stack layout — gate on forceFlag === false.
+        const { forceFlag } = unpackStackMicroZone(serverRow.microZone);
+        preservePosition = !forceFlag;
+        serverForcesStackPosition = forceFlag;
+      }
+      // STACKED_ON_HEX (3) — no special preserve; server is authoritative.
+    }
+
+    const baseRow: Card = preservePosition && prev !== undefined
       ? {
           ...serverRow,
           macroZone:     prev.macroZone,
@@ -225,11 +265,56 @@ export class DataManager {
       ? { ...baseRow, dead }
       : baseRow;
 
+    // [diag] mirror decision + final row.
+    console.log(
+      `[diag] mirror decide id=${change.key} preserve=${preservePosition} forced=${serverForcesStackPosition}`
+      + ` next.state=${nextRow.microZone & 0x3} next.mz=${nextRow.microZone} next.ml=${nextRow.microLocation} next.flags=${nextRow.flags} next.dead=${(nextRow as LocalCard).dead ?? "-"}`,
+    );
     this.cardsLocal.set(change.key, nextRow);
+    if (serverForcesStackPosition) {
+      this.renumberAfterForcedStackPosition(change.key, nextRow);
+    }
     if (prev === undefined) {
       this.fireCardLocal({ kind: "added", key: change.key, row: nextRow });
     } else if (prev !== nextRow) {
       this.fireCardLocal({ kind: "updated", key: change.key, oldRow: prev, newRow: nextRow });
+    }
+  }
+
+  /** Bump every other client-only card in `forced`'s chain group whose
+   *  position ≥ the forced position by +1. Called after a `forceFlag = 1`
+   *  server row lands so client cards "stack after" the server's
+   *  confirmed position. Saturates at position 31 (any card pushed past
+   *  31 stays at 31 — gap-tolerant rendering still draws everything; a
+   *  later cleanup pass can compact). Each bump fires `fireCardLocal`
+   *  so downstream listeners (Card.onDataChange) tween. */
+  private renumberAfterForcedStackPosition(forcedId: number, forced: LocalCard): void {
+    const forcedState = forced.microZone & 0x3;
+    if (!isStackLayout(forcedState, forced.surface)) return;
+    const { position: forcedPos } = unpackStackMicroZone(forced.microZone);
+    const forcedRoot = forced.microLocation;
+    if (forcedPos === 0) return;
+
+    const bumps: { id: number; oldRow: LocalCard; newRow: LocalCard }[] = [];
+    for (const [id, row] of this.cardsLocal) {
+      if (id === forcedId) continue;
+      if ((row.microZone & 0x3) !== forcedState) continue;
+      if (!isStackLayout(forcedState, row.surface)) continue;
+      if (row.microLocation !== forcedRoot) continue;
+      const { position, forceFlag } = unpackStackMicroZone(row.microZone);
+      if (position < forcedPos) continue;
+      const newPos = Math.min(position + 1, 31);
+      if (newPos === position) continue;
+      const newMz = packStackMicroZone(newPos, forceFlag, forcedState);
+      const newRow: LocalCard = { ...row, microZone: newMz };
+      bumps.push({ id, oldRow: row, newRow });
+    }
+    // [diag] renumber bump scope.
+    console.log(`[diag] bump forced=${forcedId} pos=${forcedPos} root=${forcedRoot} state=${forcedState} → ${bumps.length} bumps`);
+    for (const { id, oldRow, newRow } of bumps) {
+      console.log(`[diag]   bumped id=${id} mz ${oldRow.microZone} → ${newRow.microZone}`);
+      this.cardsLocal.set(id, newRow);
+      this.fireCardLocal({ kind: "updated", key: id, oldRow, newRow });
     }
   }
 

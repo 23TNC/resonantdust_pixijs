@@ -295,15 +295,19 @@ export class SubscriptionManager {
    *  handlers happens inside. Called on every `onConnected` so each fresh
    *  conn gets its own bindings. */
   private bindHandlers(conn: DbConnection): void {
-    conn.db.cards.onInsert((_ctx, row) =>
-      this.fanOut("cards", "onInsert", (h) => h.onInsert?.(row)),
-    );
-    conn.db.cards.onUpdate((_ctx, oldRow, newRow) =>
-      this.fanOut("cards", "onUpdate", (h) => h.onUpdate?.(oldRow, newRow)),
-    );
-    conn.db.cards.onDelete((_ctx, row) =>
-      this.fanOut("cards", "onDelete", (h) => h.onDelete?.(row)),
-    );
+    conn.db.cards.onInsert((_ctx, row) => {
+      // [diag] raw SDK event order — investigating teleport-on-stack repro.
+      console.log(`[diag] sdk onInsert id=${row.cardId} validAt=${row.validAt} mz=${row.microZone} ml=${row.microLocation} flags=${row.flags}`);
+      this.fanOut("cards", "onInsert", (h) => h.onInsert?.(row));
+    });
+    conn.db.cards.onUpdate((_ctx, oldRow, newRow) => {
+      console.log(`[diag] sdk onUpdate id=${newRow.cardId} validAt ${oldRow.validAt}→${newRow.validAt} mz ${oldRow.microZone}→${newRow.microZone}`);
+      this.fanOut("cards", "onUpdate", (h) => h.onUpdate?.(oldRow, newRow));
+    });
+    conn.db.cards.onDelete((_ctx, row) => {
+      console.log(`[diag] sdk onDelete id=${row.cardId} validAt=${row.validAt} mz=${row.microZone} ml=${row.microLocation} flags=${row.flags}`);
+      this.fanOut("cards", "onDelete", (h) => h.onDelete?.(row));
+    });
 
     conn.db.players.onInsert((_ctx, row) =>
       this.fanOut("players", "onInsert", (h) => h.onInsert?.(row)),
