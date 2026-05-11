@@ -1,5 +1,5 @@
-import { type ZoneId } from "../../server/data/packing";
-// import { packMacroZone, WORLD_LAYER, zonesAroundAnchor } from "../world/worldCoords";
+import { packZoneId, type ZoneId } from "../../server/data/packing";
+import { packMacroZone, WORLD_LAYER, zonesAroundAnchor } from "../world/worldCoords";
 
 export type ZoneTier = "active" | "hot" | "cold";
 
@@ -36,7 +36,7 @@ export class ZoneManager {
 
   constructor() {
     this.anchors.set("viewport", { q: 0, r: 0 });
-    // this.recomputeWorldZones();
+    this.recomputeWorldZones();
   }
 
   set(zoneId: ZoneId, tier: ZoneTier | null): void {
@@ -124,14 +124,13 @@ export class ZoneManager {
    * LayoutWorld subscribes to `"viewport"` to know where to center its hex
    * grid. Other anchors keep their surrounding zones warm even when off-screen.
    */
-  /* 
   setAnchor(name: AnchorName, q: number, r: number): void {
     const prev = this.anchors.get(name);
     if (prev?.q === q && prev.r === r) return;
     this.anchors.set(name, { q, r });
     for (const l of this.anchorListeners) l(name, q, r);
     this.recomputeWorldZones();
-  }*/
+  }
 
   getAnchor(name: AnchorName): WorldAnchor | undefined {
     return this.anchors.get(name);
@@ -152,7 +151,6 @@ export class ZoneManager {
     return () => { this.anchorListeners.delete(listener); };
   }
 
-  /*
   private recomputeWorldZones(): void {
     const next = new Set<ZoneId>();
     for (const { q, r } of this.anchors.values()) {
@@ -168,7 +166,6 @@ export class ZoneManager {
     }
     this.prevWorldZones = next;
   }
-  */
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 

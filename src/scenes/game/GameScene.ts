@@ -7,7 +7,7 @@ import type { GameContext } from "../../GameContext";
 import { DragManager } from "../../game/input/DragManager";
 import { InputManager } from "../../game/input/InputManager";
 import { LayoutManager } from "../../game/layout/LayoutManager";
-// import { WorldPanManager } from "../world/WorldPanManager";
+import { WorldPanManager } from "../../game/world/WorldPanManager";
 import { packZoneId } from "../../server/data/packing";
 import { GameLayout } from "./GameLayout";
 import { Scene } from "../Scene";
@@ -23,7 +23,7 @@ export class GameScene extends Scene {
   private inputManager!: InputManager;
   private dragManager!: DragManager;
   private actionManager!: ActionManager;
-  // private worldPanManager!: WorldPanManager;
+  private worldPanManager!: WorldPanManager;
   private particleManager!: ParticleManager;
   private releaseCards: (() => void) | null = null;
   private releaseKeys: (() => void) | null = null;
@@ -69,8 +69,11 @@ export class GameScene extends Scene {
     this.actionManager = new ActionManager(ctx);
     ctx.actions = this.actionManager;
 
-    // this.worldPanManager = new WorldPanManager(ctx, this.gameLayout.worldView);
-    // ctx.world = this.gameLayout.worldView;
+    // WorldPanManager listens on the InputManager — must come after it.
+    // Doesn't need ctx-binding (no consumers reach for the pan
+    // controller through GameContext); the GameScene owns it
+    // directly and disposes it on exit.
+    this.worldPanManager = new WorldPanManager(ctx, this.gameLayout.worldView);
 
     this.particleManager = new ParticleManager();
     void this.particleManager.init();
@@ -95,7 +98,7 @@ export class GameScene extends Scene {
     this.releaseCards = null;
 
     this.particleManager.destroy();
-    // this.worldPanManager.dispose();
+    this.worldPanManager.dispose();
     this.actionManager.dispose();
     this.dragManager.dispose();
     this.inputManager.dispose();
@@ -110,7 +113,6 @@ export class GameScene extends Scene {
       this.ctxRef.game = null;
       this.ctxRef.input = null;
       this.ctxRef.actions = null;
-      // this.ctxRef.world = null;
       this.ctxRef = null;
     }
   }
@@ -123,7 +125,7 @@ export class GameScene extends Scene {
   update(deltaMS: number): void {
     this.gameManager.tick(deltaMS);
     this.particleManager.tick(deltaMS);
-    // this.worldPanManager.update();
+    this.worldPanManager.update();
     const drawCalls = this.ctxRef?.drawCallCounter.readAndReset() ?? 0;
     this.gameLayout.titleBar.updateStats(deltaMS, drawCalls);
     this.gameLayout.layoutIfDirty();

@@ -684,26 +684,31 @@ export class CardManager {
    * Build the chain rooted at `rootId` in the given direction, returning
    * cards in visual chain order (closest to root first, outward).
    *
-   * Mixes state-2 (`STACKED_ON_ROOT`) and state-1 (`STACKED_SLOT`) chain
-   * members correctly:
+   * Handles all three child states uniformly:
    *
    * 1. Direct children of `rootId` are enumerated — any card whose
-   *    `microLocation === rootId` AND state is `ON_ROOT` or `SLOT` AND
-   *    `getStackDirection` matches.
-   * 2. Each direct child gets a chain index: state-2 reads the
-   *    `position` field; state-1 directly on root sits at chain index 1
-   *    (one hop above root).
-   * 3. Direct children sort by chain index ascending.
-   * 4. For each direct child in order, push to the result and
+   *    `microLocation === rootId`. For each, the chain index is:
+   *    - `STACKED_ON_ROOT` (state 2): reads the `position` field, and
+   *      filters by `getStackDirection` matching the requested direction.
+   *    - `STACKED_SLOT` (state 1): chain index 1, filtered by
+   *      direction.
+   *    - `STACKED_ON_HEX` (state 3): chain index 1, NO direction
+   *      filter — a rect mounted on a hex root has no per-direction
+   *      semantics and is the first chain member for both up- and
+   *      down-walks. State-3's microZone bit 2 is part of the legacy
+   *      localR field, not a direction bit, so reading it as direction
+   *      would give nonsense.
+   * 2. Direct children sort by chain index ascending.
+   * 3. For each direct child in order, push to the result and
    *    recursively append its state-1 sub-chain (cards whose
    *    `microLocation === thisCard`, state `SLOT`, direction matches —
    *    walking parent-pointer style until a leaf).
    *
    * The result is the visual chain: every member from `rootId` outward,
-   * regardless of how state-1 islands and state-2 chunks interleave.
-   * Sparse state-2 positions appear as gaps in chain index space — the
-   * matcher treats them like any other chain (recipes that need
-   * contiguity won't match across gaps).
+   * regardless of how state-1 islands, state-2 chunks, and state-3
+   * mounts interleave. Sparse state-2 positions appear as gaps in chain
+   * index space — the matcher treats them like any other chain (recipes
+   * that need contiguity won't match across gaps).
    *
    * Use this for any "what cards are in the chain in order" question.
    * The back-pointer cache (`stackedTop` / `stackedBottom`) is not
@@ -715,15 +720,30 @@ export class CardManager {
     const direct: { card: Card; chainIdx: number }[] = [];
     for (const [id, row] of this.ctx.data.cardsLocal) {
       if (row.microLocation !== rootId) continue;
-      if (getStackDirection(row.microZone) !== direction) continue;
       const state = getStackedState(row.microZone);
-      if (state !== STACKED_ON_ROOT && state !== STACKED_SLOT) continue;
+
+      let chainIdx: number;
+      if (state === STACKED_ON_HEX) {
+        // Rect mounted on a hex root. The mount has no direction of
+        // its own — the mounted rect is the first chain member for
+        // BOTH up- and down-walks off this root. State-3's microZone
+        // bit 2 is part of the legacy localR field, not a direction
+        // bit, so we don't filter it. The recursion below picks up
+        // only state-1 children of the mount in the requested
+        // direction.
+        chainIdx = 1;
+      } else if (state === STACKED_ON_ROOT) {
+        if (getStackDirection(row.microZone) !== direction) continue;
+        chainIdx = getStackPosition(row.microZone);
+      } else if (state === STACKED_SLOT) {
+        if (getStackDirection(row.microZone) !== direction) continue;
+        chainIdx = 1; // state-1 directly on root sits at chain index 1
+      } else {
+        continue;
+      }
+
       const card = this.cards.get(id);
       if (!card) continue;
-      const chainIdx =
-        state === STACKED_ON_ROOT
-          ? getStackPosition(row.microZone)
-          : 1; // state-1 directly on root sits at chain index 1
       direct.push({ card, chainIdx });
     }
     direct.sort((a, b) => a.chainIdx - b.chainIdx);

@@ -20,7 +20,7 @@ const FALLBACK_NAME  = "?";
  */
 export class RectCardVisual extends Container {
   private readonly bg = new Graphics();
-  private readonly cardOutline = new Graphics();
+  readonly cardOutline = new Graphics();
   readonly nameText: Text;
 
   constructor() {

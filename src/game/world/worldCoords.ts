@@ -1,6 +1,6 @@
-import type { Zone } from "../server/spacetime/bindings/types";
-import { DefinitionManager, type CardDefinition } from "../game/definitions/DefinitionManager";
-import { debug } from "../debug";
+import type { Zone } from "../../server/spacetime/bindings/types";
+import { DefinitionManager, type CardDefinition } from "../definitions/DefinitionManager";
+import { debug } from "../../debug";
 
 /**
  * Each Zone covers an 8×8 block of hex positions.
@@ -15,7 +15,7 @@ export const TILE_SIZE = 80;
 /** `WORLD_LAYER` is a server-protocol constant — its canonical home is
  *  `server/data/packing`. Re-exported here for game-code callers that
  *  already import other world-coord helpers from this module. */
-export { WORLD_LAYER } from "../server/data/packing";
+export { WORLD_LAYER } from "../../server/data/packing";
 
 // Server packs macro_zone as: ((zone_q as i16 as u16) << 16) | (zone_r as i16 as u16)
 // where zone_q/zone_r are the chunk indices (signed, not biased).
@@ -44,6 +44,10 @@ export interface ZoneTile {
   q: number;
   r: number;
   definition: CardDefinition;
+  /** Packed `(typeId, categoryId, definitionId)` — recomputed alongside
+   *  the definition lookup so callers (LayoutWorld) can pass it to
+   *  `TextureManager.getHexTexture(def, packed)` without re-packing. */
+  packed: number;
 }
 
 /**
@@ -87,7 +91,7 @@ export function decodeZoneTiles(
         missCount++;
         continue;
       }
-      result.push({ q: zoneQ + byteIndex, r: zoneR + tIndex, definition: def });
+      result.push({ q: zoneQ + byteIndex, r: zoneR + tIndex, definition: def, packed });
     }
   }
 

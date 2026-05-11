@@ -12,6 +12,7 @@ import { ConnectionManager } from "./server/spacetime/ConnectionManager";
 import { ReducerManager } from "./server/spacetime/ReducerManager";
 import { DataManager } from "./server/data/DataManager";
 import { ZoneManager } from "./game/zones/ZoneManager";
+import { unpackZoneId, WORLD_LAYER } from "./server/data/packing";
 
 interface Runtime {
   app: Application;
@@ -74,16 +75,47 @@ async function main(): Promise<Runtime> {
   // anything waiting on `current` (e.g. PlayerManager.waitForPlayer) hangs.
   app.ticker.add(() => data.promote(Date.now() / 1000));
 
-  // Drive per-zone SDK subscriptions off the ZoneManager refcount. Anything
-  // that calls `zones.ensure(zoneId)` (GameScene for the inventory zone, etc.)
-  // bumps the zone to "active" → we open the matching `cards` subscription so
-  // the server starts pushing rows. Mirror unsubscribe on removed.
-  zones.onAdded("active", (zoneId) => {
-    void data.subscriptions.subscribeCards(zoneId);
-  });
-  zones.onRemoved("active", (zoneId) => {
-    data.subscriptions.unsubscribeCards(zoneId);
-  });
+  // Drive per-zone SDK subscriptions off the ZoneManager refcount.
+  // Anything that calls `zones.ensure(zoneId)` (GameScene for the
+  // inventory zone) or that ZoneManager's anchor-driven recompute
+  // adds (world zones around each anchor) bumps the zone to "active"
+  // → we open the matching SDK subscription so the server starts
+  // pushing rows.
+  //
+  // Two flavors, branched on the zoneId's layer:
+  //
+  //  - World zones (`layer >= WORLD_LAYER`): subscribeWorldZone pulls
+  //    both the `zones` row (tile data for LayoutWorld) AND world-
+  //    surface `cards` for that macro_zone. Pulling just
+  //    `subscribeCards` leaves the tile grid empty because the
+  //    `zones` table never gets data.
+  //  - Inventory / non-world zones: subscribeCards pulls cards for
+  //    `(macro_zone, surface)`. No `zones` row to fetch.
+  const subscribeZone = (zoneId: number) => {
+    const { macroZone, layer } = unpackZoneId(zoneId);
+    if (layer >= WORLD_LAYER) {
+      void data.subscriptions.subscribeWorldZone(macroZone);
+    } else {
+      void data.subscriptions.subscribeCards(zoneId);
+    }
+  };
+  const unsubscribeZone = (zoneId: number) => {
+    const { macroZone, layer } = unpackZoneId(zoneId);
+    if (layer >= WORLD_LAYER) {
+      data.subscriptions.unsubscribeWorldZone(macroZone);
+    } else {
+      data.subscriptions.unsubscribeCards(zoneId);
+    }
+  };
+  // Catch zones already in "active" — ZoneManager's constructor runs
+  // `recomputeWorldZones` and seeds the active tier before any listener
+  // can register. `onAdded` does NOT replay existing entries, so a
+  // listener registered after construction would miss everything that
+  // landed during construction. Iterate the initial set explicitly,
+  // then subscribe for future additions.
+  for (const zoneId of zones.zonesIn("active")) subscribeZone(zoneId);
+  zones.onAdded("active", subscribeZone);
+  zones.onRemoved("active", unsubscribeZone);
 
   const playerSession = new PlayerManager(connection, data);
 

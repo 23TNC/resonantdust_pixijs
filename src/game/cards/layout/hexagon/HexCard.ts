@@ -22,8 +22,11 @@ import {
   HEX_WIDTH,
 } from "./HexVisual";
 import { LayoutCard } from "../CardLayout";
-// World helpers (unpackMacroZone, WORLD_LAYER) live in `server/data/packing`
-// — re-import there when world tier is restored.
+import {
+  unpackMacroZone,
+  unpackMicroZone,
+  WORLD_LAYER,
+} from "../../../../server/data/packing";
 
 export { HEX_HEIGHT, HEX_RADIUS, HEX_WIDTH } from "./HexVisual";
 
@@ -122,9 +125,23 @@ export class LayoutHexCard extends LayoutCard {
       this.invalidate();
     }
 
-    // World-tier positioning branch stripped — when world returns, route
-    // `row.surface >= WORLD_LAYER` here (using `unpackMacroZone(row.macroZone)`
-    // + the local-q/local-r fields packed into `row.microZone`).
+    // World-surface positioning: hex cards on `surface >= WORLD_LAYER`
+    // sit at world hex `(zoneQ + localQ, zoneR + localR)`. The `macro_zone`
+    // u32 packs the chunk coordinates; `micro_zone` carries local q/r
+    // in its legacy u3 fields. Convert to the pixel offset from the
+    // world origin (which is where `LayoutWorld.worldCardSurface` is
+    // positioned), then center the card on its hex by subtracting
+    // half-width / half-height.
+    if (row.surface >= WORLD_LAYER) {
+      const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
+      const { localQ, localR } = unpackMicroZone(row.microZone);
+      const q = zoneQ + localQ;
+      const r = zoneR + localR;
+      const px = HEX_RADIUS * (Math.sqrt(3) * q + (Math.sqrt(3) / 2) * r);
+      const py = HEX_RADIUS * ((3 / 2) * r);
+      this.setTarget(px - HEX_WIDTH / 2, py - HEX_HEIGHT / 2);
+      return;
+    }
 
     const stacked = getStackedState(row.microZone);
     if (stacked === STACKED_LOOSE) {

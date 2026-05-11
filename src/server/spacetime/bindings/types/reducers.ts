@@ -7,10 +7,12 @@ import { type Infer as __Infer } from "spacetimedb";
 
 // Import all reducer arg schemas
 import AddCardReducer from "../add_card_reducer";
+import BootstrapReducer from "../bootstrap_reducer";
 import ClaimOrLoginReducer from "../claim_or_login_reducer";
 import ProposeActionReducer from "../propose_action_reducer";
 
 export type AddCardParams = __Infer<typeof AddCardReducer>;
+export type BootstrapParams = __Infer<typeof BootstrapReducer>;
 export type ClaimOrLoginParams = __Infer<typeof ClaimOrLoginReducer>;
 export type ProposeActionParams = __Infer<typeof ProposeActionReducer>;
 

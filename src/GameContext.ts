@@ -13,7 +13,8 @@ import type { SceneManager } from "./scenes/SceneManager";
 import type { ConnectionManager } from "./server/spacetime/ConnectionManager";
 import type { ReducerManager } from "./server/spacetime/ReducerManager";
 import type { DataManager } from "./server/data/DataManager";
-// import type { LayoutWorld } from "./world/LayoutWorld";
+// LayoutWorld is owned by GameLayout; world consumers reach the
+// world-card surface via `ctx.layout.surfaceFor(zoneId)`.
 import type { ZoneManager } from "./game/zones/ZoneManager";
 
 export interface GameContext {

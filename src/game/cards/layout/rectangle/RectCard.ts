@@ -61,6 +61,18 @@ export const RECT_CARD_TITLE_HEIGHT = 24;
 
 export type RectCardTitlePosition = "top" | "bottom";
 
+/** One stacked progress bar in the title area. `fraction` is the fill
+ *  amount in `[0, 1]`; `style` is the `progress_style` u3 (1 = ltr,
+ *  2 = rtl); `leftColor` is the fill color; `heightCap` (optional) is
+ *  the maximum bar height as a fraction of `RECT_CARD_TITLE_HEIGHT`,
+ *  shrinking the bar within its `1/N` slot when the cap is tighter. */
+interface ProgressBarSpec {
+  fraction: number;
+  style: number;
+  leftColor: number;
+  heightCap?: number;
+}
+
 export class GameRectCard extends GameCard {
   private stackedState = 0;
   private microLocation = 0;
@@ -121,11 +133,14 @@ export class LayoutRectCard extends LayoutCard {
     // progressBar paints over the title bar to show the
     // ActionManager debounce countdown — between rectVisual (so it
     // covers the title fill) and nameText (so the name stays
-    // readable). stateOverlay draws hover/pending indicators above
+    // readable). cardOutline and nameText are re-parented above the
+    // progress bars so the outline isn't overlapped at the title-bar
+    // edges. stateOverlay draws hover/pending indicators above
     // everything.
     this.visual.addChild(this.rectVisual);
     this.visual.addChild(this.progressBar);
     this.visual.addChild(this.rectVisual.nameText);
+    this.visual.addChild(this.rectVisual.cardOutline);
     this.visual.addChild(this.stateOverlay);
     this.container.addChild(this.deathMask);
     this.container.addChild(this.visual);
@@ -235,48 +250,73 @@ export class LayoutRectCard extends LayoutCard {
 
     this.rectVisual.draw(def, this.titlePosition);
 
-    // Progress bar: prefer the server-side recipe indicator over the
-    // client-side debounce indicator (last-write-wins; the local row's
-    // `progress` array is populated by `mirrorCard` whenever a future
-    // `progress_style`-bearing row is in `cards.server`). Today we
-    // render the first entry only — the array is forward-looking for
-    // multi-event stacking.
+    // Progress bars: stack server-side recipe indicators (from the
+    // local row's `progress` array, populated by `mirrorCard` from
+    // future `progress_style`-bearing rows in `cards.server`) followed
+    // by the client-side action-debounce indicator. Each bar gets an
+    // equal `1/N` slot of the title bar height; a per-bar `heightCap`
+    // shrinks an individual bar within its slot (the unused space at
+    // the slot's outer edge falls back to the title-bar color
+    // underneath). Bars stack from the inside edge of the title (the
+    // edge against the card body) outward, so the first spec sits
+    // closest to the body.
     //
     // Style codes (`progress_style` u3 from `flags`):
     //   1 = ltr / cw default — fill from left to right
     //   2 = rtl / ccw default — fill from right to left
     // 3..=7 are reserved for future variants.
     this.progressBar.clear();
+    const titleColor = def?.style[1] ?? "#7a7a8a";
+    const specs: ProgressBarSpec[] = [];
     const local = this.ctx.data.cardsLocal.get(this.cardId);
-    const serverProgress = local?.progress?.[0];
-    let fraction: number | null = null;
-    let style: number = 1;
-    if (serverProgress !== undefined) {
-      const span = serverProgress.endSecs - serverProgress.startSecs;
-      if (span > 0) {
-        const elapsed = Date.now() / 1000 - serverProgress.startSecs;
-        fraction = Math.max(0, Math.min(1, elapsed / span));
-        style = serverProgress.style;
-      }
-    } else {
-      const debounce = this.ctx.actions?.progressFor(this.cardId) ?? null;
-      if (debounce !== null) {
-        fraction = debounce;
-        style = 1;
+    if (local?.progress) {
+      const nowSecs = Date.now() / 1000;
+      const serverFill = shiftLuminance(titleColor);
+      for (const sp of local.progress) {
+        const span = sp.endSecs - sp.startSecs;
+        if (span <= 0) continue;
+        const fraction = Math.max(0, Math.min(1, (nowSecs - sp.startSecs) / span));
+        specs.push({ fraction, style: sp.style, leftColor: serverFill });
       }
     }
-    if (fraction !== null) {
-      const titleColor = def?.style[1] ?? "#7a7a8a";
-      const fillColor = shiftLuminance(titleColor);
+    const debounce = this.ctx.actions?.progressFor(this.cardId) ?? null;
+    if (debounce !== null) {
+      specs.push({
+        fraction: debounce,
+        style: 1,
+        leftColor: 0xffffff,
+        heightCap: 0.3,
+      });
+    }
+    if (specs.length > 0) {
       const titleY = this.titlePosition === "top"
         ? 0
         : this.height - RECT_CARD_TITLE_HEIGHT;
-      const fillW = this.width * fraction;
-      if (fillW > 0) {
-        const fillX = style === 2 ? this.width - fillW : 0;
-        this.progressBar
-          .rect(fillX, titleY, fillW, RECT_CARD_TITLE_HEIGHT)
-          .fill({ color: fillColor });
+      const slotHeight = RECT_CARD_TITLE_HEIGHT / specs.length;
+      // Inside edge of the title bar = the edge facing the card body.
+      // For top-position titles that's the bottom of the title bar; for
+      // bottom-position titles it's the top.
+      const insideEdge = this.titlePosition === "top"
+        ? titleY + RECT_CARD_TITLE_HEIGHT
+        : titleY;
+      const stackDir = this.titlePosition === "top" ? -1 : 1;
+      let offset = 0;
+      for (const spec of specs) {
+        const cap = spec.heightCap !== undefined
+          ? RECT_CARD_TITLE_HEIGHT * spec.heightCap
+          : slotHeight;
+        const barHeight = Math.min(slotHeight, cap);
+        // Anchor each bar to the inside edge of its slot.
+        const slotInside = insideEdge + stackDir * offset;
+        const barY = stackDir < 0 ? slotInside - barHeight : slotInside;
+        const fillW = this.width * spec.fraction;
+        if (fillW > 0 && barHeight > 0) {
+          const fillX = spec.style === 2 ? this.width - fillW : 0;
+          this.progressBar
+            .rect(fillX, barY, fillW, barHeight)
+            .fill({ color: spec.leftColor });
+        }
+        offset += slotHeight;
       }
     }
 
@@ -349,9 +389,9 @@ export class LayoutRectCard extends LayoutCard {
       }
     }
     const moving = this.tweenTo(effX, effY);
-    // Re-run next frame while progress is mid-fill so the bar
-    // animates smoothly rather than only updating on data changes.
-    const showingProgress = fraction !== null && fraction < 1;
+    // Re-run next frame while any progress is mid-fill so the bars
+    // animate smoothly rather than only updating on data changes.
+    const showingProgress = specs.some((s) => s.fraction < 1);
     return this.state.dragging || moving || this.dying || showingProgress;
   }
 
