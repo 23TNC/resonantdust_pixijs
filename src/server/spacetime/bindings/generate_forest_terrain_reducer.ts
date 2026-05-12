@@ -10,4 +10,7 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default {};
+export default {
+  seed: __t.u64(),
+  radius: __t.i16(),
+};

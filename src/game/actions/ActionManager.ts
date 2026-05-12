@@ -309,25 +309,33 @@ export class ActionManager {
 
       // Phase 2 — rootless firsts. Skipped when R is held (a prior
       // match already consumed R as a slot, so it can't appear again).
+      //
+      // Fires even when the corresponding `firstSubChain` is null or
+      // empty: in that case `subChainCards = []` and tryMatch will
+      // prepend the rootCard to produce `slotCards = [R]`. This lets
+      // recipes whose slot list is satisfied by R alone (e.g. a
+      // recipe with `hex: [rock], slots: [corpus]` against a corpus
+      // dropped on an empty rock world tile — the corpus is itself
+      // the virtual world hex root, no chain members above or
+      // below) match correctly. Without this, evaluation would skip
+      // every phase and the recipe would never fire.
       if (!isHeld(looseRoot)) {
-        if (top.firstSubChain && top.firstSubChain.length > 0) {
-          if (this.tryMatch({
-            subChainCards: top.firstSubChain,
-            fullChain: topChain,
-            rootCard: looseRoot, rootDef, hexDef, hexParentId,
-            looseRootId, direction: "up", rootless: true,
-            inPassHeld, wanted,
-          })) continue phaseLoop;
-        }
-        if (bot.firstSubChain && bot.firstSubChain.length > 0) {
-          if (this.tryMatch({
-            subChainCards: bot.firstSubChain,
-            fullChain: botChain,
-            rootCard: looseRoot, rootDef, hexDef, hexParentId,
-            looseRootId, direction: "down", rootless: true,
-            inPassHeld, wanted,
-          })) continue phaseLoop;
-        }
+        const topFirst = top.firstSubChain ?? [];
+        if (this.tryMatch({
+          subChainCards: topFirst,
+          fullChain: topChain,
+          rootCard: looseRoot, rootDef, hexDef, hexParentId,
+          looseRootId, direction: "up", rootless: true,
+          inPassHeld, wanted,
+        })) continue phaseLoop;
+        const botFirst = bot.firstSubChain ?? [];
+        if (this.tryMatch({
+          subChainCards: botFirst,
+          fullChain: botChain,
+          rootCard: looseRoot, rootDef, hexDef, hexParentId,
+          looseRootId, direction: "down", rootless: true,
+          inPassHeld, wanted,
+        })) continue phaseLoop;
       }
 
       // Phase 3+ — rooted subsequents, interleaved by sub-chain index
@@ -488,6 +496,23 @@ export class ActionManager {
     // would inherit the same constraint.)
     if (match.hasRoot && rootDist + consumed.length > MAX_PIN_DEPTH) {
       return false;
+    }
+
+    // Defensive: reject any match whose `consumed` set touches a
+    // server-held or in-pass-held card. `splitChainByHeld` already
+    // filters held cards out of `subChainCards`, but `rootCard`
+    // (looseRoot R) is passed separately and is NOT filtered. For a
+    // rootless recipe matched via a "rooted" attempt the matcher's
+    // window can start at `slotStart = 0`, consuming R at the head —
+    // if R is held (because it's already an actor in an in-flight
+    // recipe like a corpus+corpus mid-action), claiming it again is
+    // a bug. Same guard for `inPassHeld` covers the case where an
+    // earlier match in this same evaluation pass already claimed
+    // the card.
+    for (const c of consumed) {
+      if (inPassHeld.has(c.cardId) || this.serverHeld(c.cardId)) {
+        return false;
+      }
     }
 
     for (const c of consumed) {

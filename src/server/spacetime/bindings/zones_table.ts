@@ -16,6 +16,7 @@ export default __t.row({
   surface: __t.u8(),
   macroZone: __t.u32().name("macro_zone"),
   packedDefinition: __t.u8().name("packed_definition"),
+  ownerId: __t.u32().name("owner_id"),
   t0: __t.u64().name("t_0"),
   t1: __t.u64().name("t_1"),
   t2: __t.u64().name("t_2"),

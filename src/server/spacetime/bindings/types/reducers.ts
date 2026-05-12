@@ -9,12 +9,12 @@ import { type Infer as __Infer } from "spacetimedb";
 import AddCardReducer from "../add_card_reducer";
 import BootstrapReducer from "../bootstrap_reducer";
 import ClaimOrLoginReducer from "../claim_or_login_reducer";
+import GenerateForestTerrainReducer from "../generate_forest_terrain_reducer";
 import ProposeActionReducer from "../propose_action_reducer";
-import SyncTimeReducer from "../sync_time_reducer";
 
 export type AddCardParams = __Infer<typeof AddCardReducer>;
 export type BootstrapParams = __Infer<typeof BootstrapReducer>;
 export type ClaimOrLoginParams = __Infer<typeof ClaimOrLoginReducer>;
+export type GenerateForestTerrainParams = __Infer<typeof GenerateForestTerrainReducer>;
 export type ProposeActionParams = __Infer<typeof ProposeActionReducer>;
-export type SyncTimeParams = __Infer<typeof SyncTimeReducer>;
 

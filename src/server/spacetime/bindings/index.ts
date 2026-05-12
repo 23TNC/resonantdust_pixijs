@@ -37,13 +37,14 @@ import {
 import AddCardReducer from "./add_card_reducer";
 import BootstrapReducer from "./bootstrap_reducer";
 import ClaimOrLoginReducer from "./claim_or_login_reducer";
+import GenerateForestTerrainReducer from "./generate_forest_terrain_reducer";
 import ProposeActionReducer from "./propose_action_reducer";
-import SyncTimeReducer from "./sync_time_reducer";
 
 // Import all procedure arg schemas
 
 // Import all table schema definitions
 import CardsRow from "./cards_table";
+import MagneticActionsRow from "./magnetic_actions_table";
 import PlayersRow from "./players_table";
 import ZonesRow from "./zones_table";
 
@@ -71,6 +72,20 @@ const tablesSchema = __schema({
       { name: 'cards_valid_at_key', constraint: 'unique', columns: ['validAt'] },
     ],
   }, CardsRow),
+  magnetic_actions: __table({
+    name: 'magnetic_actions',
+    indexes: [
+      { accessor: 'anchor_card_id', name: 'magnetic_actions_anchor_card_id_idx_btree', algorithm: 'btree', columns: [
+        'anchorCardId',
+      ] },
+      { accessor: 'magnetic_id', name: 'magnetic_actions_magnetic_id_idx_btree', algorithm: 'btree', columns: [
+        'magneticId',
+      ] },
+    ],
+    constraints: [
+      { name: 'magnetic_actions_magnetic_id_key', constraint: 'unique', columns: ['magneticId'] },
+    ],
+  }, MagneticActionsRow),
   players: __table({
     name: 'players',
     indexes: [
@@ -115,8 +130,8 @@ const reducersSchema = __reducers(
   __reducerSchema("add_card", AddCardReducer),
   __reducerSchema("bootstrap", BootstrapReducer),
   __reducerSchema("claim_or_login", ClaimOrLoginReducer),
+  __reducerSchema("generate_forest_terrain", GenerateForestTerrainReducer),
   __reducerSchema("propose_action", ProposeActionReducer),
-  __reducerSchema("sync_time", SyncTimeReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

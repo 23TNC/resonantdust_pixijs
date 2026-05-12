@@ -23,6 +23,26 @@ export const Card = __t.object("Card", {
 });
 export type Card = __Infer<typeof Card>;
 
+export const CardIdCounter = __t.object("CardIdCounter", {
+  id: __t.u8(),
+  next: __t.u32(),
+});
+export type CardIdCounter = __Infer<typeof CardIdCounter>;
+
+export const MagneticAction = __t.object("MagneticAction", {
+  magneticId: __t.u64(),
+  anchorCardId: __t.u32(),
+  scheduledAt: __t.scheduleAt(),
+  outerRecipeId: __t.u16(),
+  successRecipeId: __t.u16(),
+  failureRecipeId: __t.u16(),
+  durationAt: __t.u32(),
+  delaySecs: __t.u32(),
+  callerPlayerId: __t.u32(),
+  pulledCards: __t.array(__t.u32()),
+});
+export type MagneticAction = __Infer<typeof MagneticAction>;
+
 export const Player = __t.object("Player", {
   validAt: __t.u64(),
   playerId: __t.u32(),
@@ -33,6 +53,12 @@ export const Player = __t.object("Player", {
   microLocation: __t.u32(),
 });
 export type Player = __Infer<typeof Player>;
+
+export const PlayerIdCounter = __t.object("PlayerIdCounter", {
+  id: __t.u8(),
+  next: __t.u32(),
+});
+export type PlayerIdCounter = __Infer<typeof PlayerIdCounter>;
 
 export const PlayerSession = __t.object("PlayerSession", {
   identity: __t.identity(),
@@ -60,6 +86,7 @@ export const Zone = __t.object("Zone", {
   surface: __t.u8(),
   macroZone: __t.u32(),
   packedDefinition: __t.u8(),
+  ownerId: __t.u32(),
   t0: __t.u64(),
   t1: __t.u64(),
   t2: __t.u64(),

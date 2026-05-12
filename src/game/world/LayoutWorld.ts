@@ -3,11 +3,7 @@ import type { GameContext } from "../../GameContext";
 import { LayoutNode } from "../layout/LayoutNode";
 import type { LayoutManager } from "../layout/LayoutManager";
 import { debug } from "../../debug";
-import {
-  HEX_HEIGHT,
-  HEX_RADIUS,
-  HEX_WIDTH,
-} from "../cards/layout/hexagon/HexVisual";
+import { WORLD_HEX_HEIGHT, WORLD_HEX_RADIUS, WORLD_HEX_WIDTH } from "./hexSize";
 import { EMPTY_TILE_PACKED } from "../../assets/TextureManager";
 import { decodeZoneTiles, unpackMacroZone, WORLD_LAYER } from "./worldCoords";
 import { unpackZoneId } from "../../server/data/packing";
@@ -184,8 +180,8 @@ export class LayoutWorld extends LayoutNode {
     const dq = q - this.viewQ;
     const dr = r - this.viewR;
     return {
-      x: this.width / 2 + HEX_RADIUS * (Math.sqrt(3) * dq + Math.sqrt(3) / 2 * dr),
-      y: this.height / 2 + HEX_RADIUS * (3 / 2 * dr),
+      x: this.width / 2 + WORLD_HEX_RADIUS * (Math.sqrt(3) * dq + Math.sqrt(3) / 2 * dr),
+      y: this.height / 2 + WORLD_HEX_RADIUS * (3 / 2 * dr),
     };
   }
 
@@ -195,8 +191,8 @@ export class LayoutWorld extends LayoutNode {
   localToWorld(localX: number, localY: number): { q: number; r: number } {
     const dx = localX - this.width / 2;
     const dy = localY - this.height / 2;
-    const fq = this.viewQ + dx / (HEX_RADIUS * Math.sqrt(3)) - dy / (3 * HEX_RADIUS);
-    const fr = this.viewR + (2 * dy) / (3 * HEX_RADIUS);
+    const fq = this.viewQ + dx / (WORLD_HEX_RADIUS * Math.sqrt(3)) - dy / (3 * WORLD_HEX_RADIUS);
+    const fr = this.viewR + (2 * dy) / (3 * WORLD_HEX_RADIUS);
     // Cube-coordinate rounding for the correct nearest-hex snap.
     const fx = fq;
     const fz = fr;
@@ -216,6 +212,11 @@ export class LayoutWorld extends LayoutNode {
   private acquireSprite(): Sprite {
     const s = this.spritePool.pop() ?? new Sprite(Texture.EMPTY);
     s.visible = true;
+    // Hex textures are baked at HEX_TEXTURE_* dimensions; rescale to
+    // the world display size every acquire (cheap, and lets a
+    // WORLD_HEX_* change take effect on the next layout pass without
+    // touching pooled sprites elsewhere).
+    s.setSize(WORLD_HEX_WIDTH, WORLD_HEX_HEIGHT);
     this.tileLayer.addChild(s);
     this.activeSprites.push(s);
     return s;
@@ -242,7 +243,7 @@ export class LayoutWorld extends LayoutNode {
     // Conservative ring radius: enough hex columns to cover the larger
     // of width / height plus a margin for half-tiles peeking in at the
     // edges. The +2 is a safety margin against rounding.
-    const range = Math.ceil(Math.max(w, h) / (HEX_RADIUS * Math.sqrt(3))) + 2;
+    const range = Math.ceil(Math.max(w, h) / (WORLD_HEX_RADIUS * Math.sqrt(3))) + 2;
     const baseQ = Math.round(this.viewQ);
     const baseR = Math.round(this.viewR);
 
@@ -255,8 +256,8 @@ export class LayoutWorld extends LayoutNode {
         // Cull off-screen hexes by their bounding box. A more precise
         // hex-vs-rect cull would be cheaper per-tile but more code; the
         // bounding box is fine at typical viewport sizes.
-        if (x + HEX_WIDTH / 2 < 0 || x - HEX_WIDTH / 2 > w) continue;
-        if (y + HEX_HEIGHT / 2 < 0 || y - HEX_HEIGHT / 2 > h) continue;
+        if (x + WORLD_HEX_WIDTH / 2 < 0 || x - WORLD_HEX_WIDTH / 2 > w) continue;
+        if (y + WORLD_HEX_HEIGHT / 2 < 0 || y - WORLD_HEX_HEIGHT / 2 > h) continue;
 
         const packed = this.tileData.get(`${q},${r}`);
         const sprite = this.acquireSprite();
@@ -269,7 +270,7 @@ export class LayoutWorld extends LayoutNode {
             EMPTY_TILE_PACKED,
           );
         }
-        sprite.position.set(x - HEX_WIDTH / 2, y - HEX_HEIGHT / 2);
+        sprite.position.set(x - WORLD_HEX_WIDTH / 2, y - WORLD_HEX_HEIGHT / 2);
       }
     }
 

@@ -1,4 +1,4 @@
-import { Container, Graphics, ParticleContainer } from "pixi.js";
+import { Container, Graphics, ParticleContainer, Text } from "pixi.js";
 import type { GameContext } from "../../../../GameContext";
 import type { Card as CardRow } from "../../../../server/spacetime/bindings/types";
 import type { LocalCard } from "../../../../server/data/DataManager";
@@ -14,7 +14,8 @@ import {
   STACKED_SLOT,
   type LooseXY,
 } from "../../cardData";
-import { HEX_HEIGHT, HEX_RADIUS, HEX_WIDTH } from "../hexagon/HexVisual";
+import { GameHexCard, LayoutHexCard } from "../hexagon/HexCard";
+import { WORLD_HEX_RADIUS } from "../../../world/hexSize";
 import { GameCard } from "../../game/CardGame";
 import { LayoutCard } from "../CardLayout";
 import { RectCardVisual } from "./RectVisual";
@@ -104,6 +105,20 @@ export class LayoutRectCard extends LayoutCard {
   private readonly rectVisual   = new RectCardVisual();
   private readonly progressBar  = new Graphics();
   private readonly stateOverlay = new Graphics();
+  /** Magnetic-anchor indicator — a tiny 🧲 in the corner of the card,
+   *  shown when `row.flags` has the `magnetic` bit (bit 12, declared
+   *  in `content/cards/flags.json`). Set by the server's
+   *  `magnetic::install` path on the anchor of an installed
+   *  on_create.magnetic recipe; signals "this card is acting as a
+   *  magnetic anchor and is pulling cards onto itself." Purely
+   *  cosmetic; the chain pulled by the magnetic action renders via
+   *  the normal rect-chain path (state-2 OnRoot, microLocation =
+   *  anchor_id) so no other rendering changes are needed.
+   *
+   *  Naming note: the Rust constant is `FLAG_MAGNETIC_HOLD`, but the
+   *  registry name in `flags.json` is `"magnetic"`. `hasCardFlag` is
+   *  keyed off the registry. */
+  private readonly magneticText: Text;
   private currentPackedDefinition: number | null = null;
   private titlePosition: RectCardTitlePosition = "top";
   private dying = false;
@@ -142,6 +157,16 @@ export class LayoutRectCard extends LayoutCard {
     this.visual.addChild(this.rectVisual.nameText);
     this.visual.addChild(this.rectVisual.cardOutline);
     this.visual.addChild(this.stateOverlay);
+    // Magnetic indicator — top-right anchored, hidden until the
+    // `magnetic` flag (bit 12) is observed on the row. Sits above
+    // stateOverlay so hover/pending outlines don't occlude it.
+    this.magneticText = new Text({
+      text: "🧲",
+      style: { fontSize: 14 },
+    });
+    this.magneticText.anchor.set(1, 0);
+    this.magneticText.visible = false;
+    this.visual.addChild(this.magneticText);
     this.container.addChild(this.deathMask);
     this.container.addChild(this.visual);
     this.setSize(RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
@@ -158,6 +183,13 @@ export class LayoutRectCard extends LayoutCard {
       this.currentPackedDefinition = row.packedDefinition;
       this.invalidate();
     }
+
+    // Magnetic anchor indicator visibility — toggled here so it reacts
+    // immediately to `magnetic` (bit 12) flips on the server row.
+    // Position is set in `layout()` once `titlePosition` is known.
+    const wasMagneticVisible = this.magneticText.visible;
+    this.magneticText.visible = this.ctx.definitions.hasCardFlag(row.flags, "magnetic");
+    if (wasMagneticVisible !== this.magneticText.visible) this.invalidate();
 
     // `dead === 1` is set by `DataManager.mirrorCard` when the server row's
     // FLAG_ACTION_DEAD bit is observed. Start the death animation once on
@@ -188,6 +220,7 @@ export class LayoutRectCard extends LayoutCard {
       // top/bottom stack host, so a single offset places it correctly
       // for either mode.
       const parentId = row.microLocation;
+      const parentCard = this.ctx.cards?.get(parentId) ?? null;
       if (!this.ctx.data.cardsLocal.get(parentId)) {
         // Defensive — `mirrorCard` already rewrites orphan state-1 at
         // the mirror boundary, but if a parent vanishes after the row
@@ -199,7 +232,24 @@ export class LayoutRectCard extends LayoutCard {
         });
         return;
       }
-      if (getStackDirection(row.microZone) === STACK_DIRECTION_UP) {
+      // Parent-shape-aware offset. For rect parents the chain peeks
+      // out from behind the parent body by one title-bar height
+      // (above for UP, below for DOWN), and the stack hosts are
+      // behind the parent so only the titlebar is visible. For hex
+      // parents the rect sits ON TOP of the hex centered on it —
+      // mimicking how a rect mounted via `hexMount` (state-3 OnHex)
+      // looks, but reached through the state-2 OnRoot path that
+      // magnetic-pulled cards land at. HexCard re-parents the stack
+      // hosts to render in front of the hex visual; here we just
+      // need the correct centering offset.
+      const parentIsHex = parentCard?.gameCard instanceof GameHexCard;
+      if (parentIsHex) {
+        this.setTitlePosition("top");
+        this.setTarget(
+          (LayoutHexCard.WIDTH - RECT_CARD_WIDTH) / 2,
+          (LayoutHexCard.HEIGHT - RECT_CARD_HEIGHT) / 2,
+        );
+      } else if (getStackDirection(row.microZone) === STACK_DIRECTION_UP) {
         this.setTitlePosition("top");
         this.setTarget(0, -RECT_CARD_TITLE_HEIGHT);
       } else {
@@ -212,8 +262,8 @@ export class LayoutRectCard extends LayoutCard {
         const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
         const q = zoneQ + ((row.microZone >> 5) & 0x7);
         const r = zoneR + ((row.microZone >> 2) & 0x7);
-        const x = HEX_RADIUS * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r);
-        const y = HEX_RADIUS * (3 / 2 * r);
+        const x = WORLD_HEX_RADIUS * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r);
+        const y = WORLD_HEX_RADIUS * (3 / 2 * r);
         this.setTitlePosition("top");
         this.setTarget(x - RECT_CARD_WIDTH / 2, y - RECT_CARD_HEIGHT / 2);
       } else {
@@ -228,8 +278,8 @@ export class LayoutRectCard extends LayoutCard {
         }
         this.setTitlePosition("top");
         this.setTarget(
-          (HEX_WIDTH  - RECT_CARD_WIDTH)  / 2,
-          (HEX_HEIGHT - RECT_CARD_HEIGHT) / 2,
+          (LayoutHexCard.WIDTH  - RECT_CARD_WIDTH)  / 2,
+          (LayoutHexCard.HEIGHT - RECT_CARD_HEIGHT) / 2,
         );
       }
     }
@@ -249,6 +299,15 @@ export class LayoutRectCard extends LayoutCard {
       : null;
 
     this.rectVisual.draw(def, this.titlePosition);
+
+    // Magnetic indicator: top-right of the card *body*, just below the
+    // title bar when title is on top, or just below the top edge when
+    // title is on bottom. Keeps it visible regardless of titlePosition
+    // and avoids overlapping the title bar / progress bars.
+    if (this.magneticText.visible) {
+      const bodyTopY = this.titlePosition === "top" ? RECT_CARD_TITLE_HEIGHT : 0;
+      this.magneticText.position.set(RECT_CARD_WIDTH - 2, bodyTopY + 2);
+    }
 
     // Progress bars: stack server-side recipe indicators (from the
     // local row's `progress` array, populated by `mirrorCard` from

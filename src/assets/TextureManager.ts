@@ -1,7 +1,7 @@
 import { Container, Rectangle, RenderTexture, Texture, type Renderer } from "pixi.js";
 import type { CardDefinition } from "../game/definitions/DefinitionManager";
 import { RectCardVisual } from "../game/cards/layout/rectangle/RectVisual";
-import { HexCardVisual, HEX_WIDTH, HEX_HEIGHT } from "../game/cards/layout/hexagon/HexVisual";
+import { HexCardVisual } from "../game/cards/layout/hexagon/HexVisual";
 import {
   RECT_CARD_WIDTH,
   RECT_CARD_HEIGHT,
@@ -14,6 +14,14 @@ const NULL_PACKED = 0x1FFFF;
 
 /** Packed sentinel for empty world tiles (definition_id 0 / unknown zone). */
 export const EMPTY_TILE_PACKED = 0x1FFFE;
+
+/** Size at which hex card textures are baked into the atlas. Consumers that
+ *  display a hex (LayoutWorld tile sprite, LayoutHexCard) scale the sprite
+ *  to their own display size; this constant only controls bake resolution
+ *  and atlas cell dimensions. */
+export const HEX_TEXTURE_RADIUS = 128;
+export const HEX_TEXTURE_WIDTH  = Math.sqrt(3) * HEX_TEXTURE_RADIUS;
+export const HEX_TEXTURE_HEIGHT = HEX_TEXTURE_RADIUS * 2;
 
 // Fake definition used to drive HexCardVisual when rendering empty world tiles.
 // secondary === primary so the inner band is invisible; name is blank.
@@ -149,14 +157,14 @@ export class TextureManager {
 
   // Staging visuals — one of each type, reused for every render-to-atlas call.
   private readonly rectStage = new RectCardVisual();
-  private readonly hexStage  = new HexCardVisual();
+  private readonly hexStage  = new HexCardVisual(HEX_TEXTURE_RADIUS);
 
   readonly atlasSize: number;
 
   constructor(renderer: Renderer) {
     this.atlasSize = queryMaxTextureSize(renderer);
     this.rectAtlas = new CardAtlas(renderer, RECT_CARD_WIDTH, RECT_CARD_HEIGHT, this.atlasSize);
-    this.hexAtlas  = new CardAtlas(renderer, HEX_WIDTH,      HEX_HEIGHT,       this.atlasSize);
+    this.hexAtlas  = new CardAtlas(renderer, HEX_TEXTURE_WIDTH, HEX_TEXTURE_HEIGHT, this.atlasSize);
   }
 
   /**

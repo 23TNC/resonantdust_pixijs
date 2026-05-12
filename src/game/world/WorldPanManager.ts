@@ -1,5 +1,5 @@
 import type { GameContext } from "../../GameContext";
-import { HEX_RADIUS } from "../cards/layout/hexagon/HexVisual";
+import { WORLD_HEX_RADIUS } from "./hexSize";
 import { LayoutWorld } from "./LayoutWorld";
 
 /**
@@ -21,10 +21,10 @@ import { LayoutWorld } from "./LayoutWorld";
  *   `subscribeWorldZone` / `unsubscribeWorldZone` SDK calls.
  *
  * Pan math: pointy-top hex to pixel is `(sqrt(3) * q + sqrt(3)/2 * r,
- * 3/2 * r) * HEX_RADIUS`. Inverting:
+ * 3/2 * r) * WORLD_HEX_RADIUS`. Inverting:
  *
- *   dr = (2/3) * dy / HEX_RADIUS
- *   dq = dx / (HEX_RADIUS * sqrt(3)) - dr / 2
+ *   dr = (2/3) * dy / WORLD_HEX_RADIUS
+ *   dq = dx / (WORLD_HEX_RADIUS * sqrt(3)) - dr / 2
  *
  * The pan moves the viewport in the opposite direction of the cursor
  * drag (grab-and-drag feel) — so `newAnchor = startAnchor - hexDelta`.
@@ -88,8 +88,8 @@ export class WorldPanManager {
     if (!input) return;
     const dx = input.lastPointer.x - this.startPointerX;
     const dy = input.lastPointer.y - this.startPointerY;
-    const dr = (2 / 3) * dy / HEX_RADIUS;
-    const dq = dx / (HEX_RADIUS * Math.sqrt(3)) - dr / 2;
+    const dr = (2 / 3) * dy / WORLD_HEX_RADIUS;
+    const dq = dx / (WORLD_HEX_RADIUS * Math.sqrt(3)) - dr / 2;
     // Subtract: the world moves with the cursor, so the viewport
     // anchor (which stays fixed under the cursor's start point)
     // shifts opposite to the cursor's pixel drag.

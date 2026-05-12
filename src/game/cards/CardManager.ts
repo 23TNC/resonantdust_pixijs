@@ -12,6 +12,7 @@ import {
 } from "../../server/data/packing";
 import { Card, type CardPositionState, type StackDirection } from "./Card";
 import { GameHexCard } from "./layout/hexagon/HexCard";
+import { RECT_CARD_TITLE_HEIGHT } from "./layout/rectangle/RectCard";
 import {
   clearStackedState,
   decodeLooseXY,
@@ -144,11 +145,19 @@ export class CardManager {
         1,
       );
 
+      // Visual-preservation: the chain member closest to the dying
+      // root was rendered ONE title-bar offset away (above for top,
+      // below for bottom), not AT the dying root's xy. Promote the
+      // first survivor at its previous visual position so the chain
+      // doesn't visibly collapse onto the dying card's spot.
+      // Subsequent members re-stack from there via state-1
+      // attachment which the layout engine offsets per chain index.
       let newRootId = 0;
       if (topMembers.length > 0) {
         newRootId = topMembers[0];
-        debug.log(["splice"], `[splice] promoting top[0]=${newRootId} to loose root at (${x},${y})`, 2);
-        this.setCardPosition(newRootId, { kind: "loose", x, y });
+        const promotedY = y - RECT_CARD_TITLE_HEIGHT;
+        debug.log(["splice"], `[splice] promoting top[0]=${newRootId} to loose root at (${x},${promotedY})`, 2);
+        this.setCardPosition(newRootId, { kind: "loose", x, y: promotedY });
         let parent = newRootId;
         for (let i = 1; i < topMembers.length; i++) {
           debug.log(["splice"], `[splice]   re-stack top[${i}]=${topMembers[i]} onto ${parent} dir=top`, 2);
@@ -157,8 +166,9 @@ export class CardManager {
         }
       } else if (bottomMembers.length > 0) {
         newRootId = bottomMembers[0];
-        debug.log(["splice"], `[splice] promoting bottom[0]=${newRootId} to loose root at (${x},${y})`, 2);
-        this.setCardPosition(newRootId, { kind: "loose", x, y });
+        const promotedY = y + RECT_CARD_TITLE_HEIGHT;
+        debug.log(["splice"], `[splice] promoting bottom[0]=${newRootId} to loose root at (${x},${promotedY})`, 2);
+        this.setCardPosition(newRootId, { kind: "loose", x, y: promotedY });
         let parent = newRootId;
         for (let i = 1; i < bottomMembers.length; i++) {
           debug.log(["splice"], `[splice]   re-stack bottom[${i}]=${bottomMembers[i]} onto ${parent} dir=bottom`, 2);
@@ -412,9 +422,28 @@ export class CardManager {
 
     const inheritorId = topChildId !== 0 ? topChildId : bottomChildId;
     const inheritorRow = this.ctx.data.cardsLocal.get(inheritorId);
+    // Visual-preservation: when the dying card is a LOOSE root, its
+    // state-1 child was rendered ONE title-bar offset away (above for
+    // top direction, below for bottom). Inheriting the dying card's
+    // raw `microLocation` byte-for-byte would teleport the child to
+    // the dying card's xy — a visible 24px jump. Instead, apply the
+    // chain offset so the child lands at its previous visual
+    // position. For non-LOOSE dying cards (mid-chain splice), the
+    // child takes the dying's slot directly (microLocation is a
+    // parent_id, not an xy) — no offset.
+    let inheritedMicroLocation = dyingRow.microLocation;
+    const dyingState = getStackedState(dyingRow.microZone);
+    if (dyingState === STACKED_LOOSE && inheritorRow !== undefined) {
+      const inheritorDir = getStackDirection(inheritorRow.microZone);
+      const { x, y } = decodeLooseXY(dyingRow.microLocation);
+      const dy = inheritorDir === STACK_DIRECTION_UP
+        ? -RECT_CARD_TITLE_HEIGHT
+        : RECT_CARD_TITLE_HEIGHT;
+      inheritedMicroLocation = encodeLooseXY(x, y + dy);
+    }
     debug.log(
       ["splice"],
-      `[splice] transplantSlotChildren dyingCard=${dyingCardId} topChild=${topChildId} bottomChild=${bottomChildId} inheritor=${inheritorId} (inheriting microZone=0x${dyingRow.microZone.toString(16)} microLocation=${dyingRow.microLocation} macroZone=${dyingRow.macroZone} surface=${dyingRow.surface})`,
+      `[splice] transplantSlotChildren dyingCard=${dyingCardId} topChild=${topChildId} bottomChild=${bottomChildId} inheritor=${inheritorId} (inheriting microZone=0x${dyingRow.microZone.toString(16)} microLocation=${inheritedMicroLocation}${inheritedMicroLocation !== dyingRow.microLocation ? ` (xy-offset from dying.microLocation=${dyingRow.microLocation})` : ""} macroZone=${dyingRow.macroZone} surface=${dyingRow.surface})`,
       2,
     );
     if (inheritorRow !== undefined) {
@@ -423,7 +452,7 @@ export class CardManager {
         macroZone:     dyingRow.macroZone,
         surface:       dyingRow.surface,
         microZone:     dyingRow.microZone,
-        microLocation: dyingRow.microLocation,
+        microLocation: inheritedMicroLocation,
       });
     }
 

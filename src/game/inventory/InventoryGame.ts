@@ -5,7 +5,7 @@ import {
   STACKED_ON_ROOT,
   STACKED_SLOT,
 } from "../cards/cardData";
-import { GameHexCard, HEX_HEIGHT, HEX_WIDTH } from "../cards/layout/hexagon/HexCard";
+import { GameHexCard } from "../cards/layout/hexagon/HexCard";
 import {
   GameRectCard,
   RECT_CARD_HEIGHT,
@@ -260,7 +260,7 @@ export class GameInventory {
     if (card.gameCard instanceof GameHexCard) {
       const pos = card.gameCard.getLoosePosition();
       if (!pos) return null;
-      return { x: pos.x, y: pos.y, w: HEX_WIDTH, h: HEX_HEIGHT };
+      return { x: pos.x, y: pos.y, w: GameHexCard.WIDTH, h: GameHexCard.HEIGHT };
     }
     return null;
   }

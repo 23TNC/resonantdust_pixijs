@@ -303,7 +303,19 @@ export class DataManager {
     // (macroZone = ownerId, surface = 1, state = STACKED_LOOSE) so
     // the card is visible and recoverable. Same recovery shape that
     // `CardManager.releaseSlotDescendants` uses on the splice path.
+    //
+    // **Gated on `prev === undefined`** — when the client already has
+    // a local row for this card, that overlay is the source of truth
+    // for the card's visual position (e.g. a splice transplanted the
+    // card to a real xy moments earlier). The orphan-fallback would
+    // clobber that with `microLocation: 0` → snap to inventory's
+    // top-left. The state-1 preserve gate below handles "server sent
+    // a stale chain reference, client owns position" correctly when
+    // prev exists, so we let it through. The (0, 0) fallback is
+    // strictly for the no-local-row case (initial sub / never-seen
+    // card whose first push is an orphan slot).
     const orphanSlot =
+      prev === undefined &&
       serverState === 1 /* STACKED_SLOT */ &&
       serverRow.microLocation !== change.key &&
       !this.cardsLocal.has(serverRow.microLocation);
@@ -376,6 +388,24 @@ export class DataManager {
     // is forward-looking: a later iteration can return all matching
     // rows for stacked indicators.
     const progress = this.scanProgress(change.key, baseRow);
+    // Continuity carry: when an intermediate row promotes for a card
+    // that's already mid-action (e.g. a magnetic commit's
+    // release+set_start row landing at `commit_at` between the
+    // initial pull row at `T` and the death row at `T + delay +
+    // inner.duration`), `scanProgress` re-anchors `startSecs` to the
+    // current row's `validAt` — which makes the rendered progress
+    // bar visibly reset. If the previous local row was already
+    // tracking a progress entry pointing at the same future event
+    // (same `endSecs` + `style`), keep that entry's `startSecs` so
+    // the bar's fraction grows monotonically across row transitions.
+    if (progress && prev?.progress) {
+      for (const p of progress) {
+        const carried = prev.progress.find(
+          (pp) => pp.endSecs === p.endSecs && pp.style === p.style,
+        );
+        if (carried) p.startSecs = carried.startSecs;
+      }
+    }
     const nextRow: LocalCard = {
       ...baseRow,
       ...(dead !== undefined ? { dead } : {}),

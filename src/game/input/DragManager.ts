@@ -1,3 +1,4 @@
+import type { Card as CardRow } from "../../server/spacetime/bindings/types";
 import type { Card, StackDirection } from "../cards/Card";
 import {
   STACK_DIRECTION_DOWN,
@@ -123,6 +124,15 @@ export class DragManager {
     offsetX: number,
     offsetY: number,
   ): void {
+    // Source-side `surface_locked` (content/cards/flags.json bit 2):
+    // the card may not be moved to a different `surface`. Same-surface
+    // drops (e.g. world tile → world tile, inventory stack → another
+    // inventory chain) are still allowed; only cross-layer moves get
+    // rejected. We snap back by returning early — the card has already
+    // had `setDragging(false)` called, so the next render frame puts
+    // it at its row's existing position.
+    const sourceRow = this.ctx.data.cardsLocal.get(card.cardId);
+
     // Stack onto another rect card if one is under the cursor. The dragged
     // card was parented to the hit-transparent overlay, so the up event's
     // hit-test fell through to whatever was beneath. Drop on a peeking title
@@ -134,7 +144,11 @@ export class DragManager {
     const rawTarget = this.targetCardFromHit(up.hit, card.cardId);
     const target = rawTarget && !this.targetBlocksDrop(rawTarget) ? rawTarget : null;
     if (target) {
+      const targetRow = this.ctx.data.cardsLocal.get(target.cardId);
       if (target.gameCard instanceof GameRectCard) {
+        if (sourceRow && targetRow && this.sourceLocksSurfaceChange(sourceRow, targetRow.surface)) {
+          return;
+        }
         const direction = this.directionFromCursor(up, target);
         if (this.wouldExceedChainDepth(card, target, direction)) {
           // Combined chain (target's existing chain in `direction`
@@ -149,6 +163,9 @@ export class DragManager {
       }
       if (target.gameCard instanceof GameHexCard) {
         if (target.stackedHex === 0) {
+          if (sourceRow && targetRow && this.sourceLocksSurfaceChange(sourceRow, targetRow.surface)) {
+            return;
+          }
           this.ctx.cards?.setCardPosition(card.cardId, {
             kind: "stacked",
             parentId: target.cardId,
@@ -166,6 +183,12 @@ export class DragManager {
     // signal that the drop point is in world coords.
     const worldDrop = this.resolveWorldDrop(up);
     if (worldDrop) {
+      // Every world-drop branch lands the card on `WORLD_LAYER`.
+      // Source-side `surface_locked` rejects cross-layer moves up
+      // front; same-surface (world → world) drops fall through.
+      if (sourceRow && this.sourceLocksSurfaceChange(sourceRow, WORLD_LAYER)) {
+        return;
+      }
       // World tiles can only hold one card chain at a time — if the
       // target tile already has an occupant, redirect the drop into a
       // stacking attempt onto that occupant. Prefer a rect occupant
@@ -318,7 +341,11 @@ export class DragManager {
     // encoded xy). The xy is the cursor's position translated into
     // the inventory surface's local coords.
     const row = this.ctx.data.cardsLocal.get(card.cardId);
-    if (row && row.surface >= WORLD_LAYER) {
+    if (
+      row
+      && row.surface >= WORLD_LAYER
+      && !this.sourceLocksSurfaceChange(row, 1)
+    ) {
       const invSurface = this.ctx.layout?.surfaceFor(packZoneId(row.ownerId, 1));
       if (invSurface) {
         const ig = invSurface.container.getGlobalPosition();
@@ -415,5 +442,24 @@ export class DragManager {
     const def = this.ctx.definitions;
     return def.hasCardFlag(row.flags, "drop_hold")
         || def.hasCardFlag(row.flags, "drop_locked");
+  }
+
+  /** True if the source card has `surface_locked` set AND the proposed
+   *  destination would change its `surface` field. Same-surface drops
+   *  return false even when the flag is set — `surface_locked` is only
+   *  about cross-layer moves (inventory ↔ world, etc.), not about
+   *  pinning the card to one specific tile / coordinate.
+   *
+   *  Used to gate every surface-changing branch in `handleRectDrop`
+   *  (stack-onto-rect, stack-onto-hex, world-tile drops) and the
+   *  world → inventory return path in `dropLoose`. On a reject the
+   *  caller simply returns; the card snaps back to its row's
+   *  existing position on the next render frame. */
+  private sourceLocksSurfaceChange(
+    sourceRow: CardRow,
+    destinationSurface: number,
+  ): boolean {
+    if (sourceRow.surface === destinationSurface) return false;
+    return this.ctx.definitions.hasCardFlag(sourceRow.flags, "surface_locked");
   }
 }
