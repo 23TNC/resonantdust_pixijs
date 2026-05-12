@@ -67,13 +67,15 @@ async function main(): Promise<Runtime> {
     },
   });
   const reducers = new ReducerManager(connection);
-  const data = new DataManager(connection);
+  const data = new DataManager(connection, reducers);
 
   // Per-frame promote: lifts elapsed `valid_at` rows from each table's
   // `server` map into `current` and fires `added`/`updated`/`removed` events
   // to subscribers. Without this, subscribers never see inbound data and
   // anything waiting on `current` (e.g. PlayerManager.waitForPlayer) hangs.
-  app.ticker.add(() => data.promote(Date.now() / 1000));
+  // `promote()` reads server time from `ReducerManager.serverNowSecs()`
+  // internally (re-baselined on every reducer commit) — see `DataManager.promote`.
+  app.ticker.add(() => data.promote());
 
   // Drive per-zone SDK subscriptions off the ZoneManager refcount.
   // Anything that calls `zones.ensure(zoneId)` (GameScene for the

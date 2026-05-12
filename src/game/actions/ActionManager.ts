@@ -8,6 +8,8 @@ import {
   STACKED_LOOSE,
   STACKED_ON_HEX,
 } from "../cards/cardData";
+import { WORLD_LAYER } from "../../server/data/packing";
+import { getZoneTileDef } from "../world/worldCoords";
 
 /** Defensive cap on the phase loop. Each iteration that finds a match
  *  adds at least one card to the in-pass held set, which is bounded by
@@ -218,23 +220,53 @@ export class ActionManager {
 
     const looseRoot = cards.get(looseRootId);
     const rootRow = this.ctx.data.cardsLocal.get(looseRootId);
-    if (
-      !looseRoot ||
-      !rootRow ||
-      getStackedState(rootRow.microZone) !== STACKED_LOOSE
-    ) {
+    if (!looseRoot || !rootRow) {
       this.dropClusterNonSubmitted(looseRootId, "loose root gone");
       return;
     }
 
-    const hexParentId =
-      getStackedState(rootRow.microZone) === STACKED_ON_HEX
-        ? rootRow.microLocation
-        : 0;
-    const hexDef =
-      hexParentId !== 0
-        ? this.ctx.data.cardsLocal.get(hexParentId)?.packedDefinition ?? 0
-        : 0;
+    // A "root" for matching is either:
+    //   - state-0 LOOSE — the standard inventory case, or
+    //   - state-3 ON_HEX with `microLocation == 0` on a world surface —
+    //     a card dropped on a world tile that has no hex Card row of its
+    //     own. The state-3 card itself becomes the matcher's root tier;
+    //     hex tier comes from the zone's tile data at the card's local
+    //     (q, r). `CardManager.rootOf` returns `cardId` for this case
+    //     (microLocation=0 has no parent to hop to), so it's already
+    //     surfacing here as the "loose root" from fireStackChange's
+    //     perspective.
+    const rootState = getStackedState(rootRow.microZone);
+    const isVirtualWorldHexRoot =
+      rootState === STACKED_ON_HEX &&
+      rootRow.microLocation === 0 &&
+      rootRow.surface >= WORLD_LAYER;
+    if (rootState !== STACKED_LOOSE && !isVirtualWorldHexRoot) {
+      this.dropClusterNonSubmitted(looseRootId, "root not loose or virtual world hex");
+      return;
+    }
+
+    // Hex tier resolution:
+    //   - Virtual world hex root: read the tile's def from the zones
+    //     table at the rect's (macro_zone, localQ, localR).
+    //     `hexParentId` stays 0 because there is no Card row — server-
+    //     side `propose_action` will see `hex=0` and consult its own
+    //     zone table for the hex def at action-fire time (or skip the
+    //     hex constraint when the matched recipe doesn't require one).
+    //   - Otherwise: no hex tier. Inventory chains never have a hex
+    //     parent; if/when world hex Cards become roots themselves,
+    //     that path will need its own handling.
+    let hexParentId = 0;
+    let hexDef = 0;
+    if (isVirtualWorldHexRoot) {
+      const localQ = (rootRow.microZone >> 5) & 0x7;
+      const localR = (rootRow.microZone >> 2) & 0x7;
+      hexDef = getZoneTileDef(
+        this.ctx.data.zonesLocal,
+        rootRow.macroZone,
+        localQ,
+        localR,
+      );
+    }
     const rootDef = rootRow.packedDefinition;
 
     // Chains built once per evaluation. The held set grows as in-pass
@@ -606,7 +638,7 @@ export class ActionManager {
 
     debug.log(
       ["actions"],
-      `[ActionManager] attempting action: recipe=${action.recipeIndex} root=${root} hex=${hex} slots=[${slots.join(",")}] rootDist=${action.rootDist} dir=${action.direction}`,
+      `[ActionManager] attempting action: recipe=${action.recipeIndex} root=${root} hex=${hex} slots=[${slots.join(",")}] rootDist=${action.rootDist} dir=${action.direction} surface=${rootRow.surface} macroZone=${rootRow.macroZone} microZone=0x${rootRow.microZone.toString(16)} microLocation=${rootRow.microLocation}`,
       2,
     );
 
@@ -633,7 +665,7 @@ export class ActionManager {
       .then(() => {
         debug.log(
           ["actions"],
-          `[ActionManager] proposeAction accepted: recipe=${action.recipeIndex} key=${key}`,
+          `[ActionManager] proposeAction accepted: t=${(Date.now() / 1000).toFixed(3)} recipe=${action.recipeIndex} key=${key}`,
           2,
         );
         cleanup();

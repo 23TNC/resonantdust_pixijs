@@ -2,11 +2,16 @@ import { debug } from "../../debug";
 import type { GameContext } from "../../GameContext";
 import type { Card as CardRow } from "../../server/spacetime/bindings/types";
 import {
+  packMacroZone,
+  packMicroZone,
   packSlotMicroZone,
   packStackMicroZone,
+  WORLD_LAYER,
+  ZONE_SIZE,
   type ZoneId,
 } from "../../server/data/packing";
 import { Card, type CardPositionState, type StackDirection } from "./Card";
+import { GameHexCard } from "./layout/hexagon/HexCard";
 import {
   clearStackedState,
   decodeLooseXY,
@@ -93,6 +98,25 @@ export class CardManager {
     if (!card) return;
     const row = this.ctx.data.cardsLocal.get(cardId);
     if (!row) return;
+
+    // Invariant: splice only runs after the death animation has finished
+    // and the layout has written `dead: 2` to the local row. The dying-
+    // card stays in `cardsLocal` until the server reaps it; splice's
+    // chain-walking via `stackParentOf` filters out `dead === 2` cards
+    // so the still-present row can't masquerade as a chain sibling.
+    //
+    // Bailing here defensively catches any future call site that fires
+    // splice without going through the animation → set-dead-2 sequence.
+    // Without this guard, a premature splice would re-root survivors
+    // around a card that's still visually alive, corrupting the chain.
+    if (row.dead !== 2) {
+      debug.log(
+        ["splice"],
+        `[splice] refuse card=${cardId} dead=${row.dead ?? "undefined"} (expected 2); animation hasn't finished`,
+        0,
+      );
+      return;
+    }
 
     this.splicing.add(cardId);
     const state = getStackedState(row.microZone);
@@ -229,13 +253,32 @@ export class CardManager {
     } else if (state === STACKED_ON_HEX) {
       // Hex chains kept on the legacy parent-pointer model; the
       // back-pointer cache here is the source of truth.
+      //
+      // `stackedTop` / `stackedBottom` track the immediate child
+      // regardless of state (Card.setBackPointerOn fires for state-1,
+      // state-2, and state-3 children alike). For splice we ONLY want
+      // to re-anchor true state-2 OnRoot children via
+      // `setCardPosition`'s hex-direction branch — that path is
+      // designed for OnRoot chains and rewrites `microZone` via
+      // `setStackedState`, which would corrupt a state-1 SLOT child's
+      // tile coords (microZone bits 2..7 are the predecessor-pointer
+      // direction bit + zeros, not localQ/localR). State-1 children
+      // flow through `transplantSlotChildren` below, which inherits
+      // the dying card's microZone byte-for-byte and keeps the chain
+      // on its world tile.
       const hexId = row.microLocation;
-      const topId = card.stackedTop;
-      const bottomId = card.stackedBottom;
+      const topRow = card.stackedTop ? this.ctx.data.cardsLocal.get(card.stackedTop) : undefined;
+      const bottomRow = card.stackedBottom ? this.ctx.data.cardsLocal.get(card.stackedBottom) : undefined;
+      const topId = topRow && getStackedState(topRow.microZone) === STACKED_ON_ROOT
+        ? card.stackedTop
+        : 0;
+      const bottomId = bottomRow && getStackedState(bottomRow.microZone) === STACKED_ON_ROOT
+        ? card.stackedBottom
+        : 0;
       const hexChildId = card.stackedHex;
       debug.log(
         ["splice"],
-        `[splice] ON_HEX branch hexId=${hexId} topId=${topId} bottomId=${bottomId} hexChildId=${hexChildId}`,
+        `[splice] ON_HEX branch hexId=${hexId} topId=${topId} bottomId=${bottomId} hexChildId=${hexChildId} (raw stackedTop=${card.stackedTop} stackedBottom=${card.stackedBottom})`,
         1,
       );
       if (topId !== 0) {
@@ -553,10 +596,60 @@ export class CardManager {
         };
       }
     } else {
-      // World position — stripped while world tier is gone. Restore the
-      // packMacroZone / packMicroZone path from `server/data/packing` here
-      // when world returns.
-      return;
+      // World drop. The dropped card lands at world hex (q, r) on the
+      // world surface. Always state-3 (STACKED_ON_HEX) — even when no
+      // hex card actually exists at that tile, the rect card lives "on
+      // the hex tile" rather than being loose at a pixel coordinate.
+      //
+      //   surface       = WORLD_LAYER.
+      //   macro_zone    = packed (zoneQ, zoneR) where (zoneQ, zoneR) is
+      //                   the floor-to-ZONE_SIZE origin containing (q, r).
+      //   micro_zone    = packed (localQ, localR, STACKED_ON_HEX) where
+      //                   (localQ, localR) = (q - zoneQ, r - zoneR).
+      //   micro_location = card_id of the hex card at this tile if one
+      //                   exists in cardsLocal, else 0.
+      //
+      // `RectCard.applyData`'s STACKED_ON_HEX branch handles both
+      // micro_location cases (parent hex card → mount on its hexMount;
+      // micro_location == 0 → position from macro_zone + micro_zone
+      // bit-fields). When micro_location is 0, downstream code that
+      // needs the hex tile's definition (recipe matching, etc.) reads
+      // it from the `zones` table — the tile def is encoded in the
+      // zone row's `t0..t7` packed columns even when no Card row
+      // exists at that tile.
+      const zoneQ = Math.floor(state.q / ZONE_SIZE) * ZONE_SIZE;
+      const zoneR = Math.floor(state.r / ZONE_SIZE) * ZONE_SIZE;
+      const localQ = state.q - zoneQ;
+      const localR = state.r - zoneR;
+      const newMacroZone = packMacroZone(zoneQ, zoneR);
+      const newMicroZone = packMicroZone(localQ, localR, STACKED_ON_HEX);
+
+      // Find the hex card (if any) sitting at this tile. Search is
+      // O(cardsLocal.size) but fine — hex cards on a world surface
+      // are scarce relative to inventory cards, and this fires once
+      // per drop.
+      let hexParentId = 0;
+      for (const [id, r] of this.ctx.data.cardsLocal) {
+        if (id === cardId) continue;
+        if (r.surface !== WORLD_LAYER) continue;
+        if (r.macroZone !== newMacroZone) continue;
+        const otherLocalQ = (r.microZone >> 5) & 0x7;
+        const otherLocalR = (r.microZone >> 2) & 0x7;
+        if (otherLocalQ !== localQ || otherLocalR !== localR) continue;
+        const other = this.cards.get(id);
+        if (!other) continue;
+        if (!(other.gameCard instanceof GameHexCard)) continue;
+        hexParentId = id;
+        break;
+      }
+
+      newRow = {
+        ...row,
+        surface:       WORLD_LAYER,
+        macroZone:     newMacroZone,
+        microZone:     newMicroZone,
+        microLocation: hexParentId,
+      };
     }
     // Local-only write: store the new row in DataManager's local overlay.
     // The server tier (`data.cards.server` / `data.cards.current`) is left

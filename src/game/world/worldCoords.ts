@@ -100,6 +100,50 @@ export function decodeZoneTiles(
 }
 
 /**
+ * Pull a single tile's packed definition from the zone row covering
+ * `macro_zone`, at the local `(localQ, localR)` within that zone.
+ *
+ * Returns `0` when no zone row matches (subscription gap, off-map
+ * coords), the zone's tile byte at that position is `0` (empty slot),
+ * or the local coords are out of range. Callers should treat `0` as
+ * "no tile here" — same convention as `EMPTY_TILE_PACKED` rendering.
+ *
+ * The packing is the inverse of `decodeZoneTiles`'s per-tile loop:
+ *
+ *   typeId       = (zone.packedDefinition >> 4) & 0xF
+ *   categoryId   =  zone.packedDefinition       & 0xF
+ *   definitionId = byte localQ of t[localR]
+ *   result       = DefinitionManager.pack(typeId, categoryId, definitionId)
+ *
+ * Used by `ActionManager.evaluateRoot` to resolve the hex tier for a
+ * chain rooted at a state-3 card with no hex-Card parent — the recipe
+ * matcher needs the tile's def even when no Card row exists at that
+ * position.
+ */
+export function getZoneTileDef(
+  zonesLocal: ReadonlyMap<number, Zone>,
+  macroZone: number,
+  localQ: number,
+  localR: number,
+): number {
+  if (localQ < 0 || localQ > 7 || localR < 0 || localR > 7) return 0;
+  for (const zone of zonesLocal.values()) {
+    if (zone.macroZone !== macroZone) continue;
+    if (zone.surface < 64 /* WORLD_LAYER */) continue;
+    const typeId = (zone.packedDefinition >> 4) & 0xF;
+    const categoryId = zone.packedDefinition & 0xF;
+    const ts: bigint[] = [
+      zone.t0, zone.t1, zone.t2, zone.t3,
+      zone.t4, zone.t5, zone.t6, zone.t7,
+    ];
+    const definitionId = Number((ts[localR] >> BigInt(localQ * 8)) & 0xFFn);
+    if (definitionId === 0) return 0;
+    return DefinitionManager.pack(typeId, categoryId, definitionId);
+  }
+  return 0;
+}
+
+/**
  * All zone origins (multiples of ZONE_SIZE) that cover the hex area within
  * `radius` zone-rings of anchor hex position (aq, ar).
  */

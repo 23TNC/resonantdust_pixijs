@@ -38,6 +38,7 @@ import AddCardReducer from "./add_card_reducer";
 import BootstrapReducer from "./bootstrap_reducer";
 import ClaimOrLoginReducer from "./claim_or_login_reducer";
 import ProposeActionReducer from "./propose_action_reducer";
+import SyncTimeReducer from "./sync_time_reducer";
 
 // Import all procedure arg schemas
 
@@ -115,6 +116,7 @@ const reducersSchema = __reducers(
   __reducerSchema("bootstrap", BootstrapReducer),
   __reducerSchema("claim_or_login", ClaimOrLoginReducer),
   __reducerSchema("propose_action", ProposeActionReducer),
+  __reducerSchema("sync_time", SyncTimeReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

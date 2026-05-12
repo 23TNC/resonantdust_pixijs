@@ -30,6 +30,13 @@ export interface CardDefinition {
   style: readonly [string, string, string];
   /** `(aspectId, value)` pairs. */
   aspects: ReadonlyArray<readonly [number, number]>;
+  /** Bit-mask of flags carried by this definition, built from the JSON
+   *  card's `flags: string[]` array. Server-side `cards::create` ORs
+   *  this into every spawned card's `flags` column, so a despair card
+   *  spawns already drop-locked + surface-locked without any extra
+   *  call-site bookkeeping. Same `cards/flags.json` bit positions the
+   *  rest of the codebase uses. */
+  flags: number;
 }
 
 let initialized = false;

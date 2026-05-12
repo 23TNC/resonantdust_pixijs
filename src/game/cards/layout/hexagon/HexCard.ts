@@ -182,6 +182,12 @@ export class LayoutHexCard extends LayoutCard {
         this.dying = false;
         this.unsubDying?.();
         this.unsubDying = null;
+        // Mark the local row as "animation complete" BEFORE splice runs —
+        // mirrors RectCard's contract. `CardManager.spliceCard` now
+        // refuses to splice cards whose `dead !== 2`, so this write is
+        // load-bearing, not just hygiene.
+        const cur = this.ctx.data.cardsLocal.get(this.cardId);
+        if (cur) this.ctx.data.setLocalCard(this.cardId, { ...cur, dead: 2 });
         this.ctx.cards?.spliceCard(this.cardId);
         // TODO: `data.advanceCardDeath` is gone — wire to the new outbound
         // "death finished" signal once defined.

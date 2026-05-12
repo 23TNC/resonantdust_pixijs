@@ -270,7 +270,14 @@ export class LayoutRectCard extends LayoutCard {
     const specs: ProgressBarSpec[] = [];
     const local = this.ctx.data.cardsLocal.get(this.cardId);
     if (local?.progress) {
-      const nowSecs = Date.now() / 1000;
+      // Use the server-aligned clock — `sp.startSecs` / `sp.endSecs`
+      // are server `valid_at` values; comparing them to `Date.now()`
+      // when the client is behind the server makes the fraction
+      // negative (clamped to 0) until wall-clock catches up, freezing
+      // the bar visually. `ReducerManager.serverNowSecs()` interpolates
+      // from the last reducer-event timestamp forward, so the bar
+      // starts filling immediately on action commit.
+      const nowSecs = this.ctx.reducers.serverNowSecs();
       const serverFill = shiftLuminance(titleColor);
       for (const sp of local.progress) {
         const span = sp.endSecs - sp.startSecs;

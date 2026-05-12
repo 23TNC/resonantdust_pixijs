@@ -123,7 +123,17 @@ export class Card {
     ctx: GameContext,
     cardManager: CardManager,
   ): Card | null {
-    const row = ctx.data.cardsLocal.get(cardId);
+    // Prefer the server's promoted current row over the local overlay for
+    // first-time creation: `cardsLocal` is the result of mirror passes plus
+    // any client-side `setLocalCard` writes, which don't necessarily carry
+    // position fields forward across every write site (e.g. partial
+    // overlay updates). `data.cards.current` is the canonical server view
+    // for the now-promoted row, so it's the safer source for spawn-time
+    // shape + position reads. Fall back to `cardsLocal` only when the
+    // server tier hasn't surfaced the row yet (rare, but possible for
+    // client-only optimistic rows that haven't round-tripped).
+    const row =
+      ctx.data.cards.current.get(cardId) ?? ctx.data.cardsLocal.get(cardId);
     if (!row) {
       debug.warn(["cards"], `[Card] no row for card ${cardId}, skipping spawn`);
       return null;
@@ -160,7 +170,13 @@ export class Card {
     this.gameCard = gameCard;
     this.layoutCard = layoutCard;
 
-    const initialRow = ctx.data.cardsLocal.get(cardId);
+    // Source the initial row from `data.cards.current` (the server's
+    // promoted canonical row) rather than `cardsLocal`. See the
+    // `Card.create` docstring for the rationale — same reasoning
+    // applies here for position fields used to compute zoneId / parent
+    // / direction at spawn time.
+    const initialRow =
+      ctx.data.cards.current.get(cardId) ?? ctx.data.cardsLocal.get(cardId);
     this.currentZoneId = initialRow
       ? packZoneId(initialRow.macroZone, initialRow.surface)
       : Number.NaN;
@@ -170,11 +186,19 @@ export class Card {
       // so applyData's setTarget calls are interpreted in the correct coord
       // space. Orphan stacked cards (parent missing) get rewritten loose to
       // the owner's inventory and then attached there.
+      //
+      // Parent lookup still goes through `cardsLocal` because that's the
+      // tier game code reads to ask "where is card N?" — the local
+      // overlay carries client-side splice / fallback rewrites that the
+      // server's view doesn't.
       this.currentParentId = Card.stackParentOf(initialRow, ctx.data.cardsLocal);
       this.currentStackDirection = Card.stackDirectionOf(initialRow);
       let row: CardRow = initialRow;
       if (this.currentParentId !== 0 && !cardManager.get(this.currentParentId)) {
         this.fallbackToInventory(initialRow);
+        // `fallbackToInventory` writes through `setLocalCard`, so the
+        // post-fallback read must come from `cardsLocal` to pick up
+        // that rewrite — `cards.current` still has the orphan shape.
         row = ctx.data.cardsLocal.get(cardId) ?? initialRow;
         this.currentZoneId = packZoneId(row.macroZone, row.surface);
         this.currentParentId = 0;

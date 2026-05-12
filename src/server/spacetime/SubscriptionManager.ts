@@ -50,8 +50,24 @@ export class SubscriptionManager {
   private readonly subscriptions = new Map<string, ActiveSubscription>();
   private readonly handlers = new Map<TableName, Set<TableHandlers<any>>>();
   private readonly removeConnectionListener: () => void;
+  private readonly connection: ConnectionManager;
+  /** Called with the server's `Timestamp.microsSinceUnixEpoch` for every
+   *  row event whose `EventContext.event.tag === 'Reducer'`. Used by
+   *  `ReducerManager.noteServerTime` to keep the client's server-clock
+   *  estimate aligned with the server's wall clock — every reducer
+   *  commit re-baselines the offset. Subscription-applied /
+   *  unsubscribe-applied / error / transaction events carry no reducer
+   *  timestamp and are skipped. */
+  private readonly onReducerEvent?: (microsSinceUnixEpoch: bigint) => void;
 
-  constructor(private readonly connection: ConnectionManager) {
+  constructor(
+    connection: ConnectionManager,
+    options?: {
+      onReducerEvent?: (microsSinceUnixEpoch: bigint) => void;
+    },
+  ) {
+    this.connection = connection;
+    this.onReducerEvent = options?.onReducerEvent;
     this.removeConnectionListener = this.connection.addListener({
       onConnected: (conn) => {
         this.bindHandlers(conn);
@@ -293,37 +309,67 @@ export class SubscriptionManager {
 
   /** Bind one SDK callback per (table, event); fan-out to registered
    *  handlers happens inside. Called on every `onConnected` so each fresh
-   *  conn gets its own bindings. */
+   *  conn gets its own bindings.
+   *
+   *  Each callback first checks `ctx.event` for a Reducer-tagged event
+   *  and forwards its `timestamp` to `onReducerEvent` (the server-clock
+   *  hook). Non-reducer events (SubscribeApplied, Error, etc.) carry no
+   *  reducer timestamp and are skipped for that hook but still fan out
+   *  to table handlers normally. */
   private bindHandlers(conn: DbConnection): void {
-    conn.db.cards.onInsert((_ctx, row) =>
-      this.fanOut("cards", "onInsert", (h) => h.onInsert?.(row)),
-    );
-    conn.db.cards.onUpdate((_ctx, oldRow, newRow) =>
-      this.fanOut("cards", "onUpdate", (h) => h.onUpdate?.(oldRow, newRow)),
-    );
-    conn.db.cards.onDelete((_ctx, row) =>
-      this.fanOut("cards", "onDelete", (h) => h.onDelete?.(row)),
-    );
+    conn.db.cards.onInsert((ctx, row) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("cards", "onInsert", (h) => h.onInsert?.(row));
+    });
+    conn.db.cards.onUpdate((ctx, oldRow, newRow) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("cards", "onUpdate", (h) => h.onUpdate?.(oldRow, newRow));
+    });
+    conn.db.cards.onDelete((ctx, row) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("cards", "onDelete", (h) => h.onDelete?.(row));
+    });
 
-    conn.db.players.onInsert((_ctx, row) =>
-      this.fanOut("players", "onInsert", (h) => h.onInsert?.(row)),
-    );
-    conn.db.players.onUpdate((_ctx, oldRow, newRow) =>
-      this.fanOut("players", "onUpdate", (h) => h.onUpdate?.(oldRow, newRow)),
-    );
-    conn.db.players.onDelete((_ctx, row) =>
-      this.fanOut("players", "onDelete", (h) => h.onDelete?.(row)),
-    );
+    conn.db.players.onInsert((ctx, row) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("players", "onInsert", (h) => h.onInsert?.(row));
+    });
+    conn.db.players.onUpdate((ctx, oldRow, newRow) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("players", "onUpdate", (h) => h.onUpdate?.(oldRow, newRow));
+    });
+    conn.db.players.onDelete((ctx, row) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("players", "onDelete", (h) => h.onDelete?.(row));
+    });
 
-    conn.db.zones.onInsert((_ctx, row) =>
-      this.fanOut("zones", "onInsert", (h) => h.onInsert?.(row)),
-    );
-    conn.db.zones.onUpdate((_ctx, oldRow, newRow) =>
-      this.fanOut("zones", "onUpdate", (h) => h.onUpdate?.(oldRow, newRow)),
-    );
-    conn.db.zones.onDelete((_ctx, row) =>
-      this.fanOut("zones", "onDelete", (h) => h.onDelete?.(row)),
-    );
+    conn.db.zones.onInsert((ctx, row) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("zones", "onInsert", (h) => h.onInsert?.(row));
+    });
+    conn.db.zones.onUpdate((ctx, oldRow, newRow) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("zones", "onUpdate", (h) => h.onUpdate?.(oldRow, newRow));
+    });
+    conn.db.zones.onDelete((ctx, row) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("zones", "onDelete", (h) => h.onDelete?.(row));
+    });
+  }
+
+  /** Pull `ctx.event.value.timestamp.microsSinceUnixEpoch` and forward
+   *  it to `onReducerEvent` when present. Only Reducer-tagged events
+   *  carry a timestamp; everything else (SubscribeApplied,
+   *  UnsubscribeApplied, Error, Transaction) is a no-op here. Typed
+   *  loosely on `any` because the SDK's row-event callback `ctx` is
+   *  parametric over the remote module and the `Event` discriminated
+   *  union isn't easily narrowable through the generic. */
+  private captureReducerTimestamp(ctx: { event?: any }): void {
+    if (!this.onReducerEvent) return;
+    const event = ctx.event;
+    if (!event || event.tag !== "Reducer") return;
+    const micros = event.value?.timestamp?.microsSinceUnixEpoch;
+    if (typeof micros === "bigint") this.onReducerEvent(micros);
   }
 
   private fanOut<K extends TableName>(

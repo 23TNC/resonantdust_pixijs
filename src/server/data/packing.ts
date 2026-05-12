@@ -203,9 +203,9 @@ export function unpackStackMicroZone(microZone: number): {
  *  True iff the card is rect-stacked on inventory (state is
  *  `STACKED_ON_ROOT` AND `surface < WORLD_LAYER`). False for loose /
  *  on-hex / world-surface cards — those keep the legacy `(localQ,
- *  localR)` layout. `STACKED_SLOT` (state 1) is server-authoritative —
- *  the mirror's preserve gate doesn't fire for it, so it doesn't go
- *  through this discriminator either. */
+ *  localR)` layout. `STACKED_SLOT` (state 1) has its own preserve
+ *  branch in `mirrorCard` (same `force_position` gate as stack
+ *  layout); it doesn't go through this discriminator. */
 export function isStackLayout(stackedState: number, surface: number): boolean {
   return surface < WORLD_LAYER && stackedState === 2;
 }

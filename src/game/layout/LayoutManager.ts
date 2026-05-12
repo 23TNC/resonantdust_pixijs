@@ -1,4 +1,5 @@
 import type { LayoutNode } from "./LayoutNode";
+import type { LayoutWorld } from "../world/LayoutWorld";
 import type { ZoneId } from "../../server/data/packing";
 import { debug } from "../../debug";
 
@@ -21,6 +22,16 @@ export class LayoutManager {
    * the scene. GameScene wires this from `GameLayout.overlay` on enter.
    */
   overlay: LayoutNode | null = null;
+
+  /**
+   * The active scene's world view, when one exists. Mirrors `overlay`'s
+   * "scene-scoped, optional, set by GameScene on enter" pattern.
+   * Consumers like `DragManager.handleRectDrop` use it to:
+   *   - detect that a drop point landed inside the world (vs inventory),
+   *   - convert canvas-local drop coords to world hex (q, r) via
+   *     `worldView.localToWorld`.
+   */
+  worldView: LayoutWorld | null = null;
 
   private readonly surfaces = new Map<ZoneId, LayoutNode>();
   private readonly registerListeners = new Set<SurfaceListener>();
@@ -64,5 +75,6 @@ export class LayoutManager {
     this.surfaces.clear();
     this.registerListeners.clear();
     this.overlay = null;
+    this.worldView = null;
   }
 }

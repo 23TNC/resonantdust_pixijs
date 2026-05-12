@@ -8,6 +8,7 @@ import { LayoutCard } from "../cards/layout/CardLayout";
 import { GameRectCard } from "../cards/layout/rectangle/RectCard";
 import type { GameContext } from "../../GameContext";
 import type { LayoutNode } from "../layout/LayoutNode";
+import { packMacroZone, packZoneId, WORLD_LAYER } from "../../server/data/packing";
 import type { PointerEventData } from "./InputManager";
 
 /** Maximum allowed chain depth from root to leaf, exclusive of the
@@ -157,12 +158,132 @@ export class DragManager {
         }
       }
     }
-    // World surface drop stripped — when world tier returns, restore the
-    // `this.ctx.world` cursor-rect check + `card.setPosition({ kind: "world" })` path here.
+
+    // World drop. Check if the drop landed inside the world view. The
+    // hit-test usually resolves this for us — `LayoutWorld` returns
+    // itself for empty world space, and any card sitting on the
+    // world surface returns its own LayoutCard. We accept either as a
+    // signal that the drop point is in world coords.
+    const worldDrop = this.resolveWorldDrop(up);
+    if (worldDrop) {
+      // World tiles can only hold one card chain at a time — if the
+      // target tile already has an occupant, redirect the drop into a
+      // stacking attempt onto that occupant. Prefer a rect occupant
+      // (a rect mounted on the tile, possibly carrying a chain) over a
+      // hex Card occupant; CardManager.stack walks the rect's chain to
+      // the leaf and attaches there.
+      const occupant = this.findCardAtTile(worldDrop.q, worldDrop.r, card.cardId);
+      if (occupant && !this.targetBlocksDrop(occupant)) {
+        if (occupant.gameCard instanceof GameRectCard) {
+          const direction = this.directionFromCursor(up, occupant);
+          if (this.wouldExceedChainDepth(card, occupant, direction)) {
+            this.dropLoose(card, up, offsetX, offsetY);
+            return;
+          }
+          this.ctx.cards?.stack(card.cardId, occupant.cardId, direction);
+          return;
+        }
+        if (occupant.gameCard instanceof GameHexCard) {
+          if (occupant.stackedHex === 0) {
+            this.ctx.cards?.setCardPosition(card.cardId, {
+              kind: "stacked",
+              parentId: occupant.cardId,
+              direction: "hex",
+            });
+            return;
+          }
+          // Hex mount already taken — fall through to dropLoose
+          // (the rect occupying the mount should have been picked
+          // up by the rect-preferred branch above, so reaching
+          // here means a stale cache or race).
+        }
+      }
+      // Tile is empty — place the dragged card on it.
+      this.ctx.cards?.setCardPosition(card.cardId, {
+        kind: "world",
+        q: worldDrop.q,
+        r: worldDrop.r,
+      });
+      return;
+    }
 
     // No valid target — drop loose in the same zone.
     this.dropLoose(card, up, offsetX, offsetY);
     // TODO: cross-zone drops
+  }
+
+  /** Search `cardsLocal` for a card at the world hex tile `(q, r)`.
+   *  Returns a rect occupant when one is present (the rect is the
+   *  stack root for further state-1 chain members); otherwise the
+   *  hex Card occupying the tile; null when the tile is unoccupied.
+   *
+   *  Skips `excludeCardId` — used to exclude the dragged card itself,
+   *  which has already had its row rewritten to point at the world
+   *  tile by the time `setCardPosition({kind:"world"})` ran for a
+   *  previous drag-cycle... actually it hasn't been rewritten yet
+   *  here, but the exclusion is cheap and prevents self-stacks from
+   *  any future write-then-recheck flow. */
+  private findCardAtTile(
+    q: number,
+    r: number,
+    excludeCardId: number,
+  ): Card | null {
+    const cards = this.ctx.cards;
+    if (!cards) return null;
+    const zoneQ = Math.floor(q / 8) * 8;
+    const zoneR = Math.floor(r / 8) * 8;
+    const localQ = q - zoneQ;
+    const localR = r - zoneR;
+    const targetMacroZone = packMacroZone(zoneQ, zoneR);
+
+    let hexCard: Card | null = null;
+    let rectCard: Card | null = null;
+    for (const [id, row] of this.ctx.data.cardsLocal) {
+      if (id === excludeCardId) continue;
+      if (row.surface < WORLD_LAYER) continue;
+      if (row.macroZone !== targetMacroZone) continue;
+      // Both state-0 hex Cards on world and state-3 rect cards on a
+      // hex tile encode local q/r in the legacy q/r bit-fields of
+      // `microZone` (bits 5-7 = localQ, bits 2-4 = localR). Same
+      // unpack works for both.
+      const otherLocalQ = (row.microZone >> 5) & 0x7;
+      const otherLocalR = (row.microZone >> 2) & 0x7;
+      if (otherLocalQ !== localQ || otherLocalR !== localR) continue;
+      const c = cards.get(id);
+      if (!c) continue;
+      if (c.gameCard instanceof GameRectCard) {
+        rectCard = c;
+      } else if (c.gameCard instanceof GameHexCard) {
+        hexCard = c;
+      }
+    }
+    return rectCard ?? hexCard;
+  }
+
+  /** Compute the world hex (q, r) the drop landed on, or null when the
+   *  drop wasn't inside the world view. Uses `LayoutWorld.localToWorld`
+   *  with the drop point in the view's local frame — `up.x` / `up.y`
+   *  are canvas-local, so we subtract the world view's global position
+   *  to translate. Falls back to a per-hit-test path: when `up.hit` is
+   *  LayoutWorld itself, we trust the hit; when it's a Card whose data
+   *  row sits on `WORLD_LAYER`, same. Otherwise null.
+   *
+   *  Either signal alone would work — together they handle the case
+   *  where a card visually occluded the empty-tile hit and the case
+   *  where the drop landed on a card-less world surface region. */
+  private resolveWorldDrop(up: PointerEventData): { q: number; r: number } | null {
+    const worldView = this.ctx.layout?.worldView;
+    if (!worldView) return null;
+
+    let inWorld = up.hit === worldView;
+    if (!inWorld && up.hit instanceof LayoutCard) {
+      const hitRow = this.ctx.data.cardsLocal.get(up.hit.cardId);
+      if (hitRow && hitRow.surface >= WORLD_LAYER) inWorld = true;
+    }
+    if (!inWorld) return null;
+
+    const g = worldView.container.getGlobalPosition();
+    return worldView.localToWorld(up.x - g.x, up.y - g.y);
   }
 
   private handleHexDrop(
@@ -182,9 +303,33 @@ export class DragManager {
     offsetX: number,
     offsetY: number,
   ): void {
-    // World-card-returning-to-inventory path stripped — when world returns,
-    // bail back to `packZoneId(row.ownerId, 1)`'s surface here for cards
-    // whose `row.surface >= WORLD_LAYER`.
+    // World-source → inventory return: a card sitting on a world tile
+    // (or a world surface generally) that gets dropped outside the
+    // world view should land back in the owner's inventory at the
+    // cursor position. Otherwise we'd fall through to the "loose in
+    // current zone" path below, which for a world-rooted card would
+    // place it loose on the world surface at the wrong coords (and
+    // visually fly off-screen if the cursor is over the inventory
+    // panel).
+    //
+    // We route through `setCardPosition({kind:"inventory"})` so the
+    // local row gets a clean inventory shape (surface=1,
+    // macroZone=ownerId, microZone state-cleared, microLocation =
+    // encoded xy). The xy is the cursor's position translated into
+    // the inventory surface's local coords.
+    const row = this.ctx.data.cardsLocal.get(card.cardId);
+    if (row && row.surface >= WORLD_LAYER) {
+      const invSurface = this.ctx.layout?.surfaceFor(packZoneId(row.ownerId, 1));
+      if (invSurface) {
+        const ig = invSurface.container.getGlobalPosition();
+        this.ctx.cards?.setCardPosition(card.cardId, {
+          kind: "inventory",
+          x: up.x - ig.x - offsetX,
+          y: up.y - ig.y - offsetY,
+        });
+        return;
+      }
+    }
 
     // Look the zone surface up fresh (rather than using whatever the card was
     // parented to at drag start) — for a stacked-source drag that was a

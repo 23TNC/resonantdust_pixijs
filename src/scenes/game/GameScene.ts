@@ -48,6 +48,7 @@ export class GameScene extends Scene {
     );
     this.gameLayout.setContext(ctx);
     this.layoutManager.overlay = this.gameLayout.overlay;
+    this.layoutManager.worldView = this.gameLayout.worldView;
     this.root.addChild(this.gameLayout.container);
 
     this.cardManager = new CardManager(ctx);

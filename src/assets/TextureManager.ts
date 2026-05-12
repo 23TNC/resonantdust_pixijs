@@ -25,6 +25,7 @@ const EMPTY_TILE_DEF: CardDefinition = {
   name:         "",
   style:        ["#141e28", "#141e28", "#243040"],
   aspects:      [],
+  flags:        0,
 };
 
 // ── Custom / hardcoded rect cards ────────────────────────────────────────────
@@ -47,6 +48,7 @@ const CUSTOM_DEFS: Record<CustomCard, CardDefinition> = {
     name:         "",
     style:        ["#141e28", "#141e28", "#243040"],
     aspects:      [],
+    flags:        0,
   },
 };
 

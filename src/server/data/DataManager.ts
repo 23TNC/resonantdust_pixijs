@@ -1,10 +1,11 @@
+import { debug } from "../../debug";
 import type { Card, Player, Zone } from "../spacetime/bindings/types";
 import type { ConnectionManager } from "../spacetime/ConnectionManager";
+import type { ReducerManager } from "../spacetime/ReducerManager";
 import { SubscriptionManager } from "../spacetime/SubscriptionManager";
 import {
   isStackLayout,
   packStackMicroZone,
-  unpackMicroZone,
   unpackStackMicroZone,
 } from "./packing";
 import { idOf, validAtOf } from "./packing";
@@ -103,8 +104,19 @@ export class DataManager {
   private readonly cardLocalListeners = new Set<TableListener<Card>>();
   private readonly cardLocalKeyListeners = new Map<number, Set<TableListener<Card>>>();
 
-  constructor(connection: ConnectionManager) {
-    this.subscriptions = new SubscriptionManager(connection);
+  constructor(
+    connection: ConnectionManager,
+    private readonly reducers: ReducerManager,
+  ) {
+    // Thread the reducer-event timestamp from `SubscriptionManager` into
+    // `ReducerManager.noteServerTime` so the client's server-clock
+    // estimate gets re-baselined on every reducer commit. `promote()`
+    // then reads from `reducers.serverNowSecs()` instead of
+    // `Date.now()/1000`, aligning `ValidAtTable` promotion to the
+    // server's timeline.
+    this.subscriptions = new SubscriptionManager(connection, {
+      onReducerEvent: (micros) => this.reducers.noteServerTime(micros),
+    });
 
     this.subscriptions.registerTableHandlers("cards", {
       onInsert: this.cards.insert,
@@ -185,8 +197,16 @@ export class DataManager {
     this.zonesLocal.set(id, row);
   }
 
-  /** Promote every table's `current` view to `now` (absolute seconds). */
-  promote(now: number): void {
+  /** Promote every table's `current` view to the server's estimated
+   *  current time (unix seconds, float with ms precision). Reads from
+   *  `ReducerManager.serverNowSecs()` so promotion aligns with the
+   *  server's `valid_at` timeline — before any reducer event has
+   *  landed, that falls back to local wall-clock; after the first
+   *  reducer commit, every subsequent reducer event re-baselines the
+   *  offset so server-stamped future rows promote at the right
+   *  moment from the client's perspective. */
+  promote(): void {
+    const now = this.reducers.serverNowSecs();
     this.cards.promote(now);
     this.players.promote(now);
     this.zones.promote(now);
@@ -220,23 +240,29 @@ export class DataManager {
     }
   }
 
-  /** Card-specific mirror with two preserve cases for inventory cards.
-   *  Both require `serverRow.surface === INVENTORY_LAYER` AND
-   *  `prev.surface === INVENTORY_LAYER`. The check on `state` and the
-   *  layout-specific bit determines which gate fires:
+  /** Card-specific mirror with three preserve cases, all keyed on the
+   *  same principle: **the client owns visual position by default;
+   *  `FLAG_FORCE_POSITION` is the server's universal opt-out.**
    *
-   *  - **Loose preserve** (legacy layout): `state === STACKED_LOOSE` AND
-   *    `unpackMicroZone(serverRow.microZone).localQ === 0`. Position is
-   *    client-managed; preserve local's `macroZone` / `microZone` /
-   *    `microLocation` / `surface`.
+   *  - **Loose preserve**: `state === STACKED_LOOSE`. Position is
+   *    fully client-managed (drag-drop, splice transplants, etc.) —
+   *    the server never asserts a meaningful position for a loose
+   *    card, so we unconditionally preserve local's `macroZone` /
+   *    `microZone` / `microLocation` / `surface`.
    *
-   *  - **Stack preserve** (stack layout): `state === STACKED_ON_ROOT`
-   *    AND `(serverRow.flags & FLAG_FORCE_POSITION) === 0`. Same
-   *    preservation — the server isn't forcing a position so client
-   *    wins. The `force_position` bit lives in `flags` (bit 11) and is
-   *    set/cleared by the server explicitly; it used to live inside
-   *    `microZone` as a bit-2 `force_flag`, freed when `microZone`
-   *    bit 2 was repurposed as the chain `direction`.
+   *  - **Slot preserve**: `state === STACKED_SLOT`. The server writes
+   *    `microLocation = predecessor` + `microZone = direction` when
+   *    asserting chain shape (e.g. `propose_action`'s slot[1..]
+   *    writes). Honor `FLAG_FORCE_POSITION` — without it, the row is
+   *    a pure flags update and the local chain (as arranged by
+   *    `setCardPosition`) stands. With it set, server's spatial
+   *    lands verbatim.
+   *
+   *  - **Stack preserve** (state-2 OnRoot, inventory): same
+   *    `force_position` gate. The flag used to live in `microZone`
+   *    bit 2 alongside `position` / `direction`; moved out to
+   *    `flags` so `microZone` could carry the chain `direction`
+   *    instead.
    *
    *  When the **stack layout** applies AND the `force_position` flag is
    *  set, the server is asserting a specific chain position. We take
@@ -247,7 +273,14 @@ export class DataManager {
   private mirrorCard(change: TableChange<Card>): void {
     const prev = this.cardsLocal.get(change.key);
 
+    const nowSecs = (Date.now() / 1000).toFixed(3);
+
     if (change.kind === "removed") {
+      debug.log(
+        ["spacetime"],
+        `[spacetime] card row removed t=${nowSecs} id=${change.key} prev=${prev ? `flags=0x${prev.flags.toString(16)} microZone=0x${prev.microZone.toString(16)} microLocation=${prev.microLocation} macroZone=${prev.macroZone} surface=${prev.surface}` : "absent"}`,
+        2,
+      );
       if (prev === undefined) return;
       this.cardsLocal.delete(change.key);
       this.fireCardLocal({ kind: "removed", key: change.key, oldRow: prev });
@@ -256,6 +289,11 @@ export class DataManager {
 
     const serverRow = change.kind === "added" ? change.row : change.newRow;
     const serverState = serverRow.microZone & 0x3;
+    debug.log(
+      ["spacetime"],
+      `[spacetime] card row ${change.kind} t=${nowSecs} id=${change.key} validAt=${validAtOf(serverRow.validAt)} state=${serverState} flags=0x${serverRow.flags.toString(16)} microZone=0x${serverRow.microZone.toString(16)} microLocation=${serverRow.microLocation} macroZone=${serverRow.macroZone} surface=${serverRow.surface}`,
+      2,
+    );
 
     // Defensive: state-1 (Slot) requires a present parent row at
     // `microLocation`. The server can't see the client's local overlay
@@ -270,27 +308,40 @@ export class DataManager {
       serverRow.microLocation !== change.key &&
       !this.cardsLocal.has(serverRow.microLocation);
 
-    const bothInventory =
-      prev !== undefined &&
-      serverRow.surface === INVENTORY_LAYER &&
-      prev.surface === INVENTORY_LAYER;
-
     let preservePosition = false;
     let serverForcesStackPosition = false;
-    if (bothInventory && !orphanSlot) {
+    if (!orphanSlot) {
       if (serverState === 0 /* STACKED_LOOSE */) {
-        // Legacy layout — gate on localQ === 0.
-        preservePosition = unpackMicroZone(serverRow.microZone).localQ === 0;
+        // Loose inventory cards are entirely client-positioned —
+        // drag-drop, splice transplants, etc. The server never asserts
+        // a meaningful position for them, so always keep the local
+        // overlay's spatial fields over whatever the serverRow carries.
+        preservePosition = true;
+      } else if (serverState === 1 /* STACKED_SLOT */) {
+        // State-1 chain members carry `microLocation = predecessor`
+        // and `microZone = direction`. The client owns the chain
+        // locally (via `setCardPosition`); the server only writes
+        // these fields when it's asserting chain shape (e.g.
+        // `propose_action`'s slot[1..] writes). Treat
+        // `FLAG_FORCE_POSITION` as the universal "server overrides
+        // client" signal — without it, the row is just a flag update
+        // and the local chain stays as the player arranged it. With
+        // it set, the server's microLocation / microZone /
+        // macroZone / surface land verbatim.
+        const forced = (serverRow.flags & FLAG_FORCE_POSITION) !== 0;
+        preservePosition = !forced;
       } else if (isStackLayout(serverState, serverRow.surface)) {
-        // Stack layout — gate on the `force_position` flag (bit 11 of
-        // `flags`). Used to live in `microZone` bit 2 alongside
+        // State-2 OnRoot on inventory — same `force_position` gate.
+        // The flag used to live in `microZone` bit 2 alongside
         // `position` / `direction`; moved out to `flags` so `microZone`
         // could carry the chain `direction` instead.
         const forced = (serverRow.flags & FLAG_FORCE_POSITION) !== 0;
         preservePosition = !forced;
         serverForcesStackPosition = forced;
       }
-      // STACKED_ON_HEX (3) — no special preserve; server is authoritative.
+      // STACKED_ON_HEX (3) — no special preserve; server is authoritative
+      // on world-tile placement. Splice handles client-side transplants
+      // when the dying card's animation completes.
     }
 
     const baseRow: Card = orphanSlot
