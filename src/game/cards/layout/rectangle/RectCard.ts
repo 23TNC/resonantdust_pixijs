@@ -1,6 +1,7 @@
 import { Container, Graphics, ParticleContainer, Text } from "pixi.js";
 import type { GameContext } from "../../../../GameContext";
-import type { Card as CardRow } from "../../../../server/spacetime/bindings/types";
+import type { DefinitionManager } from "../../../definitions/DefinitionManager";
+import type { Card as CardRow, Soul } from "../../../../server/spacetime/bindings/types";
 import type { LocalCard } from "../../../../server/data/DataManager";
 import { ParticleManager, type ParticleHandle } from "../../../../assets/ParticleManager";
 import {
@@ -59,6 +60,108 @@ export const CARD_SCALE = 1;
 export const RECT_CARD_WIDTH        = 72 * CARD_SCALE;
 export const RECT_CARD_HEIGHT       = 96 * CARD_SCALE;
 export const RECT_CARD_TITLE_HEIGHT = 24;
+
+/** Soul resource meter — four 2×5 square clusters anchored at the
+ *  card-body corners. Each cluster reads one byte of `soul.stats`
+ *  (live cards) and one byte of `soul.fatigued` (the `-` variants);
+ *  squares fill column-major inward from the anchored corner, stats
+ *  first then fatigue. Colors come from the matching card
+ *  definition's `style[0]` (cached once per process).
+ *
+ *  Byte order on `soul.stats` / `soul.fatigued` / `soul.injured`
+ *  follows the server-side packing in `spacetime/.../souls.rs`:
+ *  byte 0 = corpus, 1 = anima, 2 = sollertia, 3 = aether (same
+ *  across all three fields). Cluster *layout* uses a different
+ *  visual ordering (corpus / sollertia / aether / anima around the
+ *  card corners), so we map cluster → byte via `STAT_BYTE`. */
+const RESOURCE_KEYS = ["corpus", "sollertia", "aether", "anima"] as const;
+type ResourceKey = (typeof RESOURCE_KEYS)[number];
+
+/** Byte index inside `soul.stats` / `soul.fatigued` / `soul.injured`
+ *  for each cluster. Mirrors the Rust-side packing — keep in sync
+ *  with the `stat_map` block in `souls.rs`. */
+const STAT_BYTE: Record<ResourceKey, number> = {
+  corpus:    0,
+  anima:     1,
+  sollertia: 2,
+  aether:    3,
+};
+
+const METER_SQUARE        = 5;
+const METER_STRIDE        = 7;
+const METER_INSET         = 2;
+const METER_CAP_PER_CLUSTER = 10;
+
+/** Each cluster lives in a corner. `cornerX/cornerY` are the body-
+ *  relative pixel coords of the *corner-most* square (col 0, row 0
+ *  in the cluster's own basis). `dxCol/dxRow` step away from that
+ *  corner: cols stride horizontally toward the card center, rows
+ *  stride vertically toward the card center. Fill is column-major
+ *  (col 0 fully, then col 1) per the user's spec. */
+interface ClusterLayout {
+  cornerX: number;
+  cornerY: number;
+  dxCol: number;
+  dxRow: number;
+  dyCol: number;
+  dyRow: number;
+}
+
+const CLUSTER_LAYOUTS: Record<ResourceKey, ClusterLayout> = {
+  // top-left, col→right, row→down
+  corpus:    { cornerX: METER_INSET,
+               cornerY: METER_INSET,
+               dxCol:  METER_STRIDE, dyCol: 0,
+               dxRow:  0,            dyRow:  METER_STRIDE },
+  // top-right, col→left, row→down
+  sollertia: { cornerX: RECT_CARD_WIDTH - METER_INSET - METER_SQUARE,
+               cornerY: METER_INSET,
+               dxCol: -METER_STRIDE, dyCol: 0,
+               dxRow:  0,            dyRow:  METER_STRIDE },
+  // bottom-left, col→right, row→up
+  aether:    { cornerX: METER_INSET,
+               cornerY: (RECT_CARD_HEIGHT - RECT_CARD_TITLE_HEIGHT) - METER_INSET - METER_SQUARE,
+               dxCol:  METER_STRIDE, dyCol: 0,
+               dxRow:  0,            dyRow: -METER_STRIDE },
+  // bottom-right, col→left, row→up
+  anima:     { cornerX: RECT_CARD_WIDTH - METER_INSET - METER_SQUARE,
+               cornerY: (RECT_CARD_HEIGHT - RECT_CARD_TITLE_HEIGHT) - METER_INSET - METER_SQUARE,
+               dxCol: -METER_STRIDE, dyCol: 0,
+               dxRow:  0,            dyRow: -METER_STRIDE },
+};
+
+/** Cluster color pair: `stats` is the bare resource's body color
+ *  (`def("corpus").style[0]`), `fatigued` is the `-` variant's body
+ *  color (`def("corpus-").style[0]`). Cached at module scope on
+ *  first access — the content definitions are immutable for a
+ *  session, and the lookup goes through wasm so we don't want to
+ *  repeat it per render. */
+interface ClusterColors {
+  stats: number;
+  fatigued: number;
+}
+
+const FALLBACK_COLOR = 0x7a7a8a;
+
+let clusterColorCache: Record<ResourceKey, ClusterColors> | null = null;
+
+function getClusterColors(defs: DefinitionManager): Record<ResourceKey, ClusterColors> {
+  if (clusterColorCache) return clusterColorCache;
+  const colorOf = (key: string): number => {
+    const packed = defs.findPackedByKey(key);
+    if (packed === undefined) return FALLBACK_COLOR;
+    const def = defs.decode(packed);
+    if (!def) return FALLBACK_COLOR;
+    return parseHexColor(def.style[0]);
+  };
+  clusterColorCache = {
+    corpus:    { stats: colorOf("corpus"),    fatigued: colorOf("corpus-") },
+    sollertia: { stats: colorOf("sollertia"), fatigued: colorOf("sollertia-") },
+    aether:    { stats: colorOf("aether"),    fatigued: colorOf("aether-") },
+    anima:     { stats: colorOf("anima"),     fatigued: colorOf("anima-") },
+  };
+  return clusterColorCache;
+}
 
 export type RectCardTitlePosition = "top" | "bottom";
 
@@ -119,6 +222,28 @@ export class LayoutRectCard extends LayoutCard {
    *  registry name in `flags.json` is `"magnetic"`. `hasCardFlag` is
    *  keyed off the registry. */
   private readonly magneticText: Text;
+  /** Soul-card resource meter — four 2×5 clusters of squares, one
+   *  per faculty type (`corpus` top-left, `sollertia` top-right,
+   *  `aether` bottom-left, `anima` bottom-right). Each cluster reads
+   *  one byte of `soul.stats` (live cards, painted in the base
+   *  color) followed by one byte of `soul.fatigued` (the `-`
+   *  variants, painted in the variant color). Squares fill
+   *  column-major inward from the anchored corner; the cluster caps
+   *  at 10 total visible squares.
+   *
+   *  Visible whenever a Soul row exists in `soulsLocal` for this
+   *  card's id — works for any soul card in scope (the local
+   *  player's, and remote players' once their world zone is
+   *  subscribed). For non-soul rect cards the Graphics is cleared
+   *  each frame and draws nothing.
+   *
+   *  Update path: a per-key `subscribeLocalSoulKey(this.cardId)`
+   *  listener invalidates on every Soul row change. Counts come
+   *  straight off the row (just bit-shifts on `stats` / `fatigued`),
+   *  so no walk is needed — the dirty-flag pattern that the
+   *  cardsLocal version used is gone. */
+  private readonly resourceMeter = new Graphics();
+  private unsubResourceMeter: (() => void) | null = null;
   private currentPackedDefinition: number | null = null;
   private titlePosition: RectCardTitlePosition = "top";
   private dying = false;
@@ -167,9 +292,22 @@ export class LayoutRectCard extends LayoutCard {
     this.magneticText.anchor.set(1, 0);
     this.magneticText.visible = false;
     this.visual.addChild(this.magneticText);
+    // Soul resource meter. Added above stateOverlay so hover/pending
+    // outlines don't occlude it; below magneticText/cardOutline for
+    // z-order consistency with other rect-card decorations.
+    this.visual.addChild(this.resourceMeter);
     this.container.addChild(this.deathMask);
     this.container.addChild(this.visual);
     this.setSize(RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
+
+    // Invalidate on every Soul row change for this card. Per-key
+    // subscription means we don't see noise from unrelated cards or
+    // souls — only the row we'd actually render off of. Non-soul
+    // rect cards never receive an event here (no Soul row exists
+    // for their id); the meter stays empty.
+    this.unsubResourceMeter = ctx.data.subscribeLocalSoulKey(cardId, () => {
+      this.invalidate();
+    });
   }
 
   setTitlePosition(position: RectCardTitlePosition): void {
@@ -401,6 +539,17 @@ export class LayoutRectCard extends LayoutCard {
       this.stateOverlay.rect(0, 0, this.width, 3).fill({ color: 0xff8800 });
     }
 
+    // Soul resource meter. Drawn for any rect card that has a
+    // matching Soul row in `soulsLocal` — works for the local
+    // player's soul AND any remote soul whose world zone is in
+    // scope. Non-soul rect cards never have an entry, so the
+    // Graphics is just cleared and stays empty.
+    this.resourceMeter.clear();
+    const soulRow = this.ctx.data.soulsLocal.get(this.cardId);
+    if (soulRow) {
+      this.drawSoulResourceMeter(soulRow);
+    }
+
     if (this.dying) {
       this.deathProgress += DEATH_SPEED;
       const maskH = Math.max(0, (1 - this.deathProgress) * this.height);
@@ -461,6 +610,65 @@ export class LayoutRectCard extends LayoutCard {
     return this.state.dragging || moving || this.dying || showingProgress;
   }
 
+  /** Paint the four resource clusters from a Soul row's packed
+   *  `stats` / `fatigued` u32s. Each cluster reads its own byte
+   *  (see `STAT_BYTE`) and draws stats squares first (base color),
+   *  then fatigue squares (variant color), capped at
+   *  `METER_CAP_PER_CLUSTER` combined. Caller has cleared
+   *  `resourceMeter` and confirmed a Soul row exists for this card.
+   *
+   *  Cost per call: 8 bit-shifts + up to 40 rect ops total. No walk
+   *  over `cardsLocal`; per-frame invalidation is cheap. */
+  private drawSoulResourceMeter(soul: Soul): void {
+    const colors = getClusterColors(this.ctx.definitions);
+    // Body origin in card-local pixels. For souls we expect `top`
+    // titles but compute from `titlePosition` so the meter behaves
+    // correctly if the layout ever flips direction.
+    const bodyTop =
+      this.titlePosition === "top" ? RECT_CARD_TITLE_HEIGHT : 0;
+
+    for (const key of RESOURCE_KEYS) {
+      const byteIdx = STAT_BYTE[key];
+      const statsCount    = (soul.stats    >>> (byteIdx * 8)) & 0xff;
+      const fatigueCount  = (soul.fatigued >>> (byteIdx * 8)) & 0xff;
+      if (statsCount === 0 && fatigueCount === 0) continue;
+
+      const layout = CLUSTER_LAYOUTS[key];
+      const clusterColors = colors[key];
+      // Stats first, then fatigue, sharing the 10-square cap. If
+      // stats alone already fills the cluster, fatigue gets no
+      // slots; otherwise fatigue takes whatever remains.
+      const statsToDraw   = Math.min(statsCount, METER_CAP_PER_CLUSTER);
+      const fatigueToDraw = Math.min(fatigueCount, METER_CAP_PER_CLUSTER - statsToDraw);
+
+      let slot = 0;
+      for (let i = 0; i < statsToDraw; i++) {
+        this.drawClusterSquare(layout, bodyTop, slot++, clusterColors.stats);
+      }
+      for (let i = 0; i < fatigueToDraw; i++) {
+        this.drawClusterSquare(layout, bodyTop, slot++, clusterColors.fatigued);
+      }
+    }
+  }
+
+  /** Place one 5×5 square at column-major slot `slot` of a cluster.
+   *  Column 0 is the corner-most column; rows fill top-down (top
+   *  clusters) or bottom-up (bottom clusters) per the layout's
+   *  `dyRow` sign. 5 rows per column → col = `floor(slot/5)`,
+   *  row = `slot % 5`. */
+  private drawClusterSquare(
+    layout: ClusterLayout,
+    bodyTop: number,
+    slot: number,
+    color: number,
+  ): void {
+    const col = Math.floor(slot / 5);
+    const row = slot % 5;
+    const x = layout.cornerX + col * layout.dxCol + row * layout.dxRow;
+    const y = bodyTop + layout.cornerY + col * layout.dyCol + row * layout.dyRow;
+    this.resourceMeter.rect(x, y, METER_SQUARE, METER_SQUARE).fill({ color });
+  }
+
   private _spawnDeathEffect(): void {
     const pm = ParticleManager.getInstance();
     if (!pm) return;
@@ -480,6 +688,8 @@ export class LayoutRectCard extends LayoutCard {
     this.deathParticleHandle = null;
     this.unsubDying?.();
     this.unsubDying = null;
+    this.unsubResourceMeter?.();
+    this.unsubResourceMeter = null;
     super.destroy();
   }
 }

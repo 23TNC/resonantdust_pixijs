@@ -5,6 +5,7 @@ import { TextureManager } from "./assets/TextureManager";
 import { DefinitionManager, initDefinitions } from "./game/definitions/DefinitionManager";
 // import { RecipeManager } from "./definitions/RecipeManager";
 import { PlayerManager } from "./server/player/PlayerManager";
+import { SoulManager } from "./server/player/SoulManager";
 import type { GameContext } from "./GameContext";
 import { LoginScene } from "./scenes/login/LoginScene";
 import { SceneManager } from "./scenes/SceneManager";
@@ -12,13 +13,14 @@ import { ConnectionManager } from "./server/spacetime/ConnectionManager";
 import { ReducerManager } from "./server/spacetime/ReducerManager";
 import { DataManager } from "./server/data/DataManager";
 import { ZoneManager } from "./game/zones/ZoneManager";
-import { unpackZoneId, WORLD_LAYER } from "./server/data/packing";
+import { unpackMacroZone, unpackZoneId, WORLD_LAYER } from "./server/data/packing";
 
 interface Runtime {
   app: Application;
   scenes: SceneManager;
   connection: ConnectionManager;
   playerSession: PlayerManager;
+  souls: SoulManager;
   data: DataManager;
   zones: ZoneManager;
 }
@@ -67,7 +69,7 @@ async function main(): Promise<Runtime> {
     },
   });
   const reducers = new ReducerManager(connection);
-  const data = new DataManager(connection, reducers);
+  const data = new DataManager(connection, reducers, definitions);
 
   // Per-frame promote: lifts elapsed `valid_at` rows from each table's
   // `server` map into `current` and fires `added`/`updated`/`removed` events
@@ -120,6 +122,20 @@ async function main(): Promise<Runtime> {
   zones.onRemoved("active", unsubscribeZone);
 
   const playerSession = new PlayerManager(connection, data);
+  const souls = new SoulManager(playerSession, data);
+
+  // Drive ZoneManager's `"soul"` anchor off the local soul card's
+  // current `macro_zone`. Whenever the soul row arrives or moves
+  // between world chunks, the soul anchor follows — its surrounding
+  // zone ring stays subscribed regardless of where the camera (the
+  // `"viewport"` anchor) is panned. Without this, a player who pans
+  // away from their soul would stop receiving updates about their own
+  // avatar's neighbourhood.
+  souls.on((soul) => {
+    if (!soul || soul.surface < WORLD_LAYER) return;
+    const { zoneQ, zoneR } = unpackMacroZone(soul.macroZone);
+    zones.setAnchor("soul", zoneQ, zoneR);
+  });
 
   const ctx: GameContext = {
     app,
@@ -131,6 +147,7 @@ async function main(): Promise<Runtime> {
     connection,
     reducers,
     playerSession,
+    souls,
     data,
     zones,
     cards: null,
@@ -145,7 +162,7 @@ async function main(): Promise<Runtime> {
 
   await scenes.change(new LoginScene());
 
-  return { app, scenes, connection, playerSession, data, zones };
+  return { app, scenes, connection, playerSession, souls, data, zones };
 }
 
 function showFatalError(error: unknown): void {
@@ -175,6 +192,7 @@ if (import.meta.hot) {
     runtime = null;
     if (!rt) return;
     rt.zones.dispose();
+    rt.souls.dispose();
     rt.data.dispose();
     rt.playerSession.dispose();
     rt.connection.disconnect();

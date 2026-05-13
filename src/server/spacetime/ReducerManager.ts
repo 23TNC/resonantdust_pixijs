@@ -67,6 +67,29 @@ export class ReducerManager {
    * derivation. Pass `0` for `hex` / `root` when the recipe has no
    * `hex` / `root` constraint.
    */
+  /**
+   * Request a move of the caller's soul card to a new world tile.
+   * The server validates the target (in-bounds, walkable, etc.) and
+   * rewrites the soul row's spatial fields. Today this is the
+   * server-side counterpart to dragging the soul ghost onto a world
+   * tile — `target_surface` is `WORLD_LAYER`, `target_macro_zone` is
+   * the packed `(zoneQ, zoneR)` chunk origin, and `target_micro_zone`
+   * is `packMicroZone(localQ, localR, STACKED_ON_HEX)`.
+   */
+  async moveSoul(args: {
+    targetSurface: number;
+    targetMacroZone: number;
+    targetMicroZone: number;
+  }): Promise<void> {
+    debug.log(
+      ["spacetime"],
+      `[spacetime] moveSoul surface=${args.targetSurface} macroZone=${args.targetMacroZone} microZone=0x${args.targetMicroZone.toString(16)}`,
+      5,
+    );
+    const conn = await this.connection.connect();
+    await conn.reducers.moveSoul(args);
+  }
+
   async proposeAction(args: {
     hex: number;
     root: number;

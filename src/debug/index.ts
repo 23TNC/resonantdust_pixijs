@@ -16,6 +16,7 @@ const config: readonly (readonly [string, number])[] = [
   ["particles",   0],
   ["cards",       0],
   ["splice",      0],
+  ["drag",        0],
 ] as const;
 
 function shouldPrint(tags: string[], level: number): boolean {

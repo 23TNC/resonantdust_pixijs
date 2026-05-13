@@ -38,6 +38,7 @@ import AddCardReducer from "./add_card_reducer";
 import BootstrapReducer from "./bootstrap_reducer";
 import ClaimOrLoginReducer from "./claim_or_login_reducer";
 import GenerateForestTerrainReducer from "./generate_forest_terrain_reducer";
+import MoveSoulReducer from "./move_soul_reducer";
 import ProposeActionReducer from "./propose_action_reducer";
 
 // Import all procedure arg schemas
@@ -46,6 +47,7 @@ import ProposeActionReducer from "./propose_action_reducer";
 import CardsRow from "./cards_table";
 import MagneticActionsRow from "./magnetic_actions_table";
 import PlayersRow from "./players_table";
+import SoulsRow from "./souls_table";
 import ZonesRow from "./zones_table";
 
 /** Type-only namespace exports for generated type groups. */
@@ -89,9 +91,6 @@ const tablesSchema = __schema({
   players: __table({
     name: 'players',
     indexes: [
-      { accessor: 'macro_zone', name: 'players_macro_zone_idx_btree', algorithm: 'btree', columns: [
-        'macroZone',
-      ] },
       { accessor: 'name', name: 'players_name_idx_btree', algorithm: 'btree', columns: [
         'name',
       ] },
@@ -106,6 +105,23 @@ const tablesSchema = __schema({
       { name: 'players_valid_at_key', constraint: 'unique', columns: ['validAt'] },
     ],
   }, PlayersRow),
+  souls: __table({
+    name: 'souls',
+    indexes: [
+      { accessor: 'card_id', name: 'souls_card_id_idx_btree', algorithm: 'btree', columns: [
+        'cardId',
+      ] },
+      { accessor: 'owner_id', name: 'souls_owner_id_idx_btree', algorithm: 'btree', columns: [
+        'ownerId',
+      ] },
+      { accessor: 'valid_at', name: 'souls_valid_at_idx_btree', algorithm: 'btree', columns: [
+        'validAt',
+      ] },
+    ],
+    constraints: [
+      { name: 'souls_valid_at_key', constraint: 'unique', columns: ['validAt'] },
+    ],
+  }, SoulsRow),
   zones: __table({
     name: 'zones',
     indexes: [
@@ -131,6 +147,7 @@ const reducersSchema = __reducers(
   __reducerSchema("bootstrap", BootstrapReducer),
   __reducerSchema("claim_or_login", ClaimOrLoginReducer),
   __reducerSchema("generate_forest_terrain", GenerateForestTerrainReducer),
+  __reducerSchema("move_soul", MoveSoulReducer),
   __reducerSchema("propose_action", ProposeActionReducer),
 );
 

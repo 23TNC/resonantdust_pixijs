@@ -8,8 +8,12 @@ import { GameHexCard } from "../cards/layout/hexagon/HexCard";
 import { LayoutCard } from "../cards/layout/CardLayout";
 import { GameRectCard } from "../cards/layout/rectangle/RectCard";
 import type { GameContext } from "../../GameContext";
+import { debug } from "../../debug";
+import { canPickUpCard } from "../permissions";
 import type { LayoutNode } from "../layout/LayoutNode";
-import { packMacroZone, packZoneId, WORLD_LAYER } from "../../server/data/packing";
+import { DragGhost } from "./DragGhost";
+import { packMacroZone, packMicroZone, packZoneId, ZONE_SIZE, WORLD_LAYER } from "../../server/data/packing";
+import { STACKED_ON_HEX } from "../cards/cardData";
 import type { PointerEventData } from "./InputManager";
 
 /** Maximum allowed chain depth from root to leaf, exclusive of the
@@ -24,12 +28,37 @@ import type { PointerEventData } from "./InputManager";
  *  corrupting chain layout. We reject the drop preemptively. */
 const MAX_CHAIN_DEPTH = 31;
 
-interface DragState {
-  card: Card;
-  /** Cursor → card top-left in canvas coords, captured at drag start. */
-  offsetX: number;
-  offsetY: number;
-}
+/** Two distinct drag flavors live behind the same `left_drag_*` events:
+ *
+ * - **`"card"`** — the standard pickup-and-drop flow. The actual layout
+ *   card is detached from its zone surface and reparented to the
+ *   overlay so it follows the cursor. On drop the card's row gets
+ *   rewritten (`setCardPosition`) to its new location.
+ *
+ * - **`"ghost"`** — the move-request flow. The source card stays in
+ *   place; only a translucent visual copy (`DragGhost`) moves with
+ *   the cursor. On drop we log / fire a move reducer rather than
+ *   rewriting the source's row. Souls use this today; future
+ *   "movement-card" tokens will too. */
+type DragState =
+  | {
+      kind: "card";
+      card: Card;
+      /** Cursor → card top-left in canvas coords, captured at drag start. */
+      offsetX: number;
+      offsetY: number;
+    }
+  | {
+      kind: "ghost";
+      ghost: DragGhost;
+      /** Card whose visual is being mirrored — for debug logging and
+       *  for the eventual move-reducer call. */
+      sourceCardId: number;
+      /** Cursor → card top-left at drag start. Used to position the
+       *  ghost so the grab point under the cursor stays consistent. */
+      offsetX: number;
+      offsetY: number;
+    };
 
 /**
  * Scene-scoped drag orchestrator. Subscribes to `left_drag_start` /
@@ -65,7 +94,11 @@ export class DragManager {
 
   dispose(): void {
     if (this.state) {
-      this.state.card.setDragging(false);
+      if (this.state.kind === "card") {
+        this.state.card.setDragging(false);
+      } else {
+        this.state.ghost.destroy();
+      }
       this.state = null;
     }
     this.unsubStart();
@@ -87,6 +120,14 @@ export class DragManager {
     const row = this.ctx.data.cardsLocal.get(data.hit.cardId);
     if (row && this.pickupBlocked(row.flags)) return;
 
+    // Permission check: does the local player have authority to pick
+    // this card up? Today the rule is ownership; future widenings
+    // (party shared cards, world-tile occupants, faction rules)
+    // land in `canPickUpCard`. Distinct from the flag check above —
+    // flags encode the card's *state*, permissions encode the
+    // player's *relationship* to the card. Both must pass.
+    if (row && !canPickUpCard(this.ctx, row)) return;
+
     // Stacked cards are draggable too — dropping them on another card
     // re-stacks, dropping on empty space converts to loose (unstack). Both
     // paths flow through Card.setPosition so the linked-list back-pointers
@@ -96,14 +137,41 @@ export class DragManager {
     const offsetX = data.x - cardGlobal.x;
     const offsetY = data.y - cardGlobal.y;
 
-    this.state = { card, offsetX, offsetY };
+    // Soul cards drag as a ghost: the actual card stays at its
+    // current tile, only a translucent preview follows the cursor.
+    // On drop we'll log / fire a move reducer (see `handleDragStop`).
+    // Detection is via `SoulManager.getSoulId()` — only the LOCAL
+    // player's currently-controlled soul matches, which is what we
+    // want (other players' souls are owner-gated by `canPickUpCard`
+    // and never reach this path anyway). Future "movement card"
+    // types can join this branch by widening the predicate.
+    if (row && this.ctx.souls.getSoulId() === card.cardId) {
+      const ghost = new DragGhost(this.ctx, row.packedDefinition, offsetX, offsetY);
+      this.state = {
+        kind: "ghost",
+        ghost,
+        sourceCardId: card.cardId,
+        offsetX,
+        offsetY,
+      };
+      return;
+    }
+
+    this.state = { kind: "card", card, offsetX, offsetY };
     card.setDragging(true, offsetX, offsetY);
   }
 
   private handleDragStop(_down: PointerEventData, up: PointerEventData): void {
     if (!this.state) return;
-    const { card, offsetX, offsetY } = this.state;
+    const state = this.state;
     this.state = null;
+
+    if (state.kind === "ghost") {
+      this.handleGhostDrop(state.sourceCardId, state.ghost, up);
+      return;
+    }
+
+    const { card, offsetX, offsetY } = state;
 
     // Clear drag state first so the card re-parents back to whichever
     // surface its current data implies (zone surface for loose, parent's
@@ -116,6 +184,43 @@ export class DragManager {
     } else if (card.gameCard instanceof GameHexCard) {
       this.handleHexDrop(card, up, offsetX, offsetY);
     }
+  }
+
+  /** Ghost-drag drop resolution. Destroys the ghost regardless of
+   *  outcome and, on a valid world-tile drop, fires the `move_soul`
+   *  reducer with the packed target. The server resolves the move
+   *  (validation + soul row rewrite) and we just observe the row
+   *  update flow back through the normal mirror path. Drops outside
+   *  the world view are no-ops — the user released the soul
+   *  somewhere meaningless. */
+  private handleGhostDrop(sourceCardId: number, ghost: DragGhost, up: PointerEventData): void {
+    ghost.destroy();
+    const worldDrop = this.resolveWorldDrop(up);
+    if (!worldDrop) {
+      debug.log(
+        ["drag"],
+        `[drag] ghost drop card=${sourceCardId} outside world view — ignored`,
+        2,
+      );
+      return;
+    }
+
+    const zoneQ = Math.floor(worldDrop.q / ZONE_SIZE) * ZONE_SIZE;
+    const zoneR = Math.floor(worldDrop.r / ZONE_SIZE) * ZONE_SIZE;
+    const localQ = worldDrop.q - zoneQ;
+    const localR = worldDrop.r - zoneR;
+    const targetMacroZone = packMacroZone(zoneQ, zoneR);
+    const targetMicroZone = packMicroZone(localQ, localR, STACKED_ON_HEX);
+    debug.log(
+      ["drag"],
+      `[drag] ghost drop card=${sourceCardId} → world tile (${worldDrop.q}, ${worldDrop.r}) — moveSoul surface=${WORLD_LAYER} macroZone=${targetMacroZone} microZone=0x${targetMicroZone.toString(16)}`,
+      2,
+    );
+    void this.ctx.reducers.moveSoul({
+      targetSurface: WORLD_LAYER,
+      targetMacroZone,
+      targetMicroZone,
+    });
   }
 
   private handleRectDrop(

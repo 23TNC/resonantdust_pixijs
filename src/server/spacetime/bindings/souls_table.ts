@@ -12,7 +12,13 @@ import {
 
 export default __t.row({
   validAt: __t.u64().primaryKey().name("valid_at"),
-  playerId: __t.u32().name("player_id"),
-  name: __t.string(),
-  soulCardId: __t.u32().name("soul_card_id"),
+  cardId: __t.u32().name("card_id"),
+  ownerId: __t.u32().name("owner_id"),
+  surface: __t.u8(),
+  macroZone: __t.u32().name("macro_zone"),
+  microZone: __t.u8().name("micro_zone"),
+  microLocation: __t.u32().name("micro_location"),
+  stats: __t.u32(),
+  fatigued: __t.u32(),
+  injured: __t.u32(),
 });

@@ -27,6 +27,7 @@ export class GameScene extends Scene {
   private particleManager!: ParticleManager;
   private releaseCards: (() => void) | null = null;
   private releaseKeys: (() => void) | null = null;
+  private releaseSoulTitle: (() => void) | null = null;
   private ctxRef: GameContext | null = null;
 
   onEnter(ctx: GameContext): void {
@@ -43,9 +44,18 @@ export class GameScene extends Scene {
     this.gameLayout = new GameLayout(
       ctx,
       player.name,
+      player.playerId,
       this.layoutManager,
       inventoryZoneId,
     );
+    // Live-update the title bar's soul id once SoulManager resolves
+    // it (initial subscription delivery, lazy migration, or future
+    // character switch). At enter time the soul row may not have
+    // landed yet — listener fires immediately with the current state
+    // (null first, then the soul row when it arrives).
+    this.releaseSoulTitle = ctx.souls.on((soul) => {
+      this.gameLayout.titleBar.setSoulCardId(soul?.cardId ?? 0);
+    });
     this.gameLayout.setContext(ctx);
     this.layoutManager.overlay = this.gameLayout.overlay;
     this.layoutManager.worldView = this.gameLayout.worldView;
@@ -93,6 +103,8 @@ export class GameScene extends Scene {
   }
 
   onExit(): void {
+    this.releaseSoulTitle?.();
+    this.releaseSoulTitle = null;
     this.releaseKeys?.();
     this.releaseKeys = null;
     this.releaseCards?.();

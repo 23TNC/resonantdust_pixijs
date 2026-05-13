@@ -2,7 +2,7 @@ import type { SubscriptionHandleImpl } from "spacetimedb";
 import { debug } from "../../debug";
 import { unpackZoneId, WORLD_LAYER, type ZoneId } from "../data/packing";
 import type { DbConnection } from "./bindings";
-import type { Card, Player, Zone } from "./bindings/types";
+import type { Card, Player, Soul, Zone } from "./bindings/types";
 import type { ConnectionManager } from "./ConnectionManager";
 
 type AnySubscriptionHandle = SubscriptionHandleImpl<any>;
@@ -24,6 +24,7 @@ interface ActiveSubscription {
 interface TableRowMap {
   cards: Card;
   players: Player;
+  souls: Soul;
   zones: Zone;
 }
 
@@ -179,6 +180,12 @@ export class SubscriptionManager {
       queries: [
         `SELECT * FROM zones WHERE macro_zone = ${macroZone}`,
         `SELECT * FROM cards WHERE macro_zone = ${macroZone} AND surface = ${WORLD_LAYER}`,
+        // Souls only live on the world surface — `souls::on_card_write`
+        // mirrors the soul card's `surface` / `macro_zone` onto the Soul
+        // row. Pulling them in alongside the world cards lets remote
+        // soul cards render their stat / fatigue meters without an
+        // extra per-card subscription.
+        `SELECT * FROM souls WHERE macro_zone = ${macroZone} AND surface = ${WORLD_LAYER}`,
       ],
       scopeKey: `macroZone:${macroZone}`,
     });
@@ -188,15 +195,37 @@ export class SubscriptionManager {
     this.removeSubscription(`zones:${macroZone}`);
   }
 
-  async subscribeWorldPlayers(macroZone: number): Promise<void> {
-    return this.installSubscription(`players:${macroZone}`, {
-      queries: [`SELECT * FROM players WHERE macro_zone = ${macroZone} AND surface = ${WORLD_LAYER}`],
-      scopeKey: `macroZone:${macroZone}`,
+  /** Subscribe to a single card by `card_id`. Used to follow a known
+   *  card whose macro-zone-keyed subscription wouldn't otherwise cover
+   *  it — the canonical case is the local player's soul card: we know
+   *  its id from `player.soul_card_id` but not yet its position, so we
+   *  ask for it directly to learn where it lives, then drive
+   *  `ZoneManager`'s soul anchor off its `macro_zone`. */
+  async subscribeCard(cardId: number): Promise<void> {
+    return this.installSubscription(`card:${cardId}`, {
+      queries: [`SELECT * FROM cards WHERE card_id = ${cardId}`],
+      scopeKey: `card:${cardId}`,
     });
   }
 
-  unsubscribeWorldPlayers(macroZone: number): void {
-    this.removeSubscription(`players:${macroZone}`);
+  unsubscribeCard(cardId: number): void {
+    this.removeSubscription(`card:${cardId}`);
+  }
+
+  /** Subscribe to a single Soul row by `card_id`. Mirrors
+   *  `subscribeCard` — used to bootstrap the local player's soul
+   *  before its `macro_zone` is known (the world-zone subscription
+   *  picks it up after the soul anchor is set, but we need the row
+   *  to *learn* the macro zone in the first place). */
+  async subscribeSoul(cardId: number): Promise<void> {
+    return this.installSubscription(`soul:${cardId}`, {
+      queries: [`SELECT * FROM souls WHERE card_id = ${cardId}`],
+      scopeKey: `soul:${cardId}`,
+    });
+  }
+
+  unsubscribeSoul(cardId: number): void {
+    this.removeSubscription(`soul:${cardId}`);
   }
 
   private async installSubscription(
@@ -341,6 +370,19 @@ export class SubscriptionManager {
     conn.db.players.onDelete((ctx, row) => {
       this.captureReducerTimestamp(ctx);
       this.fanOut("players", "onDelete", (h) => h.onDelete?.(row));
+    });
+
+    conn.db.souls.onInsert((ctx, row) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("souls", "onInsert", (h) => h.onInsert?.(row));
+    });
+    conn.db.souls.onUpdate((ctx, oldRow, newRow) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("souls", "onUpdate", (h) => h.onUpdate?.(oldRow, newRow));
+    });
+    conn.db.souls.onDelete((ctx, row) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("souls", "onDelete", (h) => h.onDelete?.(row));
     });
 
     conn.db.zones.onInsert((ctx, row) => {

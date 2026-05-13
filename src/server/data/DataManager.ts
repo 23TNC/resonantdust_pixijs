@@ -1,5 +1,6 @@
 import { debug } from "../../debug";
-import type { Card, Player, Zone } from "../spacetime/bindings/types";
+import type { CardDefinition, DefinitionManager } from "../../game/definitions/DefinitionManager";
+import type { Card, Player, Soul, Zone } from "../spacetime/bindings/types";
 import type { ConnectionManager } from "../spacetime/ConnectionManager";
 import type { ReducerManager } from "../spacetime/ReducerManager";
 import { SubscriptionManager } from "../spacetime/SubscriptionManager";
@@ -55,8 +56,18 @@ export interface ProgressInfo {
  *    bits are non-zero. Populated by `mirrorCard` on every update;
  *    cleared when no eligible future row exists. Today the list is
  *    populated with at most one entry; long-term it'll hold one per
- *    queued event. */
-export type LocalCard = Card & { dead?: 1 | 2; progress?: ProgressInfo[] };
+ *    queued event.
+ *  - `def` — decoded definition for `packedDefinition`. Populated at
+ *    row-write time so consumers don't re-pay the wasm `decode` cost
+ *    on every read. `mirrorCard` re-decodes only when `packedDefinition`
+ *    actually changed; `setLocalCard` backfills if missing. The
+ *    decoded value is `null` for an unknown packed id (matches
+ *    `DefinitionManager.decode`'s return contract). */
+export type LocalCard = Card & {
+  dead?: 1 | 2;
+  progress?: ProgressInfo[];
+  def?: CardDefinition | null;
+};
 
 /** Local data layer with two tiers:
  *
@@ -87,6 +98,7 @@ export type LocalCard = Card & { dead?: 1 | 2; progress?: ProgressInfo[] };
 export class DataManager {
   readonly cards = new ValidAtTable<Card>((row) => row.validAt);
   readonly players = new ValidAtTable<Player>((row) => row.validAt);
+  readonly souls = new ValidAtTable<Soul>((row) => row.validAt);
   readonly zones = new ValidAtTable<Zone>((row) => row.validAt);
   readonly subscriptions: SubscriptionManager;
 
@@ -94,6 +106,7 @@ export class DataManager {
    *  Mirrors `<table>.current` via subscription. */
   readonly cardsLocal = new Map<number, LocalCard>();
   readonly playersLocal = new Map<number, Player>();
+  readonly soulsLocal = new Map<number, Soul>();
   readonly zonesLocal = new Map<number, Zone>();
 
   private readonly unsubMirror: Array<() => void> = [];
@@ -101,12 +114,19 @@ export class DataManager {
   /** Listeners on the local cards overlay. Fire on every overlay change —
    *  mirror-driven (server pushes that pass through `mirrorCard`) AND
    *  client-driven (`setLocalCard` / `clearLocalCard`). */
-  private readonly cardLocalListeners = new Set<TableListener<Card>>();
-  private readonly cardLocalKeyListeners = new Map<number, Set<TableListener<Card>>>();
+  private readonly cardLocalListeners = new Set<TableListener<LocalCard>>();
+  private readonly cardLocalKeyListeners = new Map<number, Set<TableListener<LocalCard>>>();
+
+  /** Listeners on the local souls overlay. Same shape as the cards
+   *  variants but keyed on Soul rows. RectCard's resource meter
+   *  subscribes per-card-id so it only redraws when the matching
+   *  soul row updates. */
+  private readonly soulLocalKeyListeners = new Map<number, Set<TableListener<Soul>>>();
 
   constructor(
     connection: ConnectionManager,
     private readonly reducers: ReducerManager,
+    private readonly definitions: DefinitionManager,
   ) {
     // Thread the reducer-event timestamp from `SubscriptionManager` into
     // `ReducerManager.noteServerTime` so the client's server-clock
@@ -128,6 +148,11 @@ export class DataManager {
       onUpdate: this.players.update,
       onDelete: this.players.delete,
     });
+    this.subscriptions.registerTableHandlers("souls", {
+      onInsert: this.souls.insert,
+      onUpdate: this.souls.update,
+      onDelete: this.souls.delete,
+    });
     this.subscriptions.registerTableHandlers("zones", {
       onInsert: this.zones.insert,
       onUpdate: this.zones.update,
@@ -142,6 +167,9 @@ export class DataManager {
       this.players.subscribe((c) => this.mirror(this.playersLocal, c)),
     );
     this.unsubMirror.push(
+      this.souls.subscribe((c) => this.mirrorSoul(c)),
+    );
+    this.unsubMirror.push(
       this.zones.subscribe((c) => this.mirror(this.zonesLocal, c)),
     );
   }
@@ -153,6 +181,14 @@ export class DataManager {
    *  rule. Use for client-driven row writes (e.g. drag-drop on commit). */
   setLocalCard(id: number, row: LocalCard): void {
     const prev = this.cardsLocal.get(id);
+    // Backfill the decoded def cache. Callers typically spread from
+    // an existing `cardsLocal` row (which already carries `def` from
+    // `mirrorCard`), so this branch usually no-ops. The defensive
+    // path covers any future caller that constructs a row from
+    // scratch or swaps `packedDefinition`.
+    if (row.def === undefined || (prev && prev.packedDefinition !== row.packedDefinition)) {
+      row = { ...row, def: this.definitions.decode(row.packedDefinition) };
+    }
     this.cardsLocal.set(id, row);
     if (prev === undefined) {
       this.fireCardLocal({ kind: "added", key: id, row });
@@ -164,7 +200,7 @@ export class DataManager {
   /** Subscribe to every local-cards-overlay change. Fires for both
    *  mirror-driven server pushes and client-driven `setLocal`/`clearLocal`
    *  calls. Returns an unsubscribe fn. */
-  subscribeLocalCard(listener: TableListener<Card>): () => void {
+  subscribeLocalCard(listener: TableListener<LocalCard>): () => void {
     this.cardLocalListeners.add(listener);
     return () => {
       this.cardLocalListeners.delete(listener);
@@ -174,7 +210,7 @@ export class DataManager {
   /** Subscribe to local-cards-overlay changes for a single id. Subscribing
    *  to a not-yet-existing id is fine — the listener fires when the row
    *  arrives. Returns an unsubscribe fn. */
-  subscribeLocalCardKey(key: number, listener: TableListener<Card>): () => void {
+  subscribeLocalCardKey(key: number, listener: TableListener<LocalCard>): () => void {
     let set = this.cardLocalKeyListeners.get(key);
     if (!set) {
       set = new Set();
@@ -193,6 +229,52 @@ export class DataManager {
     this.playersLocal.set(id, row);
   }
 
+  /** Subscribe to local-souls-overlay changes for a single soul-card
+   *  id. Subscribing to a not-yet-existing id is fine — the listener
+   *  fires when the row arrives. Returns an unsubscribe fn. */
+  subscribeLocalSoulKey(key: number, listener: TableListener<Soul>): () => void {
+    let set = this.soulLocalKeyListeners.get(key);
+    if (!set) {
+      set = new Set();
+      this.soulLocalKeyListeners.set(key, set);
+    }
+    set.add(listener);
+    return () => {
+      const s = this.soulLocalKeyListeners.get(key);
+      if (!s) return;
+      s.delete(listener);
+      if (s.size === 0) this.soulLocalKeyListeners.delete(key);
+    };
+  }
+
+  /** Mirror Soul rows into the local overlay and fire per-key
+   *  listeners. Unlike `mirrorCard`, souls carry no client-only
+   *  annotations — the server is authoritative for every field —
+   *  so this is a straight copy-through with the fan-out attached. */
+  private mirrorSoul(change: TableChange<Soul>): void {
+    if (change.kind === "removed") {
+      if (!this.soulsLocal.has(change.key)) return;
+      this.soulsLocal.delete(change.key);
+      this.fireSoulLocalKey(change);
+      return;
+    }
+    const row = change.kind === "added" ? change.row : change.newRow;
+    this.soulsLocal.set(change.key, row);
+    this.fireSoulLocalKey(change);
+  }
+
+  private fireSoulLocalKey(change: TableChange<Soul>): void {
+    const set = this.soulLocalKeyListeners.get(change.key);
+    if (!set || set.size === 0) return;
+    for (const l of [...set]) {
+      try {
+        l(change);
+      } catch (err) {
+        console.error("[DataManager] souls local key listener threw", err);
+      }
+    }
+  }
+
   setLocalZone(id: number, row: Zone): void {
     this.zonesLocal.set(id, row);
   }
@@ -209,6 +291,7 @@ export class DataManager {
     const now = this.reducers.serverNowSecs();
     this.cards.promote(now);
     this.players.promote(now);
+    this.souls.promote(now);
     this.zones.promote(now);
   }
 
@@ -221,12 +304,15 @@ export class DataManager {
     this.subscriptions.dispose();
     this.cards.dispose();
     this.players.dispose();
+    this.souls.dispose();
     this.zones.dispose();
     this.cardsLocal.clear();
     this.playersLocal.clear();
+    this.soulsLocal.clear();
     this.zonesLocal.clear();
     this.cardLocalListeners.clear();
     this.cardLocalKeyListeners.clear();
+    this.soulLocalKeyListeners.clear();
   }
 
   private mirror<T>(
@@ -406,8 +492,20 @@ export class DataManager {
         if (carried) p.startSecs = carried.startSecs;
       }
     }
+    // Reuse the cached def when `packedDefinition` is unchanged
+    // from the previous local row — the wasm `decode` call shows up
+    // in the profile when consumers walk `cardsLocal` (e.g. the
+    // soul-card corpus meter). `packedDefinition` is a card's *type*,
+    // not its state, so it virtually never changes for a live card.
+    const def =
+      prev !== undefined &&
+      prev.packedDefinition === baseRow.packedDefinition &&
+      prev.def !== undefined
+        ? prev.def
+        : this.definitions.decode(baseRow.packedDefinition);
     const nextRow: LocalCard = {
       ...baseRow,
+      def,
       ...(dead !== undefined ? { dead } : {}),
       ...(progress !== undefined ? { progress } : {}),
     };
@@ -499,7 +597,7 @@ export class DataManager {
   /** Snapshot listener sets before iterating so a listener that
    *  (un)subscribes during firing doesn't break the loop. Per-listener
    *  try/catch so one bad listener can't stop the others. */
-  private fireCardLocal(change: TableChange<Card>): void {
+  private fireCardLocal(change: TableChange<LocalCard>): void {
     if (this.cardLocalListeners.size > 0) {
       for (const l of [...this.cardLocalListeners]) {
         try {

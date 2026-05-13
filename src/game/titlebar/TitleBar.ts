@@ -14,11 +14,18 @@ export class TitleBar extends LayoutNode {
   private readonly drawCallsText: Text;
   private readonly fpsText: Text;
   private fps = 60;
+  private readonly playerName: string;
+  private playerId: number;
+  /** `0` until the soul subscription lands. Re-set via `setSoulCardId`
+   *  when `SoulManager` resolves the player's soul card. */
+  private soulCardId = 0;
 
-  constructor(playerName: string) {
+  constructor(playerName: string, playerId: number) {
     super();
+    this.playerName = playerName;
+    this.playerId = playerId;
     this.nameText = new Text({
-      text: playerName,
+      text: this.formatNameLine(),
       style: {
         fill: 0xffffff,
         fontFamily: "sans-serif",
@@ -59,6 +66,23 @@ export class TitleBar extends LayoutNode {
     this.fps = this.fps * (1 - FPS_SMOOTHING) + instant * FPS_SMOOTHING;
     this.drawCallsText.text = `${drawCalls} dc`;
     this.fpsText.text = `${Math.round(this.fps)} fps`;
+  }
+
+  /** Update the displayed soul card id (after `SoulManager` resolves
+   *  it on first login / lazy migration / character switch). Re-renders
+   *  the name line to include the new id alongside the player id. */
+  setSoulCardId(soulCardId: number): void {
+    if (this.soulCardId === soulCardId) return;
+    this.soulCardId = soulCardId;
+    this.nameText.text = this.formatNameLine();
+  }
+
+  /** Compose the name line: `"<name> p:<player_id> s:<soul_id>"`. Both
+   *  ids are appended for spawn-by-id debugging — copy the values
+   *  straight into a `bin/st`-style command to target this player or
+   *  soul. Soul id reads as `s:0` until the subscription resolves it. */
+  private formatNameLine(): string {
+    return `${this.playerName} p:${this.playerId} s:${this.soulCardId}`;
   }
 
   protected override layout(): void {

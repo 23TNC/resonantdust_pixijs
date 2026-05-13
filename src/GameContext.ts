@@ -6,6 +6,7 @@ import type { DrawCallCounter } from "./debug/DrawCallCounter";
 import type { DefinitionManager } from "./game/definitions/DefinitionManager";
 // import type { RecipeManager } from "./definitions/RecipeManager";
 import type { PlayerManager } from "./server/player/PlayerManager";
+import type { SoulManager } from "./server/player/SoulManager";
 import type { GameManager } from "./scenes/game/GameManager";
 import type { InputManager } from "./game/input/InputManager";
 import type { LayoutManager } from "./game/layout/LayoutManager";
@@ -27,6 +28,7 @@ export interface GameContext {
   readonly connection: ConnectionManager;
   readonly reducers: ReducerManager;
   readonly playerSession: PlayerManager;
+  readonly souls: SoulManager;
   readonly data: DataManager;
   readonly zones: ZoneManager;
   /** Scene-scoped: set by GameScene on enter, cleared on exit. Null otherwise. */

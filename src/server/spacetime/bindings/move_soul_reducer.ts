@@ -10,9 +10,8 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default __t.row({
-  validAt: __t.u64().primaryKey().name("valid_at"),
-  playerId: __t.u32().name("player_id"),
-  name: __t.string(),
-  soulCardId: __t.u32().name("soul_card_id"),
-});
+export default {
+  targetSurface: __t.u8(),
+  targetMacroZone: __t.u32(),
+  targetMicroZone: __t.u8(),
+};

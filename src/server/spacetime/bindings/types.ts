@@ -47,10 +47,7 @@ export const Player = __t.object("Player", {
   validAt: __t.u64(),
   playerId: __t.u32(),
   name: __t.string(),
-  surface: __t.u8(),
-  macroZone: __t.u32(),
-  microZone: __t.u8(),
-  microLocation: __t.u32(),
+  soulCardId: __t.u32(),
 });
 export type Player = __Infer<typeof Player>;
 
@@ -79,6 +76,20 @@ export const ScheduleDeletePlayers = __t.object("ScheduleDeletePlayers", {
   scheduledAt: __t.scheduleAt(),
 });
 export type ScheduleDeletePlayers = __Infer<typeof ScheduleDeletePlayers>;
+
+export const Soul = __t.object("Soul", {
+  validAt: __t.u64(),
+  cardId: __t.u32(),
+  ownerId: __t.u32(),
+  surface: __t.u8(),
+  macroZone: __t.u32(),
+  microZone: __t.u8(),
+  microLocation: __t.u32(),
+  stats: __t.u32(),
+  fatigued: __t.u32(),
+  injured: __t.u32(),
+});
+export type Soul = __Infer<typeof Soul>;
 
 export const Zone = __t.object("Zone", {
   validAt: __t.u64(),
