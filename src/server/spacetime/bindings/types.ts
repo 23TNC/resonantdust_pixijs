@@ -36,8 +36,8 @@ export const MagneticAction = __t.object("MagneticAction", {
   outerRecipeId: __t.u16(),
   successRecipeId: __t.u16(),
   failureRecipeId: __t.u16(),
-  durationAt: __t.u32(),
-  delaySecs: __t.u32(),
+  durationAt: __t.u64(),
+  delayMs: __t.u64(),
   callerPlayerId: __t.u32(),
   pulledCards: __t.array(__t.u32()),
 });
@@ -76,6 +76,12 @@ export const ScheduleDeletePlayers = __t.object("ScheduleDeletePlayers", {
   scheduledAt: __t.scheduleAt(),
 });
 export type ScheduleDeletePlayers = __Infer<typeof ScheduleDeletePlayers>;
+
+export const SequenceCounter = __t.object("SequenceCounter", {
+  id: __t.u8(),
+  next: __t.u16(),
+});
+export type SequenceCounter = __Infer<typeof SequenceCounter>;
 
 export const Soul = __t.object("Soul", {
   validAt: __t.u64(),

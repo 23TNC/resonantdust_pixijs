@@ -75,7 +75,7 @@ async function main(): Promise<Runtime> {
   // `server` map into `current` and fires `added`/`updated`/`removed` events
   // to subscribers. Without this, subscribers never see inbound data and
   // anything waiting on `current` (e.g. PlayerManager.waitForPlayer) hangs.
-  // `promote()` reads server time from `ReducerManager.serverNowSecs()`
+  // `promote()` reads server time from `ReducerManager.serverNowMs()`
   // internally (re-baselined on every reducer commit) — see `DataManager.promote`.
   app.ticker.add(() => data.promote());
 

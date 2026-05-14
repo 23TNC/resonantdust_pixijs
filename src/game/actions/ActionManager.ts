@@ -2,11 +2,14 @@ import { debug } from "../../debug";
 import type { GameContext } from "../../GameContext";
 import type { Card } from "../cards/Card";
 import {
+  getStackDirection,
   getStackedState,
   STACK_DIRECTION_DOWN,
   STACK_DIRECTION_UP,
   STACKED_LOOSE,
   STACKED_ON_HEX,
+  STACKED_ON_ROOT,
+  STACKED_SLOT,
 } from "../cards/cardData";
 import { WORLD_LAYER } from "../../server/data/packing";
 import { getZoneTileDef } from "../world/worldCoords";
@@ -436,11 +439,30 @@ export class ActionManager {
     );
 
     const matchRoot = rootless ? 0 : rootDef;
+    // Build has-predicate candidate pools. Root and actor owners can
+    // differ in principle (combat-style recipes where root is the
+    // target), but at this point in the matcher we don't yet know
+    // which chain slot will be the actor — `slotStart` falls out of
+    // the matcher itself. For v1 we approximate by reading the
+    // *root card's* owner soul stack and feeding it to both root and
+    // actor pools (same convention `on_create::trigger` uses where
+    // root == actor). This over-permits in the rare cross-owner
+    // case; `propose_action::resolve_has` is the authoritative
+    // server-side check that catches it.
+    const ownerId = this.ctx.data.cardsLocal.get(rootCard.cardId)?.ownerId ?? 0;
+    const above = this.topStackDefs(ownerId, STACK_DIRECTION_UP);
+    const below = this.topStackDefs(ownerId, STACK_DIRECTION_DOWN);
     const match = this.ctx.definitions.matchStackRecipe(
       hexDef,
       matchRoot,
       slotDefs,
       direction,
+      {
+        rootAbove: above,
+        actorAbove: above,
+        rootBelow: below,
+        actorBelow: below,
+      },
     );
     if (match === null) return false;
 
@@ -712,6 +734,79 @@ export class ActionManager {
     actorId: number,
   ): string {
     return `${looseRootId}:${direction}:${recipeIndex}:${actorId}`;
+  }
+
+  /** Packed defs of cards currently stacked on `ownerId`'s soul card
+   *  in the given `direction` (UP = equipment / above, DOWN = action
+   *  stack / below). Used by `tryMatch` to feed `has` /
+   *  `reagents.has` / `has_below` predicate filters into the wasm
+   *  matcher.
+   *
+   *  Walks the chain BFS-style from the soul outward, accepting both
+   *  state-1 (`Slot`, `microLocation = immediate parent`) and
+   *  state-2 (`OnRoot`, `microLocation = chain root`) rows. Both
+   *  encodings appear in `cardsLocal`:
+   *   - `CardManager.stack` writes state-1 from drag-drop.
+   *   - The server's `equip_card` / `propose_action` writes state-2,
+   *     but `mirrorCard.preservePosition` keeps the local state-1
+   *     shape when `force_position` is clear — so practically the
+   *     local row's state can differ from the server's verbatim.
+   *  A filter on either state alone would miss whichever the server
+   *  wrote. The BFS subsumes both: every child whose
+   *  `microLocation` points into the already-visited chain set is
+   *  picked up.
+   *
+   *  Returns an empty array when the owner has no player row, no
+   *  soul, or no chained cards in that direction. The matcher
+   *  treats an empty pool as "this slot has no candidate," filtering
+   *  any recipe that declares a has-predicate for it. */
+  private topStackDefs(ownerId: number, direction: number): number[] {
+    if (ownerId === 0) return [];
+    const player = this.ctx.data.playersLocal.get(ownerId);
+    if (!player || player.soulCardId === 0) return [];
+    const soulId = player.soulCardId;
+
+    // Build a `parentId -> children[]` index over chain rows in this
+    // direction. `parentId` is whatever `microLocation` points at,
+    // regardless of whether the row is `Slot` (immediate-predecessor
+    // pointer) or `OnRoot` (chain-root pointer). The BFS below
+    // naturally handles both shapes because:
+    //   - Multiple `OnRoot` siblings under one root all show up as
+    //     children of that root and are visited at the same depth.
+    //   - `Slot` chains form a linked list; each card is a child of
+    //     the prior. The BFS traverses depth-first effectively
+    //     because there's only one child per parent in a pure Slot
+    //     chain.
+    const childrenByParent = new Map<number, { id: number; def: number }[]>();
+    for (const row of this.ctx.data.cardsLocal.values()) {
+      const state = getStackedState(row.microZone);
+      if (state !== STACKED_ON_ROOT && state !== STACKED_SLOT) continue;
+      if (getStackDirection(row.microZone) !== direction) continue;
+      const parentId = row.microLocation;
+      if (parentId === 0) continue;
+      let list = childrenByParent.get(parentId);
+      if (list === undefined) {
+        list = [];
+        childrenByParent.set(parentId, list);
+      }
+      list.push({ id: row.cardId, def: row.packedDefinition });
+    }
+
+    const result: number[] = [];
+    const visited = new Set<number>([soulId]);
+    const queue: number[] = [soulId];
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      const kids = childrenByParent.get(cur);
+      if (kids === undefined) continue;
+      for (const kid of kids) {
+        if (visited.has(kid.id)) continue;
+        visited.add(kid.id);
+        result.push(kid.def);
+        queue.push(kid.id);
+      }
+    }
+    return result;
   }
 }
 

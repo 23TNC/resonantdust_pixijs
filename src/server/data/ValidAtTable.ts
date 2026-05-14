@@ -1,4 +1,4 @@
-import { idOf, validAtOf, type ValidAt } from "./packing";
+import { validAtOf, type ValidAt } from "./packing";
 
 /** A change to the table's `current` view, fired by `promote(now)`. */
 export type TableChange<T> =
@@ -28,8 +28,15 @@ export class ValidAtTable<T> {
   private readonly keyListeners = new Map<number, Set<TableListener<T>>>();
 
   /** `keyOf(row)` returns the packed-u64 key for a row. For tables whose
-   *  rows already carry the packed key, pass `(r) => r.validAt`. */
-  constructor(private readonly keyOf: (row: T) => ValidAt) {}
+   *  rows already carry the packed key, pass `(r) => r.validAt`. `idOf(row)`
+   *  returns the row's logical id column (e.g. `card_id`, `player_id`,
+   *  `zone_id`) — read directly from the row rather than decoded from
+   *  the packed PK so the table stays correct even when the PK no longer
+   *  encodes the id. */
+  constructor(
+    private readonly keyOf: (row: T) => ValidAt,
+    private readonly idOf: (row: T) => number,
+  ) {}
 
   insert = (row: T): void => {
     this.server.set(this.keyOf(row), row);
@@ -96,7 +103,7 @@ export class ValidAtTable<T> {
     // setTarget — typically (0,0) for a fresh server row).
     const knownIds = new Set<number>();
     for (const [packed, row] of this.server) {
-      const id = idOf(packed);
+      const id = this.idOf(row);
       knownIds.add(id);
       const validAt = validAtOf(packed);
       if (validAt > now) continue;

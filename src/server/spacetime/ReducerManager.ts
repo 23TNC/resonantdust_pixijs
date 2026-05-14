@@ -14,12 +14,12 @@ import type { ConnectionManager } from "./ConnectionManager";
  * `SubscriptionManager` forwards that timestamp to `noteServerTime`,
  * which records the (server-micros, local-millis) pair. Callers that
  * need to ask "what does the server think now is?" call
- * `serverNowSecs()`, which interpolates from the last capture forward
+ * `serverNowMs()`, which interpolates from the last capture forward
  * using the local monotonic delta — so even between updates the
  * estimate stays current. Used by `DataManager.promote()` to align
  * `ValidAtTable` promotion to the server's timeline instead of
- * `Date.now()/1000`, eliminating the artificial "future-row" delay
- * when the client clock drifts behind the server's.
+ * `Date.now()`, eliminating the artificial "future-row" delay when
+ * the client clock drifts behind the server's.
  */
 export class ReducerManager {
   /** Server `Timestamp.microsSinceUnixEpoch` from the most recent
@@ -33,7 +33,7 @@ export class ReducerManager {
   constructor(private readonly connection: ConnectionManager) {}
 
   /** Record a fresh server timestamp from a reducer event. Pairs it
-   *  with `Date.now()` so `serverNowSecs()` can interpolate forward
+   *  with `Date.now()` so `serverNowMs()` can interpolate forward
    *  using local monotonic time deltas. The newer capture replaces
    *  the older — no averaging, since SpacetimeDB timestamps already
    *  reflect actual server wall-clock at reducer-run time. */
@@ -42,20 +42,20 @@ export class ReducerManager {
     this.localMillisAtCapture = Date.now();
   }
 
-  /** Server wall-clock now, in unix seconds (float with ms precision).
-   *  Computed as `lastServerMicros + (Date.now() - lastLocalMillis)*1000`
+  /** Server wall-clock now, in unix milliseconds (float).
+   *  Computed as `lastServerMicros/1000 + (Date.now() - lastLocalMillis)`
    *  to interpolate from the last capture forward.
    *
-   *  Falls back to `Date.now() / 1000` before the first server
-   *  timestamp lands (initial connect, before any reducer event has
-   *  flowed through). Once a timestamp has been captured, this is
-   *  the source of truth for "now" everywhere the client compares
-   *  against server `valid_at` values. */
-  serverNowSecs(): number {
-    if (this.serverMicrosAtCapture === null) return Date.now() / 1000;
+   *  Falls back to `Date.now()` before the first server timestamp
+   *  lands (initial connect, before any reducer event has flowed
+   *  through). Once a timestamp has been captured, this is the
+   *  source of truth for "now" everywhere the client compares
+   *  against server `valid_at` values (which are also unix ms). */
+  serverNowMs(): number {
+    if (this.serverMicrosAtCapture === null) return Date.now();
     const elapsedMillis = Date.now() - this.localMillisAtCapture;
     const nowMicros = this.serverMicrosAtCapture + BigInt(elapsedMillis) * 1000n;
-    return Number(nowMicros) / 1_000_000;
+    return Number(nowMicros) / 1_000;
   }
 
   /**
@@ -88,6 +88,35 @@ export class ReducerManager {
     );
     const conn = await this.connection.connect();
     await conn.reducers.moveSoul(args);
+  }
+
+  /**
+   * Equip an inventory card onto the caller's soul card by chaining
+   * it on top of the soul's UP stack. Server walks the existing UP
+   * stack via `recipe_eval::soul_stack`, then writes the card's row
+   * as `OnRoot` (first equip, position=1) or `Slot` (subsequent
+   * equips, parented to the current top). Validates that the card
+   * is owned by the player, alive, not slot-held by an in-flight
+   * action, and currently Free/OnHex (not already in a chain).
+   *
+   * Today's call site: `DragManager.handleRectDrop` when the local
+   * player drops a card onto their soul card and the cursor
+   * direction resolves to UP. The local `CardManager.stack` call
+   * still fires alongside for instant visual feedback; the server's
+   * mirror will overwrite the local row with the authoritative
+   * shape (OnRoot/Slot) once the reducer commits.
+   */
+  async equipCard(args: {
+    playerId: number;
+    cardId: number;
+  }): Promise<void> {
+    debug.log(
+      ["spacetime"],
+      `[spacetime] equipCard player=${args.playerId} card=${args.cardId}`,
+      5,
+    );
+    const conn = await this.connection.connect();
+    await conn.reducers.equipCard(args);
   }
 
   async proposeAction(args: {

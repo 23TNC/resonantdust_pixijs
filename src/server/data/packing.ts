@@ -4,10 +4,14 @@
  *  Encoding schemes here all match the server's wire format:
  *
  *  1. **Valid-at u64 row keys.** Every server table uses a u64 primary key
- *     whose high 32 bits hold the row's id (e.g. `card_id`, `zone_id`) and
- *     whose low 32 bits hold the absolute-second unix timestamp at which
- *     the row becomes valid. Multiple rows per id can coexist; the client
- *     picks the row whose valid_at is the largest one that has elapsed.
+ *     whose high 48 bits hold the row's absolute-millisecond unix
+ *     timestamp at which the row becomes valid, and whose low 16 bits
+ *     hold an opaque global sequence number that disambiguates
+ *     same-millisecond writes. The row's logical id (`card_id`,
+ *     `zone_id`, `player_id`) lives on a separate column and should
+ *     be read from there — not derived from the key. Multiple rows
+ *     per id can coexist; the client picks the row whose validAt is
+ *     the largest one that has elapsed.
  *
  *  2. **`ZoneId` = `macroZone * 256 + layer`** packed as a JS `number`
  *     (40 bits, well inside safe-integer range). World zones use
@@ -52,32 +56,23 @@
  *  chains keep parent-pointer walking. Rect-on-hex must be a leaf — no
  *  rect chain hangs off it. See `docs/STACK_LAYOUT_MIGRATION.md`. */
 
-const SHIFT = 32n;
-const LOW32 = 0xffffffffn;
+const SEQ_SHIFT = 16n;
+const SEQ_MASK = 0xffffn;
 
-/** Packed `(id, validAt)` matching the server's u64 primary key. */
+/** Packed `(time_ms_u48 << 16) | sequence_u16` matching the server's
+ *  u64 primary key. */
 export type ValidAt = bigint;
 
-export function packValidAt(id: number, validAtSeconds: number): ValidAt {
-  return (BigInt(id) << SHIFT) | (BigInt(validAtSeconds) & LOW32);
+/** Pack a `validAtMs` (u48) + `sequence` (u16) into the u64 PK. The
+ *  client mostly only reads this — the only writer is tests / mocks. */
+export function packValidAt(validAtMs: number, sequence: number): ValidAt {
+  return (BigInt(validAtMs) << SEQ_SHIFT) | (BigInt(sequence) & SEQ_MASK);
 }
 
-export function unpackValidAt(packed: ValidAt): {
-  id: number;
-  validAt: number;
-} {
-  return {
-    id: Number(packed >> SHIFT),
-    validAt: Number(packed & LOW32),
-  };
-}
-
-export function idOf(packed: ValidAt): number {
-  return Number(packed >> SHIFT);
-}
-
+/** Extract the row's `validAt` (in absolute unix milliseconds) from
+ *  the packed u64 PK. The sequence portion is opaque and discarded. */
 export function validAtOf(packed: ValidAt): number {
-  return Number(packed & LOW32);
+  return Number(packed >> SEQ_SHIFT);
 }
 
 const LAYER_RANGE = 256;

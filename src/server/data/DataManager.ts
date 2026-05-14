@@ -1,4 +1,5 @@
 import { debug } from "../../debug";
+import { worldPixelFromRow } from "../../game/cards/cardData";
 import type { CardDefinition, DefinitionManager } from "../../game/definitions/DefinitionManager";
 import type { Card, Player, Soul, Zone } from "../spacetime/bindings/types";
 import type { ConnectionManager } from "../spacetime/ConnectionManager";
@@ -8,8 +9,9 @@ import {
   isStackLayout,
   packStackMicroZone,
   unpackStackMicroZone,
+  type ValidAt,
 } from "./packing";
-import { idOf, validAtOf } from "./packing";
+import { validAtOf } from "./packing";
 import { ValidAtTable, type TableChange, type TableListener } from "./ValidAtTable";
 
 const INVENTORY_LAYER = 1;
@@ -25,6 +27,18 @@ const FLAG_PROGRESS_STYLE_MASK = 0b111;
 // bit inside `microZone` itself; moved to `flags` to free the bit for
 // chain `direction`. See `content/cards/flags.json`.
 const FLAG_FORCE_POSITION = 1 << 11;
+// `position_dirty` (bit 13): server auto-sets when the row's
+// spatial fields differ from the prior row. Marks rows whose intent
+// IS a positional change. Used by the move_smooth scan: a future
+// row only becomes a motion target if BOTH this and move_smooth are
+// set, so plain "data only" rows along the path aren't mistaken for
+// destinations. See `content/cards/flags.json`.
+const FLAG_POSITION_DIRTY = 1 << 13;
+// `move_smooth` (bit 17): client render hint — tween from the prior
+// on-screen position to this row's position over the time delta
+// between rows, instead of snapping. Set by `move_soul` on every
+// queued step row. See `content/cards/flags.json`.
+const FLAG_MOVE_SMOOTH = 1 << 17;
 
 /** A single progress indicator on a card. Today the `progress` array on
  *  `LocalCard` is populated with at most one entry (the future
@@ -62,11 +76,29 @@ export interface ProgressInfo {
  *    on every read. `mirrorCard` re-decodes only when `packedDefinition`
  *    actually changed; `setLocalCard` backfills if missing. The
  *    decoded value is `null` for an unknown packed id (matches
- *    `DefinitionManager.decode`'s return contract). */
+ *    `DefinitionManager.decode`'s return contract).
+ *  - `target` — visual destination for the `move_smooth` motion path.
+ *    Resolved by `resolveCardTarget` from the earliest future row of
+ *    this card with both `move_smooth` and `position_dirty`, or
+ *    falling back to the active row when it carries `move_smooth`.
+ *    `null` for non-OnHex/microLocation!=0 rows (motion is scoped to
+ *    world-tile-anchored cards in v1), AND for cards whose active row
+ *    has no `move_smooth` flag and no future smooth target — those
+ *    snap via the existing static placement path. `key` is the
+ *    packed `validAt` of the targeted row, used to detect identity
+ *    changes (target swap vs same row updating in place). */
+export interface CardTarget {
+  x: number;
+  y: number;
+  time: number;
+  key: ValidAt;
+}
+
 export type LocalCard = Card & {
   dead?: 1 | 2;
   progress?: ProgressInfo[];
   def?: CardDefinition | null;
+  target?: CardTarget;
 };
 
 /** Local data layer with two tiers:
@@ -96,10 +128,22 @@ export type LocalCard = Card & {
  *  in; `subscribeCards(zoneId)` / etc. are reachable as
  *  `data.subscriptions.<method>`. */
 export class DataManager {
-  readonly cards = new ValidAtTable<Card>((row) => row.validAt);
-  readonly players = new ValidAtTable<Player>((row) => row.validAt);
-  readonly souls = new ValidAtTable<Soul>((row) => row.validAt);
-  readonly zones = new ValidAtTable<Zone>((row) => row.validAt);
+  readonly cards = new ValidAtTable<Card>(
+    (row) => row.validAt,
+    (row) => row.cardId,
+  );
+  readonly players = new ValidAtTable<Player>(
+    (row) => row.validAt,
+    (row) => row.playerId,
+  );
+  readonly souls = new ValidAtTable<Soul>(
+    (row) => row.validAt,
+    (row) => row.cardId,
+  );
+  readonly zones = new ValidAtTable<Zone>(
+    (row) => row.validAt,
+    (row) => row.zoneId,
+  );
   readonly subscriptions: SubscriptionManager;
 
   /** Local overlays — what game code reads/writes for displayed state.
@@ -122,6 +166,14 @@ export class DataManager {
    *  subscribes per-card-id so it only redraws when the matching
    *  soul row updates. */
   private readonly soulLocalKeyListeners = new Map<number, Set<TableListener<Soul>>>();
+  /** Global soul-overlay listeners — fire on every soul change. The
+   *  per-key variant is more efficient for "watch one soul" but has
+   *  the failure mode that a listener registered for cardId X
+   *  receives nothing if mirrorSoul fires with a different
+   *  `change.key`. Consumers that just need "any soul changed,
+   *  invalidate yourself" (e.g. the resource meter on a soul rect
+   *  card) use this global variant for reliability. */
+  private readonly soulLocalListeners = new Set<TableListener<Soul>>();
 
   constructor(
     connection: ConnectionManager,
@@ -131,8 +183,8 @@ export class DataManager {
     // Thread the reducer-event timestamp from `SubscriptionManager` into
     // `ReducerManager.noteServerTime` so the client's server-clock
     // estimate gets re-baselined on every reducer commit. `promote()`
-    // then reads from `reducers.serverNowSecs()` instead of
-    // `Date.now()/1000`, aligning `ValidAtTable` promotion to the
+    // then reads from `reducers.serverNowMs()` instead of
+    // `Date.now()`, aligning `ValidAtTable` promotion to the
     // server's timeline.
     this.subscriptions = new SubscriptionManager(connection, {
       onReducerEvent: (micros) => this.reducers.noteServerTime(micros),
@@ -142,6 +194,22 @@ export class DataManager {
       onInsert: this.cards.insert,
       onUpdate: this.cards.update,
       onDelete: this.cards.delete,
+    });
+    // Second `cards` handler — fires AFTER the ValidAtTable mutation
+    // (registration order = call order in SubscriptionManager). Each
+    // server-tier row event for a card whose local row already
+    // exists may change the resolved motion target: a new future
+    // row with `move_smooth` + `position_dirty` becomes the target,
+    // and a delete of the currently-targeted future row drops back
+    // to the fallback (current row, if `move_smooth` is set, else
+    // no motion). `recomputeCardTarget` is a no-op when the target's
+    // identity hasn't shifted, so unrelated inserts (e.g. a future
+    // `progress_style` row landing) don't spuriously re-fire local
+    // listeners.
+    this.subscriptions.registerTableHandlers("cards", {
+      onInsert: (row) => this.recomputeCardTarget(row.cardId),
+      onUpdate: (_oldRow, newRow) => this.recomputeCardTarget(newRow.cardId),
+      onDelete: (row) => this.recomputeCardTarget(row.cardId),
     });
     this.subscriptions.registerTableHandlers("players", {
       onInsert: this.players.insert,
@@ -232,6 +300,18 @@ export class DataManager {
   /** Subscribe to local-souls-overlay changes for a single soul-card
    *  id. Subscribing to a not-yet-existing id is fine — the listener
    *  fires when the row arrives. Returns an unsubscribe fn. */
+  /** Subscribe to every local-souls-overlay change. Fires on every
+   *  mirrorSoul push regardless of which soul changed. Use for
+   *  invalidation triggers where the listener already knows which
+   *  soul to read (and only cares "something changed, recheck").
+   *  Returns an unsubscribe fn. */
+  subscribeLocalSoul(listener: TableListener<Soul>): () => void {
+    this.soulLocalListeners.add(listener);
+    return () => {
+      this.soulLocalListeners.delete(listener);
+    };
+  }
+
   subscribeLocalSoulKey(key: number, listener: TableListener<Soul>): () => void {
     let set = this.soulLocalKeyListeners.get(key);
     if (!set) {
@@ -264,6 +344,15 @@ export class DataManager {
   }
 
   private fireSoulLocalKey(change: TableChange<Soul>): void {
+    if (this.soulLocalListeners.size > 0) {
+      for (const l of [...this.soulLocalListeners]) {
+        try {
+          l(change);
+        } catch (err) {
+          console.error("[DataManager] souls local listener threw", err);
+        }
+      }
+    }
     const set = this.soulLocalKeyListeners.get(change.key);
     if (!set || set.size === 0) return;
     for (const l of [...set]) {
@@ -280,15 +369,15 @@ export class DataManager {
   }
 
   /** Promote every table's `current` view to the server's estimated
-   *  current time (unix seconds, float with ms precision). Reads from
-   *  `ReducerManager.serverNowSecs()` so promotion aligns with the
+   *  current time (unix milliseconds, float). Reads from
+   *  `ReducerManager.serverNowMs()` so promotion aligns with the
    *  server's `valid_at` timeline — before any reducer event has
    *  landed, that falls back to local wall-clock; after the first
    *  reducer commit, every subsequent reducer event re-baselines the
    *  offset so server-stamped future rows promote at the right
    *  moment from the client's perspective. */
   promote(): void {
-    const now = this.reducers.serverNowSecs();
+    const now = this.reducers.serverNowMs();
     this.cards.promote(now);
     this.players.promote(now);
     this.souls.promote(now);
@@ -313,6 +402,7 @@ export class DataManager {
     this.cardLocalListeners.clear();
     this.cardLocalKeyListeners.clear();
     this.soulLocalKeyListeners.clear();
+    this.soulLocalListeners.clear();
   }
 
   private mirror<T>(
@@ -503,11 +593,18 @@ export class DataManager {
       prev.def !== undefined
         ? prev.def
         : this.definitions.decode(baseRow.packedDefinition);
+    // Resolve the motion target for this row: the earliest future
+    // row with both `move_smooth` and `position_dirty` set, falling
+    // back to the active row itself when it carries `move_smooth`.
+    // `null` → no motion path active; LayoutCard's static applyData
+    // target is used (existing behavior).
+    const target = this.resolveCardTarget(change.key, baseRow);
     const nextRow: LocalCard = {
       ...baseRow,
       def,
       ...(dead !== undefined ? { dead } : {}),
       ...(progress !== undefined ? { progress } : {}),
+      ...(target !== undefined ? { target } : {}),
     };
 
     this.cardsLocal.set(change.key, nextRow);
@@ -543,7 +640,7 @@ export class DataManager {
     let bestValidAt = -1;
     let bestStyle = 0;
     for (const [packed, row] of this.cards.server) {
-      if (idOf(packed) !== cardId) continue;
+      if (row.cardId !== cardId) continue;
       const validAt = validAtOf(packed);
       if (validAt <= startSecs) continue;
       const style = (row.flags >>> FLAG_PROGRESS_STYLE_SHIFT) & FLAG_PROGRESS_STYLE_MASK;
@@ -555,6 +652,91 @@ export class DataManager {
     }
     if (bestValidAt < 0) return undefined;
     return [{ style: bestStyle, startSecs, endSecs: bestValidAt }];
+  }
+
+  /** Resolve the motion target for a card:
+   *
+   *  1. Scan `cards.server` for the earliest future-validAt row of
+   *     this id with BOTH `move_smooth` and `position_dirty` set —
+   *     that's the queued destination of an in-flight move.
+   *  2. Fall back to `baseRow` (the row about to land in
+   *     `cardsLocal`) when it carries `move_smooth` — handles the
+   *     "future row was deleted; unwind toward current" case as well
+   *     as the natural promotion of a step row mid-walk.
+   *
+   *  Returns `undefined` when neither case applies (snap to static
+   *  placement, no motion needed) or when the chosen row's spatial
+   *  fields don't decode to absolute world pixels (Loose / Slot /
+   *  OnRoot / OnHex-on-parent are parent-relative; motion is scoped
+   *  to OnHex/microLocation=0 in v1).
+   *
+   *  `key` is the targeted row's packed `validAt`. Consumers use it
+   *  to detect target *identity* changes (different row entirely)
+   *  vs same row being re-emitted with updated metadata. */
+  private resolveCardTarget(
+    cardId: number,
+    baseRow: Card,
+  ): CardTarget | undefined {
+    const baseValidAt = validAtOf(baseRow.validAt);
+    let bestRow: Card | null = null;
+    let bestValidAt = Infinity;
+    for (const [packed, row] of this.cards.server) {
+      if (row.cardId !== cardId) continue;
+      const validAt = validAtOf(packed);
+      if (validAt <= baseValidAt) continue;
+      if ((row.flags & FLAG_MOVE_SMOOTH) === 0) continue;
+      if ((row.flags & FLAG_POSITION_DIRTY) === 0) continue;
+      if (validAt < bestValidAt) {
+        bestValidAt = validAt;
+        bestRow = row;
+      }
+    }
+    if (bestRow !== null) {
+      const px = worldPixelFromRow(bestRow);
+      if (!px) return undefined;
+      return { x: px.x, y: px.y, time: bestValidAt, key: bestRow.validAt };
+    }
+    // Fallback: target the active row itself when it carries
+    // `move_smooth`. Covers two cases: (a) a step row promoted into
+    // current mid-walk and the *next* future smooth+dirty row hasn't
+    // been queued yet, (b) the future row was deleted and we should
+    // unwind toward whatever's now current. In both, source.time
+    // (captured at "now" when the target installs) is later than
+    // baseRow.validAt, so duration = |now - baseRow.validAt| > 0 and
+    // GameCard tweens.
+    if ((baseRow.flags & FLAG_MOVE_SMOOTH) !== 0) {
+      const px = worldPixelFromRow(baseRow);
+      if (!px) return undefined;
+      return { x: px.x, y: px.y, time: baseValidAt, key: baseRow.validAt };
+    }
+    return undefined;
+  }
+
+  /** Re-run the motion-target scan for a card whose server-tier rows
+   *  may have changed (insert / update / delete of a future row).
+   *  No-op when the resolved target's identity (`key`) hasn't moved
+   *  — most server-tier events for a card don't shift the motion
+   *  destination. When it does change, re-emits the local row so
+   *  `Card.applyData` propagates the new target through to GameCard. */
+  private recomputeCardTarget(cardId: number): void {
+    const cur = this.cardsLocal.get(cardId);
+    if (cur === undefined) return;
+    const next = this.resolveCardTarget(cardId, cur);
+    const prevKey = cur.target?.key;
+    const nextKey = next?.key;
+    if (prevKey === nextKey) {
+      // Same row targeted (or both undefined). The row's *contents*
+      // might have changed (e.g. position fields updated), but the
+      // motion-installation logic on GameCard keys off `target.key`
+      // — re-emitting would force a source-snapshot reset for no
+      // visible reason. Skip.
+      return;
+    }
+    const nextRow: LocalCard = next === undefined
+      ? { ...cur, target: undefined }
+      : { ...cur, target: next };
+    this.cardsLocal.set(cardId, nextRow);
+    this.fireCardLocal({ kind: "updated", key: cardId, oldRow: cur, newRow: nextRow });
   }
 
   /** Bump every other client-only card in `forced`'s chain group whose

@@ -70,6 +70,18 @@ export class LayoutWorld extends LayoutNode {
   private readonly bg = new Graphics();
   private readonly tileLayer = new Container();
   private readonly worldCardSurface = new WorldCardSurface();
+
+  /** Pixi container that holds world cards and pans with the
+   *  viewport (positioned each frame at `worldToLocal(0, 0)`).
+   *  Exposed so view-layer extras like the movement-arrow overlay
+   *  can attach overlays in the same hex-pixel coord space cards
+   *  use, without re-implementing the pan transform. Children added
+   *  here render *above* tiles and *interleaved* with cards (z-order
+   *  follows add order; arrows added after a card draw on top of
+   *  it). */
+  get worldOverlayContainer(): Container {
+    return this.worldCardSurface.container;
+  }
   private readonly spritePool: Sprite[] = [];
   private readonly activeSprites: Sprite[] = [];
 

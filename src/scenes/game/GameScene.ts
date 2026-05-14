@@ -7,6 +7,7 @@ import type { GameContext } from "../../GameContext";
 import { DragManager } from "../../game/input/DragManager";
 import { InputManager } from "../../game/input/InputManager";
 import { LayoutManager } from "../../game/layout/LayoutManager";
+import { MovementArrowManager } from "../../game/world/MovementArrowManager";
 import { WorldPanManager } from "../../game/world/WorldPanManager";
 import { packZoneId } from "../../server/data/packing";
 import { GameLayout } from "./GameLayout";
@@ -24,6 +25,7 @@ export class GameScene extends Scene {
   private dragManager!: DragManager;
   private actionManager!: ActionManager;
   private worldPanManager!: WorldPanManager;
+  private movementArrowManager!: MovementArrowManager;
   private particleManager!: ParticleManager;
   private releaseCards: (() => void) | null = null;
   private releaseKeys: (() => void) | null = null;
@@ -86,6 +88,12 @@ export class GameScene extends Scene {
     // directly and disposes it on exit.
     this.worldPanManager = new WorldPanManager(ctx, this.gameLayout.worldView);
 
+    // Movement-arrow overlay: draws a "next tile" arrow for any card
+    // whose `LocalCard.target` resolves to a different tile than its
+    // current row. Parented into the world view so the arrow pans
+    // with the camera. No ctx binding — no consumer reaches for it.
+    this.movementArrowManager = new MovementArrowManager(ctx, this.gameLayout.worldView);
+
     this.particleManager = new ParticleManager();
     void this.particleManager.init();
 
@@ -111,6 +119,7 @@ export class GameScene extends Scene {
     this.releaseCards = null;
 
     this.particleManager.destroy();
+    this.movementArrowManager.dispose();
     this.worldPanManager.dispose();
     this.actionManager.dispose();
     this.dragManager.dispose();

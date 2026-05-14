@@ -286,17 +286,18 @@ export class LayoutHexCard extends LayoutCard {
     // array carries at most one. `startSecs` / `endSecs` come from
     // `mirrorCard.scanProgress` with the continuity-carry, so the
     // ring doesn't reset across intermediate row writes. Uses
-    // `ReducerManager.serverNowSecs` so server-clock skew doesn't
-    // freeze the fill.
+    // `ReducerManager.serverNowMs` so server-clock skew doesn't
+    // freeze the fill. (Note: `sp.startSecs` / `sp.endSecs` now hold
+    // unix MS — field names are legacy.)
     this.progressBar.clear();
     const local = this.ctx.data.cardsLocal.get(this.cardId);
     let showingProgress = false;
     if (local?.progress) {
-      const nowSecs = this.ctx.reducers.serverNowSecs();
+      const nowMs = this.ctx.reducers.serverNowMs();
       for (const sp of local.progress) {
         const span = sp.endSecs - sp.startSecs;
         if (span <= 0) continue;
-        const fraction = Math.max(0, Math.min(1, (nowSecs - sp.startSecs) / span));
+        const fraction = Math.max(0, Math.min(1, (nowMs - sp.startSecs) / span));
         this.drawHexProgressRing(fraction, sp.style === 2, cx, cy, HEX_CARD_RADIUS, 0xffffff, 0x444444, 4);
         if (fraction < 1) showingProgress = true;
       }

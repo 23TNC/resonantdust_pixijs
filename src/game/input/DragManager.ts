@@ -264,6 +264,36 @@ export class DragManager {
           return;
         }
         this.ctx.cards?.stack(card.cardId, target.cardId, direction);
+        // Equip-sync: when the drop target is the local player's
+        // soul card and the cursor resolves to UP ("top"), this is
+        // an equip — fire `equip_card` so the server writes its
+        // own authoritative row. Without this the local
+        // `cards.stack` write only lives in `cardsLocal`; the
+        // server's cards table never sees the chain, and
+        // `recipe_eval::soul_stack` (used by `propose_action`'s
+        // `resolve_has`) won't find the equipped card. Result: the
+        // client matches `cut_tree` (it sees the axe via
+        // `ActionManager.topStackDefs`), but the server rejects.
+        //
+        // Scope: only the direct case (target === soul) is wired
+        // here. Stacking onto something already on the soul (chain
+        // depth 2+) still desyncs; if/when that matters we'd walk
+        // the local chain to its root and gate on root === soul.
+        // Direction-down drops are a separate concept (action
+        // stack) with no server equip reducer today, so we skip.
+        const soulId = this.ctx.souls.getSoulId();
+        const player = this.ctx.playerSession.getPlayer();
+        if (
+          soulId !== null &&
+          player !== null &&
+          target.cardId === soulId &&
+          direction === "top"
+        ) {
+          void this.ctx.reducers.equipCard({
+            playerId: player.playerId,
+            cardId: card.cardId,
+          });
+        }
         return;
       }
       if (target.gameCard instanceof GameHexCard) {
@@ -496,11 +526,17 @@ export class DragManager {
     return localY < target.layoutCard.height / 2 ? "top" : "bottom";
   }
 
-  /** True if the source card's `flags` has either `position_hold` or
-   *  `position_locked` set — both block pickup. */
+  /** True if any system currently holds the card's position
+   *  (`position_hold_count > 0`) or it's permanently position-locked.
+   *  Both block pickup. `position_hold_count` is a ref count rather
+   *  than a single bit so multiple concurrent owners (e.g. two
+   *  recipes both has-predicate-matching the same axe) compose; the
+   *  bit-flag form (`position_hold`) is a tombstone — derived from
+   *  `count > 0`. */
   private pickupBlocked(flags: number): boolean {
     const def = this.ctx.definitions;
-    return def.hasCardFlag(flags, "position_hold")
+    const heldCount = def.cardFlagFieldValue(flags, "position_hold_count") ?? 0;
+    return heldCount > 0
         || def.hasCardFlag(flags, "position_locked");
   }
 

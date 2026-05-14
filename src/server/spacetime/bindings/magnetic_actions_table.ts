@@ -17,8 +17,8 @@ export default __t.row({
   outerRecipeId: __t.u16().name("outer_recipe_id"),
   successRecipeId: __t.u16().name("success_recipe_id"),
   failureRecipeId: __t.u16().name("failure_recipe_id"),
-  durationAt: __t.u32().name("duration_at"),
-  delaySecs: __t.u32().name("delay_secs"),
+  durationAt: __t.u64().name("duration_at"),
+  delayMs: __t.u64().name("delay_ms"),
   callerPlayerId: __t.u32().name("caller_player_id"),
   pulledCards: __t.array(__t.u32()).name("pulled_cards"),
 });

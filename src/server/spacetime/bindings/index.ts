@@ -37,6 +37,7 @@ import {
 import AddCardReducer from "./add_card_reducer";
 import BootstrapReducer from "./bootstrap_reducer";
 import ClaimOrLoginReducer from "./claim_or_login_reducer";
+import EquipCardReducer from "./equip_card_reducer";
 import GenerateForestTerrainReducer from "./generate_forest_terrain_reducer";
 import MoveSoulReducer from "./move_soul_reducer";
 import ProposeActionReducer from "./propose_action_reducer";
@@ -146,6 +147,7 @@ const reducersSchema = __reducers(
   __reducerSchema("add_card", AddCardReducer),
   __reducerSchema("bootstrap", BootstrapReducer),
   __reducerSchema("claim_or_login", ClaimOrLoginReducer),
+  __reducerSchema("equip_card", EquipCardReducer),
   __reducerSchema("generate_forest_terrain", GenerateForestTerrainReducer),
   __reducerSchema("move_soul", MoveSoulReducer),
   __reducerSchema("propose_action", ProposeActionReducer),

@@ -14,6 +14,7 @@ import init, {
   findPackedByKey as wasmFindPackedByKey,
   isHexType as wasmIsHexType,
   cardFlagBit as wasmCardFlagBit,
+  cardFlagFieldValue as wasmCardFlagFieldValue,
   matchStackRecipe as wasmMatchStackRecipe,
 } from "../../content/pkg/resonantdust_content";
 import type { StackMatch } from "../actions/ActionManager";
@@ -102,26 +103,59 @@ export class DefinitionManager {
     return mask !== 0 && (flags & mask) !== 0;
   }
 
+  /** Read the value of a multi-bit card-flag field (e.g.
+   *  `"progress_style"`, `"position_hold_count"`) out of `flags`.
+   *  Returns `undefined` for unknown field names (callers should
+   *  treat that as "field absent"; for predicates like "is held"
+   *  test `> 0`). */
+  cardFlagFieldValue(flags: number, name: string): number | undefined {
+    return wasmCardFlagFieldValue(flags, name);
+  }
+
   /** Find the best-matching `Stack(direction)` recipe for a chain.
    *  `hexDef` is the packed definition of the hex card the chain root
    *  is attached to (`0` if not stacked on hex). `rootDef` is the
    *  loose root's packed definition. `slotDefs` are the packed
    *  definitions of cards stacked in `direction` ("up" or "down") from
-   *  the root, in chain order. Returns a `StackMatch` describing the
-   *  match (including the slot window for actor sliding) or `null` if
-   *  no recipe matched. */
+   *  the root, in chain order.
+   *
+   *  `hasCandidates.{root,actor}{Above,Below}` are the packed defs of
+   *  cards currently on each role's soul stack in each direction —
+   *  feeds the `has` / `reagents.has` / `has_below` predicate filter.
+   *  An empty array for a pool means "nothing on that soul stack in
+   *  that direction": recipes whose has-predicates require a card
+   *  there will be filtered out. Pass `{}` (all pools empty) to
+   *  disable the predicate filter for callers that don't care (e.g.
+   *  recipe matching against synthetic-hex-only chains).
+   *
+   *  Returns a `StackMatch` describing the match (including the slot
+   *  window for actor sliding) or `null` if no recipe matched. */
   matchStackRecipe(
     hexDef: number,
     rootDef: number,
     slotDefs: readonly number[],
     direction: "up" | "down",
+    hasCandidates?: {
+      rootAbove?: readonly number[];
+      actorAbove?: readonly number[];
+      rootBelow?: readonly number[];
+      actorBelow?: readonly number[];
+    },
   ): StackMatch | null {
     const dirCode = direction === "up" ? 0 : 1;
+    const rootAbove = new Uint16Array(hasCandidates?.rootAbove ?? []);
+    const actorAbove = new Uint16Array(hasCandidates?.actorAbove ?? []);
+    const rootBelow = new Uint16Array(hasCandidates?.rootBelow ?? []);
+    const actorBelow = new Uint16Array(hasCandidates?.actorBelow ?? []);
     const raw = wasmMatchStackRecipe(
       hexDef,
       rootDef,
       new Uint16Array(slotDefs),
       dirCode,
+      rootAbove,
+      actorAbove,
+      rootBelow,
+      actorBelow,
     ) as unknown;
     return raw === null ? null : (raw as StackMatch);
   }

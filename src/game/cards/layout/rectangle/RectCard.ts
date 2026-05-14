@@ -300,12 +300,19 @@ export class LayoutRectCard extends LayoutCard {
     this.container.addChild(this.visual);
     this.setSize(RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
 
-    // Invalidate on every Soul row change for this card. Per-key
-    // subscription means we don't see noise from unrelated cards or
-    // souls — only the row we'd actually render off of. Non-soul
-    // rect cards never receive an event here (no Soul row exists
-    // for their id); the meter stays empty.
-    this.unsubResourceMeter = ctx.data.subscribeLocalSoulKey(cardId, () => {
+    // Invalidate on every Soul row change in scope, not just this
+    // card's. The per-key variant `subscribeLocalSoulKey(cardId, …)`
+    // is theoretically tighter but missed live stat updates in
+    // practice — adding/removing inventory cards triggers
+    // `apply_slot_delta` server-side, which writes a fresh soul
+    // row, which fires mirrorSoul on the client; in normal play we
+    // only saw the listener fire after movement-driven soul updates.
+    // The global variant routes around any key-match subtlety in the
+    // mirror path. Cost is one `invalidate` per soul update; for
+    // non-soul rect cards the layout's `soulsLocal.get(cardId)` lookup
+    // returns `undefined` and the meter draws nothing, so the extra
+    // invalidate is essentially free.
+    this.unsubResourceMeter = ctx.data.subscribeLocalSoul(() => {
       this.invalidate();
     });
   }
@@ -468,18 +475,19 @@ export class LayoutRectCard extends LayoutCard {
     const local = this.ctx.data.cardsLocal.get(this.cardId);
     if (local?.progress) {
       // Use the server-aligned clock — `sp.startSecs` / `sp.endSecs`
-      // are server `valid_at` values; comparing them to `Date.now()`
-      // when the client is behind the server makes the fraction
-      // negative (clamped to 0) until wall-clock catches up, freezing
-      // the bar visually. `ReducerManager.serverNowSecs()` interpolates
-      // from the last reducer-event timestamp forward, so the bar
-      // starts filling immediately on action commit.
-      const nowSecs = this.ctx.reducers.serverNowSecs();
+      // are server `valid_at` values (now in unix MS, despite the
+      // legacy field names); comparing them to `Date.now()` when the
+      // client is behind the server makes the fraction negative
+      // (clamped to 0) until wall-clock catches up, freezing the bar
+      // visually. `ReducerManager.serverNowMs()` interpolates from
+      // the last reducer-event timestamp forward, so the bar starts
+      // filling immediately on action commit.
+      const nowMs = this.ctx.reducers.serverNowMs();
       const serverFill = shiftLuminance(titleColor);
       for (const sp of local.progress) {
         const span = sp.endSecs - sp.startSecs;
         if (span <= 0) continue;
-        const fraction = Math.max(0, Math.min(1, (nowSecs - sp.startSecs) / span));
+        const fraction = Math.max(0, Math.min(1, (nowMs - sp.startSecs) / span));
         specs.push({ fraction, style: sp.style, leftColor: serverFill });
       }
     }
