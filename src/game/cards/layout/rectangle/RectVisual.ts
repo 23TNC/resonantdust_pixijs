@@ -46,11 +46,12 @@ export class RectCardVisual extends Container {
   draw(
     definition: CardDefinition | null,
     titlePosition: RectCardTitlePosition = "top",
+    label?: string,
   ): void {
     // style[0] = background fill, style[1] = title bar fill, style[2] = text
     // (and outline). FALLBACK_STYLE follows the same ordering.
     const [background, titleBar, textColor] = definition?.style ?? FALLBACK_STYLE;
-    const name = definition?.name ?? FALLBACK_NAME;
+    const name = label ?? definition?.key ?? FALLBACK_NAME;
     const w = RECT_CARD_WIDTH;
     const h = RECT_CARD_HEIGHT;
     const titleY = titlePosition === "top" ? 0 : h - RECT_CARD_TITLE_HEIGHT;

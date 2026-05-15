@@ -42,9 +42,6 @@
  * migration history.
  */
 
-import { unpackMacroZone } from "../../server/data/packing";
-import { WORLD_HEX_RADIUS } from "../world/hexSize";
-
 const STACKED_STATE_MASK = 0b11;
 
 export const STACKED_LOOSE = 0;
@@ -113,29 +110,3 @@ export function getStackDirection(microZone: number): number {
   return (microZone >> 2) & 0x1;
 }
 
-/** Decode a row's spatial fields into absolute world-pixel coords
- *  (the center of its hex tile). Returns `null` when the row's
- *  position is parent-relative (`STACKED_LOOSE` / `STACKED_SLOT` /
- *  `STACKED_ON_ROOT`) or when `STACKED_ON_HEX` is mounted on a
- *  parent card (`microLocation !== 0`) — in those cases the absolute
- *  pixel needs the parent's world transform and isn't pure data.
- *
- *  Used by the `move_smooth` motion path: scanning future rows for a
- *  destination pixel, and computing the unwind target on
- *  cancellation. Callers that need a card top-left (vs hex center)
- *  subtract the card's half-extent. */
-export function worldPixelFromRow(row: {
-  microZone: number;
-  microLocation: number;
-  macroZone: number;
-}): { x: number; y: number } | null {
-  if (getStackedState(row.microZone) !== STACKED_ON_HEX) return null;
-  if (row.microLocation !== 0) return null;
-  const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
-  const q = zoneQ + ((row.microZone >> 5) & 0x7);
-  const r = zoneR + ((row.microZone >> 2) & 0x7);
-  return {
-    x: WORLD_HEX_RADIUS * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r),
-    y: WORLD_HEX_RADIUS * (3 / 2 * r),
-  };
-}

@@ -1,8 +1,7 @@
-import { Container, Graphics, Text } from "pixi.js";
+import { Container, Graphics } from "pixi.js";
 import type { CardDefinition } from "../../../definitions/DefinitionManager";
 
 const FALLBACK_STYLE = ["#3a3a4a", "#7a7a8a", "#0b1426"] as const;
-const FALLBACK_NAME  = "?";
 
 /** Flat-top pointy-side hexagon vertex list centred on (cx, cy). */
 export function hexPoints(cx: number, cy: number, radius: number): number[] {
@@ -31,28 +30,13 @@ export class HexCardVisual extends Container {
 
   private readonly bg = new Graphics();
   private readonly cardOutline = new Graphics();
-  readonly nameText: Text;
 
   constructor(radius: number) {
     super();
     this.radius = radius;
     this.hexWidth = Math.sqrt(3) * radius;
     this.hexHeight = radius * 2;
-    this.nameText = new Text({
-      text: FALLBACK_NAME,
-      style: {
-        fill: FALLBACK_STYLE[2],
-        fontFamily: "Segoe UI",
-        fontSize: 11,
-        fontWeight: "700",
-        align: "center",
-        wordWrap: true,
-        wordWrapWidth: this.hexWidth - 8,
-      },
-    });
-    this.nameText.anchor.set(0.5);
     this.addChild(this.bg);
-    this.addChild(this.nameText);
     this.addChild(this.cardOutline);
   }
 
@@ -73,10 +57,6 @@ export class HexCardVisual extends Container {
 
     this.bg.clear();
     this.bg.poly(pts).fill({ color: primary });
-
-    this.nameText.text = definition?.name ?? FALLBACK_NAME;
-    this.nameText.style.fill = definition?.style[2] ?? FALLBACK_STYLE[2];
-    this.nameText.position.set(cx, cy);
 
     this.cardOutline.clear();
     this.cardOutline.poly(pts).stroke({ color: strokeColor, width: strokeWidth });

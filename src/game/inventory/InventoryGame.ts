@@ -124,11 +124,7 @@ export class GameInventory {
 
       if (rootX === 0 && rootY === 0) {
         const slot = this.findEmptyGridSlot(card, roots, sw, sh);
-        if (slot) {
-          card.setPosition({ kind: "loose", x: slot.x, y: slot.y });
-        } else {
-          card.setPosition({ kind: "loose", x: (sw - cb.w) / 2, y: (sh - cb.h) / 2 + cb.rootOffsetY });
-        }
+        if (slot) card.setPosition({ kind: "loose", x: slot.x, y: slot.y });
         continue;
       }
 
@@ -142,6 +138,24 @@ export class GameInventory {
     }
   }
 
+  /**
+   * Pick a grid slot for a new (root-at-(0,0)) card. Walks the grid in
+   * raster order (top-left first) and scores each candidate by the total
+   * overlap area it would have with existing chains. Returns the
+   * lowest-overlap slot — preferring a zero-overlap one when available,
+   * and the least-bad slot when none are completely free.
+   *
+   * The "always return a slot" behavior is important: when existing
+   * cards have been dragged into non-grid-aligned positions they can
+   * partially overlap every candidate cell even though the surface
+   * still has plenty of visual empty space. Falling back to the center
+   * (the prior behavior) buried new arrivals on top of others; the
+   * least-overlap slot keeps them visible, and `tryPush` resolves the
+   * residual overlap on the next tick.
+   *
+   * Returns null only when the surface is too small to host a single
+   * grid cell — leaves the card at (0, 0) for next frame.
+   */
   private findEmptyGridSlot(
     card: Card,
     roots: Set<Card>,
@@ -154,26 +168,47 @@ export class GameInventory {
     const goy = (sh % GRID_H) / 2;
     const cols = Math.floor((sw - gox) / GRID_W);
     const rows = Math.floor((sh - goy) / GRID_H);
-    outer: for (let row = 0; row < rows; row++) {
+    if (cols <= 0 || rows <= 0) return null;
+
+    // Cache other roots' chain bounds once — getChainBounds walks the
+    // stack chain on each call.
+    const others: { cx: number; cy: number; w: number; h: number }[] = [];
+    for (const other of roots) {
+      if (other === card) continue;
+      const ocb = this.getChainBounds(other);
+      if (!ocb) continue;
+      others.push({
+        cx: ocb.x + ocb.w / 2,
+        cy: ocb.y + ocb.h / 2,
+        w: ocb.w,
+        h: ocb.h,
+      });
+    }
+
+    let bestX = gox;
+    let bestY = goy;
+    let bestScore = Infinity;
+    for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
         const tx = gox + col * GRID_W;
         const ty = goy + row * GRID_H;
-        // Chain bounds when root is placed at (tx, ty).
-        const chainY = ty - cardCb.rootOffsetY;
         const candidateCx = tx + cardCb.w / 2;
-        const candidateCy = chainY + cardCb.h / 2;
-        for (const other of roots) {
-          if (other === card) continue;
-          const ocb = this.getChainBounds(other);
-          if (!ocb) continue;
-          const overlapX = (cardCb.w + ocb.w) / 2 - Math.abs(candidateCx - (ocb.x + ocb.w / 2));
-          const overlapY = (cardCb.h + ocb.h) / 2 - Math.abs(candidateCy - (ocb.y + ocb.h / 2));
-          if (overlapX > 0 && overlapY > 0) continue outer;
+        const candidateCy = (ty - cardCb.rootOffsetY) + cardCb.h / 2;
+        let score = 0;
+        for (const o of others) {
+          const ox = (cardCb.w + o.w) / 2 - Math.abs(candidateCx - o.cx);
+          const oy = (cardCb.h + o.h) / 2 - Math.abs(candidateCy - o.cy);
+          if (ox > 0 && oy > 0) score += ox * oy;
         }
-        return { x: tx, y: ty };
+        if (score < bestScore) {
+          bestScore = score;
+          bestX = tx;
+          bestY = ty;
+          if (score === 0) return { x: bestX, y: bestY };
+        }
       }
     }
-    return null;
+    return { x: bestX, y: bestY };
   }
 
   /**
@@ -284,6 +319,14 @@ export class GameInventory {
     const arb = this.getBounds(a);
     const brb = this.getBounds(b);
     if (!acb || !bcb || !arb || !brb) return;
+    // Skip cards still at the (0, 0) "unplaced" sentinel — `clampToSurface`
+    // hasn't moved them into an empty grid slot yet. Pushing them here
+    // would scatter the unplaced arrivals across the panel and then the
+    // empty-slot placement path wouldn't fire (since they'd no longer be
+    // at 0, 0). Letting the placement pass run unimpeded means each new
+    // card lands cleanly in the first free cell.
+    if (arb.x === 0 && arb.y === 0) return;
+    if (brb.x === 0 && brb.y === 0) return;
 
     // Overlap detection uses the full chain bounds of each root.
     const dx = (bcb.x + bcb.w / 2) - (acb.x + acb.w / 2);

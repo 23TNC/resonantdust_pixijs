@@ -1,6 +1,5 @@
 import type { Identity } from "spacetimedb";
 import { debug } from "../../debug";
-import { DbConnection } from "./bindings";
 
 export interface TokenStore {
   get(key: string): string | null;
@@ -8,14 +7,39 @@ export interface TokenStore {
   remove(key: string): void;
 }
 
+/** Per-origin token store. All tabs on the same origin share this
+ *  — appropriate when only one player ever logs in from one origin,
+ *  inappropriate for local multi-tab testing where each tab should
+ *  represent a distinct player. See `sessionStorageTokenStore` for
+ *  the per-tab default. */
 export const localStorageTokenStore: TokenStore = {
   get: (key) => localStorage.getItem(key),
   set: (key, value) => localStorage.setItem(key, value),
   remove: (key) => localStorage.removeItem(key),
 };
 
-export interface ConnectionListener {
-  onConnected?: (connection: DbConnection, identity: Identity) => void;
+/** Per-tab token store — each browser tab has its own
+ *  `sessionStorage`, so two tabs on the same origin get distinct
+ *  SpacetimeDB identities and don't share a `PlayerSession` row on
+ *  the server. This is the right default for development (multiple
+ *  test clients in tabs) and acceptable for production (closing a
+ *  tab forces re-login, which is normal for most web apps).
+ *
+ *  If "remember me across tab close" is needed later, the caller
+ *  can supply `localStorageTokenStore` via the
+ *  `ConnectionManagerOptions.tokenStore` override — every other
+ *  module in this codebase is agnostic to the storage backend. */
+export const sessionStorageTokenStore: TokenStore = {
+  get: (key) => sessionStorage.getItem(key),
+  set: (key, value) => sessionStorage.setItem(key, value),
+  remove: (key) => sessionStorage.removeItem(key),
+};
+
+/** Callbacks for connect / error / disconnect events. Generic over
+ *  the module-specific connection type so typed callers (e.g.
+ *  SubscriptionBase subclasses) receive the correct DbConnection. */
+export interface ConnectionListener<TConn> {
+  onConnected?: (connection: TConn, identity: Identity) => void;
   onConnectError?: (error: Error) => void;
   onDisconnected?: (error?: Error) => void;
 }
@@ -27,26 +51,49 @@ export interface ConnectionManagerOptions {
   tokenStore?: TokenStore;
 }
 
+/** Arguments passed to the factory function on each connect attempt. */
+export interface ConnectFnOpts<TConn> {
+  uri: string;
+  databaseName: string;
+  token: string | null;
+  onConnect: (conn: TConn, identity: Identity, token: string) => void;
+  onConnectError: (ctx: unknown, error: Error) => void;
+  onDisconnect: (ctx: unknown, error?: Error) => void;
+}
+
+/** Caller-supplied factory that drives the module-specific
+ *  `DbConnection.builder()` chain and calls `builder.build()`.
+ *  Injected by `ConnectionRegistry` so `ConnectionManager` stays
+ *  agnostic of the concrete DbConnection class. */
+export type ConnectFn<TConn> = (opts: ConnectFnOpts<TConn>) => void;
+
 /**
- * Owns the SpacetimeDB websocket lifecycle, the auth token, and the
- * identity. Other managers (subscriptions, reducers) sit on top via
- * `addListener`, which fans out connect / connectError / disconnect events
- * so each manager can react (re-issue subscriptions, drop stale handles,
- * etc.) without coupling to one another.
+ * Generic SpacetimeDB connection owner. Manages the websocket lifecycle,
+ * auth token, and identity for one module database (shard or chat).
+ *
+ * TConn — the module-specific DbConnection type produced by the factory.
+ *
+ * Other managers (SubscriptionBase subclasses, ReducerManager) sit on top
+ * via `addListener`, which fans out connect / connectError / disconnect
+ * events so each manager can react (re-issue subscriptions, drop stale
+ * handles, etc.) without coupling to one another.
  */
-export class ConnectionManager {
-  private connection: DbConnection | null = null;
+export class ConnectionManager<TConn> {
+  private connection: TConn | null = null;
   private identity: Identity | null = null;
   private token: string | null = null;
-  private connectPromise: Promise<DbConnection> | null = null;
+  private connectPromise: Promise<TConn> | null = null;
   private readonly tokenKey: string;
   private readonly tokenStore: TokenStore;
-  private readonly listeners = new Set<ConnectionListener>();
+  private readonly listeners = new Set<ConnectionListener<TConn>>();
 
-  constructor(private readonly options: ConnectionManagerOptions) {
+  constructor(
+    private readonly options: ConnectionManagerOptions,
+    private readonly connectFn: ConnectFn<TConn>,
+  ) {
     this.tokenKey =
       options.tokenStorageKey ?? `spacetime.token.${options.databaseName}`;
-    this.tokenStore = options.tokenStore ?? localStorageTokenStore;
+    this.tokenStore = options.tokenStore ?? sessionStorageTokenStore;
     this.token = this.tokenStore.get(this.tokenKey);
   }
 
@@ -54,7 +101,7 @@ export class ConnectionManager {
     return this.connection !== null;
   }
 
-  getConnection(): DbConnection | null {
+  getConnection(): TConn | null {
     return this.connection;
   }
 
@@ -63,14 +110,14 @@ export class ConnectionManager {
   }
 
   /** Register a connect/disconnect listener. Returns an unsubscribe fn. */
-  addListener(listener: ConnectionListener): () => void {
+  addListener(listener: ConnectionListener<TConn>): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
     };
   }
 
-  connect(): Promise<DbConnection> {
+  connect(): Promise<TConn> {
     if (this.connection) return Promise.resolve(this.connection);
     if (this.connectPromise) return this.connectPromise;
 
@@ -80,11 +127,12 @@ export class ConnectionManager {
       3,
     );
 
-    this.connectPromise = new Promise<DbConnection>((resolve, reject) => {
-      const builder = DbConnection.builder()
-        .withUri(this.options.uri)
-        .withDatabaseName(this.options.databaseName)
-        .onConnect((conn, identity, token) => {
+    this.connectPromise = new Promise<TConn>((resolve, reject) => {
+      this.connectFn({
+        uri: this.options.uri,
+        databaseName: this.options.databaseName,
+        token: this.token,
+        onConnect: (conn, identity, token) => {
           this.connection = conn;
           this.identity = identity;
           this.token = token;
@@ -96,8 +144,8 @@ export class ConnectionManager {
           );
           resolve(conn);
           this.notifyConnected(conn, identity);
-        })
-        .onConnectError((_ctx, error) => {
+        },
+        onConnectError: (_ctx, error) => {
           debug.log(
             ["spacetime"],
             `[spacetime] connect error: ${error.message}`,
@@ -106,8 +154,8 @@ export class ConnectionManager {
           this.connectPromise = null;
           this.notifyConnectError(error);
           reject(error);
-        })
-        .onDisconnect((_ctx, error) => {
+        },
+        onDisconnect: (_ctx, error) => {
           debug.log(
             ["spacetime"],
             `[spacetime] disconnected${error ? `: ${error.message}` : ""}`,
@@ -116,18 +164,15 @@ export class ConnectionManager {
           this.connection = null;
           this.connectPromise = null;
           this.notifyDisconnected(error);
-        });
-
-      if (this.token) builder.withToken(this.token);
-
-      builder.build();
+        },
+      });
     });
 
     return this.connectPromise;
   }
 
   disconnect(): void {
-    this.connection?.disconnect();
+    (this.connection as { disconnect?(): void } | null)?.disconnect?.();
     this.connection = null;
     this.connectPromise = null;
   }
@@ -137,7 +182,7 @@ export class ConnectionManager {
     this.token = null;
   }
 
-  private notifyConnected(conn: DbConnection, identity: Identity): void {
+  private notifyConnected(conn: TConn, identity: Identity): void {
     for (const l of this.listeners) {
       try {
         l.onConnected?.(conn, identity);

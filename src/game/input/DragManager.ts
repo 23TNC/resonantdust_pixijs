@@ -1,8 +1,11 @@
 import type { Card as CardRow } from "../../server/spacetime/bindings/types";
 import type { Card, StackDirection } from "../cards/Card";
 import {
+  getStackedState,
   STACK_DIRECTION_DOWN,
   STACK_DIRECTION_UP,
+  STACKED_ON_ROOT,
+  STACKED_SLOT,
 } from "../cards/cardData";
 import { GameHexCard } from "../cards/layout/hexagon/HexCard";
 import { LayoutCard } from "../cards/layout/CardLayout";
@@ -216,7 +219,14 @@ export class DragManager {
       `[drag] ghost drop card=${sourceCardId} → world tile (${worldDrop.q}, ${worldDrop.r}) — moveSoul surface=${WORLD_LAYER} macroZone=${targetMacroZone} microZone=0x${targetMicroZone.toString(16)}`,
       2,
     );
+    // `sourceCardId` is the soul card the ghost was minted from in
+    // `handleDragStart` — already gated there on
+    // `souls.getSoulId() === card.cardId`, so it's guaranteed to be
+    // the local player's currently-active soul. Server still
+    // re-validates ownership in `move_soul` via
+    // `resolve_caller` + `cards[soul_id].owner_id` comparison.
     void this.ctx.reducers.moveSoul({
+      soulId: sourceCardId,
       targetSurface: WORLD_LAYER,
       targetMacroZone,
       targetMicroZone,
@@ -282,15 +292,30 @@ export class DragManager {
         // Direction-down drops are a separate concept (action
         // stack) with no server equip reducer today, so we skip.
         const soulId = this.ctx.souls.getSoulId();
-        const player = this.ctx.playerSession.getPlayer();
+        // Guard against re-equipping an already-chained card. When
+        // the user picks up an equipped axe and drops it back on the
+        // soul, the local `cards.stack` write is a no-op (the axe is
+        // already in the soul's chain). Firing `equipCard` regardless
+        // means a round-trip to the server, which rejects with
+        // "already part of a chain" — wasted reducer call. The
+        // server's check mirrors this exactly (rejects when state is
+        // `OnRoot` or `Slot`); we match its precondition client-side
+        // so the no-op drop stays silent.
+        //
+        // We don't pass `playerId` — the server resolves the caller
+        // via `players::resolve_caller(ctx)` and uses that resolved
+        // id for the `card.owner_id == player_id` ownership check.
+        // No client-side spoofing surface.
+        const sourceState = sourceRow ? getStackedState(sourceRow.microZone) : -1;
+        const sourceAlreadyChained =
+          sourceState === STACKED_ON_ROOT || sourceState === STACKED_SLOT;
         if (
           soulId !== null &&
-          player !== null &&
           target.cardId === soulId &&
-          direction === "top"
+          direction === "top" &&
+          !sourceAlreadyChained
         ) {
           void this.ctx.reducers.equipCard({
-            playerId: player.playerId,
             cardId: card.cardId,
           });
         }
@@ -463,25 +488,32 @@ export class DragManager {
   ): void {
     // World-source → inventory return: a card sitting on a world tile
     // (or a world surface generally) that gets dropped outside the
-    // world view should land back in the owner's inventory at the
-    // cursor position. Otherwise we'd fall through to the "loose in
-    // current zone" path below, which for a world-rooted card would
-    // place it loose on the world surface at the wrong coords (and
-    // visually fly off-screen if the cursor is over the inventory
-    // panel).
+    // world view should land back in the local player's inventory at
+    // the cursor position. Otherwise we'd fall through to the "loose
+    // in current zone" path below, which for a world-rooted card
+    // would place it loose on the world surface at the wrong coords
+    // (and visually fly off-screen if the cursor is over the
+    // inventory panel).
+    //
+    // Under the post-flag-20 card-owner model, world cards have
+    // `ownerId = 0`; the inventory bucket is the active soul's
+    // card_id (set by character-select), not the card's own
+    // ownerId. Resolve via `SoulManager.getSoulId()`.
     //
     // We route through `setCardPosition({kind:"inventory"})` so the
     // local row gets a clean inventory shape (surface=1,
-    // macroZone=ownerId, microZone state-cleared, microLocation =
-    // encoded xy). The xy is the cursor's position translated into
+    // macroZone=soul_card_id, microZone state-cleared, microLocation
+    // = encoded xy). The xy is the cursor's position translated into
     // the inventory surface's local coords.
     const row = this.ctx.data.cardsLocal.get(card.cardId);
+    const inventoryBucket = this.ctx.souls.getSoulId() ?? 0;
     if (
       row
       && row.surface >= WORLD_LAYER
       && !this.sourceLocksSurfaceChange(row, 1)
+      && inventoryBucket !== 0
     ) {
-      const invSurface = this.ctx.layout?.surfaceFor(packZoneId(row.ownerId, 1));
+      const invSurface = this.ctx.layout?.surfaceFor(packZoneId(inventoryBucket, 1));
       if (invSurface) {
         const ig = invSurface.container.getGlobalPosition();
         this.ctx.cards?.setCardPosition(card.cardId, {

@@ -271,6 +271,36 @@ export class Card {
     else parent.stackedHex = this.cardId;
   }
 
+  /** Repair orphaned chain attachment after the initial spawn pass.
+   *  Called by `CardManager.repairParenting` once every Card exists,
+   *  so the "parent not yet in registry" race the constructor's
+   *  `fallbackToInventory` branch handles can be reversed.
+   *
+   *  Re-resolves the true parent from the current row and, if it
+   *  now exists in CardManager, detaches from wherever we ended up
+   *  (the inventory surface, typically) and re-attaches to the
+   *  parent's stack host. No-op for cards whose state never
+   *  requires a parent (loose), and for cards whose constructor
+   *  succeeded in attaching to the right parent the first time. */
+  repairParenting(): void {
+    const row = this.layoutCard.ctx.data.cardsLocal.get(this.cardId);
+    if (!row) return;
+    const trueParentId = Card.stackParentOf(row, this.layoutCard.ctx.data.cardsLocal);
+    const trueDirection = Card.stackDirectionOf(row);
+    // Loose / unstacked rows: no parent to repair to.
+    if (trueParentId === 0 || trueDirection === null) return;
+    // Already correctly parented — constructor handled it.
+    if (this.currentParentId === trueParentId && this.currentStackDirection === trueDirection) {
+      return;
+    }
+    const parent = this.cardManager.get(trueParentId);
+    if (!parent) return; // still orphan; nothing we can do here.
+    this.currentParentId = trueParentId;
+    this.currentStackDirection = trueDirection;
+    this.attachToCurrent();
+    this.setBackPointerOn(trueParentId, trueDirection);
+  }
+
   /** Attach layoutCard to whichever surface matches our current state. */
   private attachToCurrent(): void {
     if (this.currentParentId !== 0) {

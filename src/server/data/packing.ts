@@ -85,6 +85,23 @@ export type ZoneId = number;
  *  `layer < 64`. */
 export const WORLD_LAYER = 64;
 
+/** Surface band for a deployed mini_zone's contents — its `Zone`
+ *  tile bytes plus any cards placed on its tiles. The anchor card
+ *  lives at `surface == WORLD_LAYER`; its `card_id` is the
+ *  `macro_zone` value used by the mini_zone's `Zone` row and by
+ *  any cards on its tiles. Mirrors the server-side constant in
+ *  `spacetime/server/spacetimedb/src/packed.rs`. */
+export const MINI_ZONE_LAYER = 63;
+
+/** Surface band for a pocket dimension — a private interior
+ *  carried by an anchor card. `macro_zone` is the anchor's
+ *  `card_id`, same convention as `MINI_ZONE_LAYER`. */
+export const POCKET_DIMENSION_LAYER = 32;
+
+/** Surface band for player inventory. `macro_zone` is the owning
+ *  soul card's `card_id`. */
+export const INVENTORY_LAYER = 1;
+
 /**
  * Packs `(macroZone: u32, layer: u8)` into a single `ZoneId`:
  *

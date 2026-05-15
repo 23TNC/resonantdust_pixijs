@@ -1,5 +1,5 @@
 import { debug } from "../../debug";
-import type { ConnectionManager } from "./ConnectionManager";
+import type { ConnectionRegistry } from "./ConnectionRegistry";
 
 /**
  * Owns reducer calls. Each reducer is a thin wrapper that awaits the
@@ -20,6 +20,9 @@ import type { ConnectionManager } from "./ConnectionManager";
  * `ValidAtTable` promotion to the server's timeline instead of
  * `Date.now()`, eliminating the artificial "future-row" delay when
  * the client clock drifts behind the server's.
+ *
+ * Routing: all reducers go to `registry.shard` except `sendChatMessage`,
+ * which targets `registry.chat`.
  */
 export class ReducerManager {
   /** Server `Timestamp.microsSinceUnixEpoch` from the most recent
@@ -30,7 +33,7 @@ export class ReducerManager {
    *  Paired with `serverMicrosAtCapture` to interpolate forward. */
   private localMillisAtCapture = 0;
 
-  constructor(private readonly connection: ConnectionManager) {}
+  constructor(private readonly registry: ConnectionRegistry) {}
 
   /** Record a fresh server timestamp from a reducer event. Pairs it
    *  with `Date.now()` so `serverNowMs()` can interpolate forward
@@ -58,65 +61,35 @@ export class ReducerManager {
     return Number(nowMicros) / 1_000;
   }
 
-  /**
-   * Propose a stack action against a matched recipe. The server validates
-   * recipe eligibility (hex / root / slot entities) and the proposed
-   * location, then sets `slot_hold` on every slot card and `position_hold`
-   * on the actor / root / non-actor slots according to the rules in
-   * `actions.rs::propose_action` — see that doc for the exact flag
-   * derivation. Pass `0` for `hex` / `root` when the recipe has no
-   * `hex` / `root` constraint.
-   */
-  /**
-   * Request a move of the caller's soul card to a new world tile.
-   * The server validates the target (in-bounds, walkable, etc.) and
-   * rewrites the soul row's spatial fields. Today this is the
-   * server-side counterpart to dragging the soul ghost onto a world
-   * tile — `target_surface` is `WORLD_LAYER`, `target_macro_zone` is
-   * the packed `(zoneQ, zoneR)` chunk origin, and `target_micro_zone`
-   * is `packMicroZone(localQ, localR, STACKED_ON_HEX)`.
-   */
   async moveSoul(args: {
+    soulId: number;
     targetSurface: number;
     targetMacroZone: number;
     targetMicroZone: number;
   }): Promise<void> {
     debug.log(
       ["spacetime"],
-      `[spacetime] moveSoul surface=${args.targetSurface} macroZone=${args.targetMacroZone} microZone=0x${args.targetMicroZone.toString(16)}`,
+      `[spacetime] moveSoul soul=${args.soulId} surface=${args.targetSurface} macroZone=${args.targetMacroZone} microZone=0x${args.targetMicroZone.toString(16)}`,
       5,
     );
-    const conn = await this.connection.connect();
+    const conn = await this.registry.shard.connect();
     await conn.reducers.moveSoul(args);
   }
 
-  /**
-   * Equip an inventory card onto the caller's soul card by chaining
-   * it on top of the soul's UP stack. Server walks the existing UP
-   * stack via `recipe_eval::soul_stack`, then writes the card's row
-   * as `OnRoot` (first equip, position=1) or `Slot` (subsequent
-   * equips, parented to the current top). Validates that the card
-   * is owned by the player, alive, not slot-held by an in-flight
-   * action, and currently Free/OnHex (not already in a chain).
-   *
-   * Today's call site: `DragManager.handleRectDrop` when the local
-   * player drops a card onto their soul card and the cursor
-   * direction resolves to UP. The local `CardManager.stack` call
-   * still fires alongside for instant visual feedback; the server's
-   * mirror will overwrite the local row with the authoritative
-   * shape (OnRoot/Slot) once the reducer commits.
-   */
-  async equipCard(args: {
-    playerId: number;
-    cardId: number;
-  }): Promise<void> {
+  async equipCard(args: { cardId: number }): Promise<void> {
+    debug.log(["spacetime"], `[spacetime] equipCard card=${args.cardId}`, 5);
+    const conn = await this.registry.shard.connect();
+    await conn.reducers.equipCard(args);
+  }
+
+  async createCharacter(args: { starterPackId: number }): Promise<void> {
     debug.log(
       ["spacetime"],
-      `[spacetime] equipCard player=${args.playerId} card=${args.cardId}`,
+      `[spacetime] createCharacter starterPackId=${args.starterPackId}`,
       5,
     );
-    const conn = await this.connection.connect();
-    await conn.reducers.equipCard(args);
+    const conn = await this.registry.shard.connect();
+    await conn.reducers.createCharacter(args);
   }
 
   async proposeAction(args: {
@@ -128,11 +101,6 @@ export class ReducerManager {
     microZone: number;
     microLocation: number;
     recipeId: number;
-    /** Distance of the actor (`slots[0]`) from `root` in the chain.
-     *  Used by the server only when `root != 0` — pinned actor's
-     *  `OnRoot` row gets `position = rootDist`. For a fresh chain
-     *  (no held cards above the root) this is `1`; for sub-roots
-     *  past held blocks, the full distance from the chain root. */
     rootDist: number;
   }): Promise<void> {
     debug.log(
@@ -140,7 +108,30 @@ export class ReducerManager {
       `[spacetime] proposeAction recipe=${args.recipeId} hex=${args.hex} root=${args.root} slots=[${args.slots.join(",")}] rootDist=${args.rootDist} surface=${args.surface} macroZone=${args.macroZone} microZone=0x${args.microZone.toString(16)} microLocation=${args.microLocation}`,
       5,
     );
-    const conn = await this.connection.connect();
+    const conn = await this.registry.shard.connect();
     await conn.reducers.proposeAction(args);
+  }
+
+  async setLastLogin(): Promise<void> {
+    debug.log(["spacetime", "chat"], "[spacetime] setLastLogin", 5);
+    const conn = await this.registry.shard.connect();
+    await conn.reducers.setLastLogin({});
+  }
+
+  /** Routes to the chat module (`registry.chat`). The chat module has no
+   *  players table, so the caller must supply `senderPlayerId` and `senderName`
+   *  explicitly (resolved from `PlayerManager.getPlayer()`). */
+  async sendChatMessage(args: {
+    senderPlayerId: number;
+    senderName: string;
+    body: string;
+  }): Promise<void> {
+    debug.log(
+      ["spacetime", "chat"],
+      `[spacetime] sendChatMessage len=${args.body.length}`,
+      5,
+    );
+    const conn = await this.registry.chat.connect();
+    await conn.reducers.sendChatMessage(args);
   }
 }

@@ -10,23 +10,53 @@
  *  module needs its `init()` awaited before any export is callable. */
 
 import init, {
+  aspectInfo as wasmAspectInfo,
+  cardLabel as wasmCardLabel,
   decodeDefinition as wasmDecode,
   findPackedByKey as wasmFindPackedByKey,
   isHexType as wasmIsHexType,
   cardFlagBit as wasmCardFlagBit,
   cardFlagFieldValue as wasmCardFlagFieldValue,
+  cardTypeId as wasmCardTypeId,
   matchStackRecipe as wasmMatchStackRecipe,
+  starterPacksForSoul as wasmStarterPacksForSoul,
 } from "../../content/pkg/resonantdust_content";
 import type { StackMatch } from "../actions/ActionManager";
+
+/** Shape returned by `wasm_api::aspect_info`. Matches the Rust `Aspect` struct. */
+export interface AspectInfo {
+  id: number;
+  name: string;
+  description: string;
+  icon: string;
+  group: string;
+}
+
+export interface StarterPackItem {
+  cardKey: string;
+  packedDefinition: number;
+  count: number;
+}
+
+/** A starter pack offered to a player creating a character of a
+ *  given soul. Mirrors `StarterPack` from the content crate. */
+export interface StarterPack {
+  id: number;
+  soul: string;
+  packId: string;
+  contents: readonly StarterPackItem[];
+}
 
 export interface CardDefinition {
   cardType: number;
   cardCategory: number;
   definitionId: number;
-  /** Programmatic key from the JSON, e.g. `"attack"`. Stable across renames. */
+  /** Programmatic key from the JSON, e.g. `"axe"`. Stable identifier
+   *  used as the lookup key in `content/locales/cards/<lang>.json`
+   *  for display label / description resolution. Display labels are
+   *  NOT carried on the definition itself — clients resolve them via
+   *  the locales registry; the bare key is the dev-side fallback. */
   key: string;
-  /** Display name. */
-  name: string;
   /** Three CSS hex colors `[primary, secondary, outline]`, validated server-side. */
   style: readonly [string, string, string];
   /** `(aspectId, value)` pairs. */
@@ -57,11 +87,31 @@ export async function initDefinitions(): Promise<void> {
 }
 
 export class DefinitionManager {
+  /** Look up an aspect by numeric id. Returns `null` for id 0 (ASPECT_NONE)
+   *  and unknown ids. Includes `name`, `description`, `icon`, and `group`. */
+  aspectInfo(id: number): AspectInfo | null {
+    const raw = wasmAspectInfo(id);
+    return raw === null ? null : (raw as AspectInfo);
+  }
+
   /** Decode a packed `(cardType:u4 | cardCategory:u4 | definitionId:u8)`
    *  value into its CardDefinition. Returns `null` if no card matches. */
   decode(packed: number): CardDefinition | null {
     const raw = wasmDecode(packed);
     return raw === null ? null : (raw as CardDefinition);
+  }
+
+  /** Resolve the display label for a packed definition in the given
+   *  language (defaults to `"en"`). Falls back to the card's bare key
+   *  when the locale registry has no entry for it. */
+  label(packedDef: number, lang = "en"): string {
+    try {
+      const text = wasmCardLabel(packedDef, lang);
+      if (typeof text === "string") return text;
+    } catch {
+      // locale registry build failure — fall through to key fallback
+    }
+    return this.decode(packedDef)?.key ?? "?";
   }
 
   /** Look up a card's packed value by its bare key (e.g. `"fatigue"`).
@@ -112,6 +162,24 @@ export class DefinitionManager {
     return wasmCardFlagFieldValue(flags, name);
   }
 
+  /** Look up a `card_type` id by name (e.g. `"mini_zone"`, `"soul"`).
+   *  Returns `undefined` for unknown names. Source of truth is
+   *  `content/cards/types.json`. Used to branch on card type
+   *  without hard-coding numeric ids. */
+  cardTypeId(name: string): number | undefined {
+    return wasmCardTypeId(name);
+  }
+
+  /** True iff this `packedDefinition`'s `card_type` matches the
+   *  given type name. Decodes the def and compares card_type. Returns
+   *  false for unknown packed ids or unknown type names. */
+  isCardType(packedDefinition: number, typeName: string): boolean {
+    const typeId = this.cardTypeId(typeName);
+    if (typeId === undefined) return false;
+    const def = this.decode(packedDefinition);
+    return def !== null && def.cardType === typeId;
+  }
+
   /** Find the best-matching `Stack(direction)` recipe for a chain.
    *  `hexDef` is the packed definition of the hex card the chain root
    *  is attached to (`0` if not stacked on hex). `rootDef` is the
@@ -158,6 +226,15 @@ export class DefinitionManager {
       actorBelow,
     ) as unknown;
     return raw === null ? null : (raw as StackMatch);
+  }
+
+  /** All starter packs registered for the given soul card key
+   *  (e.g. `"human"`), in stable-id order. Empty array for unknown
+   *  soul keys — there's no enum of valid souls on the client, so
+   *  callers pass whatever key the soul-create panel offers. */
+  starterPacksForSoul(soul: string): StarterPack[] {
+    const raw = wasmStarterPacksForSoul(soul) as unknown;
+    return raw as StarterPack[];
   }
 
   /** Static unpack of a `packedDefinition` u16. Bit layout matches

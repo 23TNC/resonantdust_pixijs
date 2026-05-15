@@ -442,8 +442,11 @@ export class LayoutRectCard extends LayoutCard {
     const def = this.currentPackedDefinition !== null
       ? this.ctx.definitions.decode(this.currentPackedDefinition) ?? null
       : null;
+    const label = this.currentPackedDefinition !== null
+      ? this.ctx.definitions.label(this.currentPackedDefinition)
+      : undefined;
 
-    this.rectVisual.draw(def, this.titlePosition);
+    this.rectVisual.draw(def, this.titlePosition, label);
 
     // Magnetic indicator: top-right of the card *body*, just below the
     // title bar when title is on top, or just below the top edge when

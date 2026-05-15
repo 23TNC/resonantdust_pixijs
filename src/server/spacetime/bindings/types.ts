@@ -29,6 +29,20 @@ export const CardIdCounter = __t.object("CardIdCounter", {
 });
 export type CardIdCounter = __Infer<typeof CardIdCounter>;
 
+export const ChatMessage = __t.object("ChatMessage", {
+  sentAt: __t.u64(),
+  senderPlayerId: __t.u32(),
+  senderName: __t.string(),
+  body: __t.string(),
+});
+export type ChatMessage = __Infer<typeof ChatMessage>;
+
+export const ChatRetention = __t.object("ChatRetention", {
+  id: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+});
+export type ChatRetention = __Infer<typeof ChatRetention>;
+
 export const MagneticAction = __t.object("MagneticAction", {
   magneticId: __t.u64(),
   anchorCardId: __t.u32(),
@@ -47,7 +61,7 @@ export const Player = __t.object("Player", {
   validAt: __t.u64(),
   playerId: __t.u32(),
   name: __t.string(),
-  soulCardId: __t.u32(),
+  lastLoginSecs: __t.u32(),
 });
 export type Player = __Infer<typeof Player>;
 
@@ -56,6 +70,12 @@ export const PlayerIdCounter = __t.object("PlayerIdCounter", {
   next: __t.u32(),
 });
 export type PlayerIdCounter = __Infer<typeof PlayerIdCounter>;
+
+export const PlayerProfile = __t.object("PlayerProfile", {
+  playerId: __t.u32(),
+  starterPacks: __t.u64(),
+});
+export type PlayerProfile = __Infer<typeof PlayerProfile>;
 
 export const PlayerSession = __t.object("PlayerSession", {
   identity: __t.identity(),
@@ -76,6 +96,13 @@ export const ScheduleDeletePlayers = __t.object("ScheduleDeletePlayers", {
   scheduledAt: __t.scheduleAt(),
 });
 export type ScheduleDeletePlayers = __Infer<typeof ScheduleDeletePlayers>;
+
+export const ScheduleDeleteSouls = __t.object("ScheduleDeleteSouls", {
+  deleteId: __t.u64(),
+  cardId: __t.u32(),
+  scheduledAt: __t.scheduleAt(),
+});
+export type ScheduleDeleteSouls = __Infer<typeof ScheduleDeleteSouls>;
 
 export const SequenceCounter = __t.object("SequenceCounter", {
   id: __t.u8(),

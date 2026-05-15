@@ -6,9 +6,10 @@ Scene system: lifecycle, transitions, and the per-frame update loop. Owns the Pi
 ## Important files
 - `Scene.ts`: abstract base. Defines the `onEnter` / `onExit` / `onResize` / `update` contract.
 - `SceneManager.ts`: orchestrates transitions. Owns the ticker callback and the window resize listener.
-- `LoginScene.ts`: first scene; calls `ctx.playerSession.claimOrLogin(...)` and transitions to `GameScene` on success.
-- `GameScene.ts`: in-game scene. Reads the local player from `ctx.playerSession`; constructs and wires up the scene-scoped managers (`LayoutManager`, `CardManager`, `GameManager` + `GameInventory`, `InputManager`, `DragManager`, `ActionManager`, `WorldPanManager`, `ParticleManager`); calls `ctx.zones.ensure(inventoryZoneId)` to pin the inventory subscription; binds keyboard shortcuts (e.g. `KeyE` for snap-to-grid). On exit, disposes everything in reverse order and clears the scene-scoped fields on `GameContext`.
-- `game/`: per-region layout nodes for `GameScene` (title bar, world view, inventory view, overlay). Has its own AGENTS.md.
+- `LoginScene.ts`: first scene; calls `ctx.playerSession.claimOrLogin(...)` and transitions to `CharacterSelectScene` on success.
+- `select/CharacterSelectScene.ts`: post-login landing. Shows the player's soul cards (right panel) and the selected soul's inventory (left panel); handles character creation via starter packs. Play button calls `ctx.souls.setActiveSoul(cardId)` then transitions to `GameScene`. See [select/AGENTS.md](select/AGENTS.md).
+- `GameScene.ts`: in-game scene. Constructs and wires the scene-scoped managers (`LayoutManager`, `CardManager`, `GameManager` + `GameInventory`, `InputManager`, `DragManager`, `ActionManager`, `LogManager`, `WorldPanManager`, `ParticleManager`); calls `ctx.zones.ensure(inventoryZoneId)` to pin the inventory subscription; binds keyboard shortcuts (Space = recenter on soul, `KeyE` = snap-to-grid). On exit, disposes everything in reverse order and clears the scene-scoped fields on `GameContext`.
+- `game/`: per-region layout nodes for `GameScene`. `GameLayout` hosts `TitleBar`, `ToolBar`, `ChatPanel`, `LayoutWorld`, `LayoutInventory`, and the drag overlay. Has its own AGENTS.md.
 
 ## Conventions
 - A scene's only access to services is the `GameContext` passed to `onEnter`. Cache the parts you need on the scene instance — don't reach for globals.
@@ -18,7 +19,7 @@ Scene system: lifecycle, transitions, and the per-frame update loop. Owns the Pi
 - Scenes attach children to `this.root` (a Pixi `Container` created in the base class). `SceneManager` adds `root` to `app.stage` only after `onEnter` resolves — partial scenes are never visible.
 - `SceneManager.change()` serializes through a promise chain; calling it concurrently is safe and ordered.
 - Navigate by calling `ctx.scenes.change(new NextScene())` from inside a scene.
-- **GameScene owns the scene-scoped slots on `GameContext`.** `cards`, `layout`, `game`, `input`, `actions`, `world` get assigned in `onEnter` and nulled in `onExit`. Other code reading them must null-check; managers that depend on them (e.g. `WorldPanManager` reading `ctx.input`) throw cleanly in their constructor if a slot is null.
+- **GameScene owns the scene-scoped slots on `GameContext`.** `cards`, `layout`, `game`, `input`, `actions`, `logs` get assigned in `onEnter` and nulled in `onExit`. Other code reading them must null-check; managers that depend on them (e.g. `WorldPanManager` reading `ctx.input`) throw cleanly in their constructor if a slot is null. `LayoutWorld` is owned by `GameLayout`, not a `GameContext` slot — access the world card surface via `ctx.layout.surfaceFor(zoneId)` for world-layer zones.
 
 ## Pitfalls
 - Do **not** manually `destroy()` `this.root` — `SceneManager` does that after `onExit`.

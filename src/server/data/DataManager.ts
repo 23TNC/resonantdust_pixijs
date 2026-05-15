@@ -1,18 +1,18 @@
 import { debug } from "../../debug";
-import { worldPixelFromRow } from "../../game/cards/cardData";
 import type { CardDefinition, DefinitionManager } from "../../game/definitions/DefinitionManager";
-import type { Card, Player, Soul, Zone } from "../spacetime/bindings/types";
-import type { ConnectionManager } from "../spacetime/ConnectionManager";
+import type { Card, ChatMessage, Player, Soul, Zone } from "../spacetime/bindings/types";
+import { ChatSubscriptionManager } from "../spacetime/ChatSubscriptionManager";
+import type { ConnectionRegistry } from "../spacetime/ConnectionRegistry";
 import type { ReducerManager } from "../spacetime/ReducerManager";
 import { SubscriptionManager } from "../spacetime/SubscriptionManager";
 import {
   isStackLayout,
   packStackMicroZone,
   unpackStackMicroZone,
-  type ValidAt,
 } from "./packing";
-import { validAtOf } from "./packing";
+import { validAtOf, WORLD_LAYER } from "./packing";
 import { ValidAtTable, type TableChange, type TableListener } from "./ValidAtTable";
+import { AppendTable } from "./AppendTable";
 
 const INVENTORY_LAYER = 1;
 const FLAG_ACTION_DEAD = 1 << 7;
@@ -27,19 +27,6 @@ const FLAG_PROGRESS_STYLE_MASK = 0b111;
 // bit inside `microZone` itself; moved to `flags` to free the bit for
 // chain `direction`. See `content/cards/flags.json`.
 const FLAG_FORCE_POSITION = 1 << 11;
-// `position_dirty` (bit 13): server auto-sets when the row's
-// spatial fields differ from the prior row. Marks rows whose intent
-// IS a positional change. Used by the move_smooth scan: a future
-// row only becomes a motion target if BOTH this and move_smooth are
-// set, so plain "data only" rows along the path aren't mistaken for
-// destinations. See `content/cards/flags.json`.
-const FLAG_POSITION_DIRTY = 1 << 13;
-// `move_smooth` (bit 17): client render hint — tween from the prior
-// on-screen position to this row's position over the time delta
-// between rows, instead of snapping. Set by `move_soul` on every
-// queued step row. See `content/cards/flags.json`.
-const FLAG_MOVE_SMOOTH = 1 << 17;
-
 /** A single progress indicator on a card. Today the `progress` array on
  *  `LocalCard` is populated with at most one entry (the future
  *  completion row with the highest `valid_at`, last-write-wins). The
@@ -76,29 +63,11 @@ export interface ProgressInfo {
  *    on every read. `mirrorCard` re-decodes only when `packedDefinition`
  *    actually changed; `setLocalCard` backfills if missing. The
  *    decoded value is `null` for an unknown packed id (matches
- *    `DefinitionManager.decode`'s return contract).
- *  - `target` — visual destination for the `move_smooth` motion path.
- *    Resolved by `resolveCardTarget` from the earliest future row of
- *    this card with both `move_smooth` and `position_dirty`, or
- *    falling back to the active row when it carries `move_smooth`.
- *    `null` for non-OnHex/microLocation!=0 rows (motion is scoped to
- *    world-tile-anchored cards in v1), AND for cards whose active row
- *    has no `move_smooth` flag and no future smooth target — those
- *    snap via the existing static placement path. `key` is the
- *    packed `validAt` of the targeted row, used to detect identity
- *    changes (target swap vs same row updating in place). */
-export interface CardTarget {
-  x: number;
-  y: number;
-  time: number;
-  key: ValidAt;
-}
-
+ *    `DefinitionManager.decode`'s return contract). */
 export type LocalCard = Card & {
   dead?: 1 | 2;
   progress?: ProgressInfo[];
   def?: CardDefinition | null;
-  target?: CardTarget;
 };
 
 /** Local data layer with two tiers:
@@ -124,7 +93,7 @@ export type LocalCard = Card & {
  *  override flag — server changes never get dropped wholesale.
  *
  *  DataManager owns its own `SubscriptionManager` — the SDK ingress for
- *  this layer. `main.ts` only constructs `ConnectionManager` and hands it
+ *  this layer. `main.ts` constructs `ConnectionRegistry` and hands it
  *  in; `subscribeCards(zoneId)` / etc. are reachable as
  *  `data.subscriptions.<method>`. */
 export class DataManager {
@@ -144,7 +113,12 @@ export class DataManager {
     (row) => row.validAt,
     (row) => row.zoneId,
   );
+  /** Flat (non-versioned) world-chat feed. Server inserts append-only;
+   *  there is no `current` view to promote — `chatMessages.rows` is
+   *  the table itself. See `AppendTable` and `chat.rs`. */
+  readonly chatMessages = new AppendTable<ChatMessage>((row) => row.sentAt);
   readonly subscriptions: SubscriptionManager;
+  readonly chatSubscriptions: ChatSubscriptionManager;
 
   /** Local overlays — what game code reads/writes for displayed state.
    *  Mirrors `<table>.current` via subscription. */
@@ -176,7 +150,7 @@ export class DataManager {
   private readonly soulLocalListeners = new Set<TableListener<Soul>>();
 
   constructor(
-    connection: ConnectionManager,
+    registry: ConnectionRegistry,
     private readonly reducers: ReducerManager,
     private readonly definitions: DefinitionManager,
   ) {
@@ -186,30 +160,15 @@ export class DataManager {
     // then reads from `reducers.serverNowMs()` instead of
     // `Date.now()`, aligning `ValidAtTable` promotion to the
     // server's timeline.
-    this.subscriptions = new SubscriptionManager(connection, {
+    this.subscriptions = new SubscriptionManager(registry.shard, {
       onReducerEvent: (micros) => this.reducers.noteServerTime(micros),
     });
+    this.chatSubscriptions = new ChatSubscriptionManager(registry.chat);
 
     this.subscriptions.registerTableHandlers("cards", {
       onInsert: this.cards.insert,
       onUpdate: this.cards.update,
       onDelete: this.cards.delete,
-    });
-    // Second `cards` handler — fires AFTER the ValidAtTable mutation
-    // (registration order = call order in SubscriptionManager). Each
-    // server-tier row event for a card whose local row already
-    // exists may change the resolved motion target: a new future
-    // row with `move_smooth` + `position_dirty` becomes the target,
-    // and a delete of the currently-targeted future row drops back
-    // to the fallback (current row, if `move_smooth` is set, else
-    // no motion). `recomputeCardTarget` is a no-op when the target's
-    // identity hasn't shifted, so unrelated inserts (e.g. a future
-    // `progress_style` row landing) don't spuriously re-fire local
-    // listeners.
-    this.subscriptions.registerTableHandlers("cards", {
-      onInsert: (row) => this.recomputeCardTarget(row.cardId),
-      onUpdate: (_oldRow, newRow) => this.recomputeCardTarget(newRow.cardId),
-      onDelete: (row) => this.recomputeCardTarget(row.cardId),
     });
     this.subscriptions.registerTableHandlers("players", {
       onInsert: this.players.insert,
@@ -226,6 +185,11 @@ export class DataManager {
       onUpdate: this.zones.update,
       onDelete: this.zones.delete,
     });
+    this.chatSubscriptions.registerTableHandlers("chat_messages", {
+      onInsert: this.chatMessages.insert,
+      onUpdate: this.chatMessages.update,
+      onDelete: this.chatMessages.delete,
+    });
 
     // Mirror server tier → local overlay. Server pushes always propagate;
     // `mirrorCard` may keep position fields from the local row in the
@@ -240,7 +204,24 @@ export class DataManager {
     this.unsubMirror.push(
       this.zones.subscribe((c) => this.mirror(this.zonesLocal, c)),
     );
+    // Track visible mini_zone anchor cards and subscribe to each
+    // anchor's `(surface=63, macro_zone=card_id)` channel so the
+    // mini_zone's Zone row + cards on its tiles come into the
+    // server-tier mirror automatically. Watches the cards table on
+    // every server push: anchors entering the visible-world
+    // subscription set get a mini_zone subscription installed;
+    // anchors leaving (card removed, type changed, moved off
+    // WORLD_LAYER) get unsubscribed. The set is keyed on card_id;
+    // an anchor still in the set across multiple promote events
+    // stays subscribed without churn.
+    this.unsubMirror.push(this.cards.subscribe((c) => this.trackMiniZoneAnchor(c)));
   }
+
+  /** card_ids of anchor cards we currently hold a mini_zone
+   *  subscription for. Adds when an anchor enters the visible
+   *  world chunks; removes when it leaves. Maintained by
+   *  `trackMiniZoneAnchor`. */
+  private readonly subscribedMiniZones = new Set<number>();
 
   /** Write a row into the local cards overlay and fire the local-cards
    *  listeners (added/updated as appropriate). Server is still
@@ -391,6 +372,7 @@ export class DataManager {
     for (const unsub of this.unsubMirror) unsub();
     this.unsubMirror.length = 0;
     this.subscriptions.dispose();
+    this.chatSubscriptions.dispose();
     this.cards.dispose();
     this.players.dispose();
     this.souls.dispose();
@@ -446,6 +428,55 @@ export class DataManager {
    *  cards in the same `(root_id, direction)` group whose position ≥
    *  the forced one by +1 — they "stack after" the server's confirmed
    *  position. */
+  /** Watch the cards mirror for `mini_zone`-type anchor cards
+   *  entering / leaving the visible-world subscription set.
+   *
+   *  Membership rule: a card is a "visible mini_zone anchor" iff
+   *  it's present in `cards.server` at `surface = WORLD_LAYER`
+   *  with a `card_type == mini_zone` definition. (Membership in
+   *  `cards.server` is what the world-zone subscription drives —
+   *  rows arrive when a chunk is subscribed and depart when it's
+   *  released.)
+   *
+   *  On membership change we install / drop the
+   *  `(surface=63, macro_zone=card_id)` subscription that fetches
+   *  the mini_zone's Zone tile bytes plus any cards on its tiles.
+   *
+   *  Known v1 limitation: this fires on every cards-table push for
+   *  every card, not just anchors — cheap (one card-type decode)
+   *  but not free. A more efficient design would maintain a
+   *  per-card-type index in `ValidAtTable`. Defer until profiling
+   *  warrants it.
+   */
+  private trackMiniZoneAnchor(change: TableChange<Card>): void {
+    const cardId = change.key;
+    const isAnchorNow =
+      change.kind !== "removed"
+      && (change.kind === "added" ? change.row : change.newRow).surface === WORLD_LAYER
+      && this.definitions.isCardType(
+        (change.kind === "added" ? change.row : change.newRow).packedDefinition,
+        "mini_zone",
+      );
+    const wasAnchor = this.subscribedMiniZones.has(cardId);
+
+    if (isAnchorNow && !wasAnchor) {
+      this.subscribedMiniZones.add(cardId);
+      void this.subscriptions.subscribeMiniZone(cardId).catch((err) => {
+        // Subscription install can fail (disconnect, malformed query).
+        // Drop the tracking entry so a later retry can re-install.
+        this.subscribedMiniZones.delete(cardId);
+        debug.log(
+          ["spacetime"],
+          `[spacetime] subscribeMiniZone(${cardId}) failed: ${err instanceof Error ? err.message : String(err)}`,
+          3,
+        );
+      });
+    } else if (!isAnchorNow && wasAnchor) {
+      this.subscribedMiniZones.delete(cardId);
+      this.subscriptions.unsubscribeMiniZone(cardId);
+    }
+  }
+
   private mirrorCard(change: TableChange<Card>): void {
     const prev = this.cardsLocal.get(change.key);
 
@@ -593,18 +624,11 @@ export class DataManager {
       prev.def !== undefined
         ? prev.def
         : this.definitions.decode(baseRow.packedDefinition);
-    // Resolve the motion target for this row: the earliest future
-    // row with both `move_smooth` and `position_dirty` set, falling
-    // back to the active row itself when it carries `move_smooth`.
-    // `null` → no motion path active; LayoutCard's static applyData
-    // target is used (existing behavior).
-    const target = this.resolveCardTarget(change.key, baseRow);
     const nextRow: LocalCard = {
       ...baseRow,
       def,
       ...(dead !== undefined ? { dead } : {}),
       ...(progress !== undefined ? { progress } : {}),
-      ...(target !== undefined ? { target } : {}),
     };
 
     this.cardsLocal.set(change.key, nextRow);
@@ -652,91 +676,6 @@ export class DataManager {
     }
     if (bestValidAt < 0) return undefined;
     return [{ style: bestStyle, startSecs, endSecs: bestValidAt }];
-  }
-
-  /** Resolve the motion target for a card:
-   *
-   *  1. Scan `cards.server` for the earliest future-validAt row of
-   *     this id with BOTH `move_smooth` and `position_dirty` set —
-   *     that's the queued destination of an in-flight move.
-   *  2. Fall back to `baseRow` (the row about to land in
-   *     `cardsLocal`) when it carries `move_smooth` — handles the
-   *     "future row was deleted; unwind toward current" case as well
-   *     as the natural promotion of a step row mid-walk.
-   *
-   *  Returns `undefined` when neither case applies (snap to static
-   *  placement, no motion needed) or when the chosen row's spatial
-   *  fields don't decode to absolute world pixels (Loose / Slot /
-   *  OnRoot / OnHex-on-parent are parent-relative; motion is scoped
-   *  to OnHex/microLocation=0 in v1).
-   *
-   *  `key` is the targeted row's packed `validAt`. Consumers use it
-   *  to detect target *identity* changes (different row entirely)
-   *  vs same row being re-emitted with updated metadata. */
-  private resolveCardTarget(
-    cardId: number,
-    baseRow: Card,
-  ): CardTarget | undefined {
-    const baseValidAt = validAtOf(baseRow.validAt);
-    let bestRow: Card | null = null;
-    let bestValidAt = Infinity;
-    for (const [packed, row] of this.cards.server) {
-      if (row.cardId !== cardId) continue;
-      const validAt = validAtOf(packed);
-      if (validAt <= baseValidAt) continue;
-      if ((row.flags & FLAG_MOVE_SMOOTH) === 0) continue;
-      if ((row.flags & FLAG_POSITION_DIRTY) === 0) continue;
-      if (validAt < bestValidAt) {
-        bestValidAt = validAt;
-        bestRow = row;
-      }
-    }
-    if (bestRow !== null) {
-      const px = worldPixelFromRow(bestRow);
-      if (!px) return undefined;
-      return { x: px.x, y: px.y, time: bestValidAt, key: bestRow.validAt };
-    }
-    // Fallback: target the active row itself when it carries
-    // `move_smooth`. Covers two cases: (a) a step row promoted into
-    // current mid-walk and the *next* future smooth+dirty row hasn't
-    // been queued yet, (b) the future row was deleted and we should
-    // unwind toward whatever's now current. In both, source.time
-    // (captured at "now" when the target installs) is later than
-    // baseRow.validAt, so duration = |now - baseRow.validAt| > 0 and
-    // GameCard tweens.
-    if ((baseRow.flags & FLAG_MOVE_SMOOTH) !== 0) {
-      const px = worldPixelFromRow(baseRow);
-      if (!px) return undefined;
-      return { x: px.x, y: px.y, time: baseValidAt, key: baseRow.validAt };
-    }
-    return undefined;
-  }
-
-  /** Re-run the motion-target scan for a card whose server-tier rows
-   *  may have changed (insert / update / delete of a future row).
-   *  No-op when the resolved target's identity (`key`) hasn't moved
-   *  — most server-tier events for a card don't shift the motion
-   *  destination. When it does change, re-emits the local row so
-   *  `Card.applyData` propagates the new target through to GameCard. */
-  private recomputeCardTarget(cardId: number): void {
-    const cur = this.cardsLocal.get(cardId);
-    if (cur === undefined) return;
-    const next = this.resolveCardTarget(cardId, cur);
-    const prevKey = cur.target?.key;
-    const nextKey = next?.key;
-    if (prevKey === nextKey) {
-      // Same row targeted (or both undefined). The row's *contents*
-      // might have changed (e.g. position fields updated), but the
-      // motion-installation logic on GameCard keys off `target.key`
-      // — re-emitting would force a source-snapshot reset for no
-      // visible reason. Skip.
-      return;
-    }
-    const nextRow: LocalCard = next === undefined
-      ? { ...cur, target: undefined }
-      : { ...cur, target: next };
-    this.cardsLocal.set(cardId, nextRow);
-    this.fireCardLocal({ kind: "updated", key: cardId, oldRow: cur, newRow: nextRow });
   }
 
   /** Bump every other client-only card in `forced`'s chain group whose

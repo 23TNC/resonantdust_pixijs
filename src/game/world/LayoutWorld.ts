@@ -156,6 +156,20 @@ export class LayoutWorld extends LayoutNode {
       }
     }
 
+    // Deferred re-invalidate one frame after construction. The first
+    // layout pass runs synchronously off `LayoutNode`'s initial
+    // `selfDirty = true`, but at that moment some inputs may still
+    // be settling: zone rows that arrived in `cards.server` but
+    // haven't been promoted to `data.zones.current` by `promote()`
+    // yet, scene bounds not yet applied by `SceneManager.resize`,
+    // texture atlas pages still warming on the renderer. Any of
+    // those produce a first frame that renders empty / wrong tiles
+    // and then sits idle until the user pans (which fires
+    // `onAnchorChange` → invalidate → relayout, masking the bug).
+    // One extra invalidate scheduled via the ticker guarantees a
+    // re-layout once any one-frame race has resolved.
+    ctx.app.ticker.addOnce(() => this.invalidate());
+
     // Live updates: on every zone insert / update / remove, evict the
     // zone's 8×8 block from `tileData` and re-decode if the row still
     // exists. Cheaper than a full rescan; per-zone diffing isn't worth

@@ -25,6 +25,7 @@ changes.
   stop-emitting use. Particles render into a single shared
   `ParticleContainer` so the whole effect layer costs ~one draw call
   regardless of emitter count.
+- `fonts.ts`: `loadFonts()` — registers all NotoEmoji font faces via the `FontFace` API before first render, awaited once at bootstrap in `main.ts`. Exports `NOTO_EMOJI_FAMILY` (the CSS family name) for use in Pixi `Text.style.fontFamily`. Without this, Pixi rasterises text with the OS fallback font and never re-renders the same `Text` object when the real font loads.
 - `effects/`: per-effect JSON configs (`json/`) + textures
   (`images/`). New effects: drop a JSON file in `json/` — no code
   change needed.

@@ -2,6 +2,7 @@ import { Application } from "pixi.js";
 import { debug } from "./debug";
 import { DrawCallCounter } from "./debug/DrawCallCounter";
 import { TextureManager } from "./assets/TextureManager";
+import { loadFonts } from "./assets/fonts";
 import { DefinitionManager, initDefinitions } from "./game/definitions/DefinitionManager";
 // import { RecipeManager } from "./definitions/RecipeManager";
 import { PlayerManager } from "./server/player/PlayerManager";
@@ -9,7 +10,7 @@ import { SoulManager } from "./server/player/SoulManager";
 import type { GameContext } from "./GameContext";
 import { LoginScene } from "./scenes/login/LoginScene";
 import { SceneManager } from "./scenes/SceneManager";
-import { ConnectionManager } from "./server/spacetime/ConnectionManager";
+import { ConnectionRegistry } from "./server/spacetime/ConnectionRegistry";
 import { ReducerManager } from "./server/spacetime/ReducerManager";
 import { DataManager } from "./server/data/DataManager";
 import { ZoneManager } from "./game/zones/ZoneManager";
@@ -18,7 +19,7 @@ import { unpackMacroZone, unpackZoneId, WORLD_LAYER } from "./server/data/packin
 interface Runtime {
   app: Application;
   scenes: SceneManager;
-  connection: ConnectionManager;
+  connections: ConnectionRegistry;
   playerSession: PlayerManager;
   souls: SoulManager;
   data: DataManager;
@@ -33,6 +34,20 @@ async function main(): Promise<Runtime> {
     background: 0x101418,
     resizeTo: window,
     antialias: true,
+    // HiDPI rendering: rasterize the framebuffer + every Pixi
+    // RenderTexture (card atlases, text, etc.) at the device's pixel
+    // density so glyphs and strokes stay crisp. `autoDensity` lets
+    // Pixi handle the CSS-size scaling so the stage coordinate space
+    // still operates in CSS pixels — input handling and layout don't
+    // need to know the difference.
+    //
+    // TODO(settings): expose this as a user-facing toggle once the
+    // chat-settings panel grows into a real settings surface. Some
+    // players on integrated GPUs / mobile will want to drop back to
+    // resolution = 1 to recover fill-rate; the cap at 2 already
+    // protects DPR-3 macOS/iOS devices from paying 9× cost.
+    resolution: Math.min(window.devicePixelRatio, 2),
+    autoDensity: true,
   });
 
   const host = document.getElementById("app");
@@ -46,30 +61,45 @@ async function main(): Promise<Runtime> {
 
   // Bootstrap the wasm-built content crate before any code calls into the
   // definitions API. `initDefinitions` is idempotent — safe to await
-  // multiple times.
-  await initDefinitions();
+  // multiple times. Run in parallel with font loading so cold start
+  // doesn't pay for them serially. Fonts must finish before Pixi
+  // renders anything that uses them — otherwise canvas-based Text
+  // caches a fallback-font rasterisation and never re-renders.
+  await Promise.all([initDefinitions(), loadFonts()]);
   const definitions = new DefinitionManager();
   // const recipes = new RecipeManager(definitions);
   const zones = new ZoneManager();
 
-  const connection = new ConnectionManager({
-    uri: import.meta.env.VITE_SPACETIME_URI ?? "http://localhost:3000",
-    databaseName: import.meta.env.VITE_SPACETIME_DB ?? "resonantdust-dev",
+  const connections = new ConnectionRegistry({
+    uri: import.meta.env.VITE_SPACETIME_URI ?? "http://47.222.135.56:3000",
+    env: import.meta.env.VITE_SPACETIME_ENV ?? "dev",
   });
-  connection.addListener({
+  connections.shard.addListener({
     onConnected: (_conn, identity) => {
-      debug.log(["spacetime"], `[spacetime] connected as ${identity.toHexString()}`);
+      debug.log(["spacetime"], `[spacetime] shard connected as ${identity.toHexString()}`);
     },
-    onConnectError: (error) => {
-      console.error("[spacetime] connect error", error);
+    onConnectError: (error: Error) => {
+      console.error("[spacetime] shard connect error", error);
     },
-    onDisconnected: (error) => {
-      if (error) debug.warn(["spacetime"], `[spacetime] disconnected ${String(error)}`);
-      else debug.log(["spacetime"], "[spacetime] disconnected");
+    onDisconnected: (error?: Error) => {
+      if (error) debug.warn(["spacetime"], `[spacetime] shard disconnected ${String(error)}`);
+      else debug.log(["spacetime"], "[spacetime] shard disconnected");
     },
   });
-  const reducers = new ReducerManager(connection);
-  const data = new DataManager(connection, reducers, definitions);
+  connections.chat.addListener({
+    onConnected: (_conn, identity) => {
+      debug.log(["spacetime"], `[spacetime] chat connected as ${identity.toHexString()}`);
+    },
+    onConnectError: (error: Error) => {
+      console.error("[spacetime] chat connect error", error);
+    },
+    onDisconnected: (error?: Error) => {
+      if (error) debug.warn(["spacetime"], `[spacetime] chat disconnected ${String(error)}`);
+      else debug.log(["spacetime"], "[spacetime] chat disconnected");
+    },
+  });
+  const reducers = new ReducerManager(connections);
+  const data = new DataManager(connections, reducers, definitions);
 
   // Per-frame promote: lifts elapsed `valid_at` rows from each table's
   // `server` map into `current` and fires `added`/`updated`/`removed` events
@@ -121,7 +151,7 @@ async function main(): Promise<Runtime> {
   zones.onAdded("active", subscribeZone);
   zones.onRemoved("active", unsubscribeZone);
 
-  const playerSession = new PlayerManager(connection, data);
+  const playerSession = new PlayerManager(connections.shard, data);
   const souls = new SoulManager(playerSession, data);
 
   // Drive ZoneManager's `"soul"` anchor off the local soul card's
@@ -144,7 +174,7 @@ async function main(): Promise<Runtime> {
     drawCallCounter,
     definitions,
     // recipes,
-    connection,
+    connections,
     reducers,
     playerSession,
     souls,
@@ -155,14 +185,15 @@ async function main(): Promise<Runtime> {
     game: null,
     input: null,
     actions: null,
+    logs: null,
   };
   scenes.setContext(ctx);
 
-  connection.connect().catch(() => undefined);
+  connections.connectAll();
 
   await scenes.change(new LoginScene());
 
-  return { app, scenes, connection, playerSession, souls, data, zones };
+  return { app, scenes, connections, playerSession, souls, data, zones };
 }
 
 function showFatalError(error: unknown): void {
@@ -195,7 +226,7 @@ if (import.meta.hot) {
     rt.souls.dispose();
     rt.data.dispose();
     rt.playerSession.dispose();
-    rt.connection.disconnect();
+    rt.connections.disconnectAll();
     await rt.scenes.dispose();
     rt.app.destroy(true, { children: true, texture: true });
     document

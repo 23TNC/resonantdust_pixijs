@@ -35,12 +35,28 @@ import { LayoutWorld } from "./LayoutWorld";
  * through to `LayoutWorld` only for empty space. `DragManager` and
  * `WorldPanManager` are mutually exclusive for the same gesture.
  */
+/** Exponential-lerp factor for the viewport recenter tween. Same
+ *  shape as `LayoutCard.tweenTo` — each frame moves
+ *  `(target - current) * TWEEN_LERP` toward the goal, so the
+ *  approach is fast at the start and softens as it lands. */
+const TWEEN_LERP = 0.18;
+
+/** Snap radius (in hex units) at which the tween treats itself as
+ *  done and writes the final anchor exactly. Prevents the
+ *  exponential approach from infinite-asymptoting near the goal. */
+const TWEEN_SNAP_HEX = 0.01;
+
 export class WorldPanManager {
   private active = false;
   private startPointerX = 0;
   private startPointerY = 0;
   private startViewQ = 0;
   private startViewR = 0;
+
+  /** Active recenter tween, or `null` when idle. Cancelled
+   *  immediately on any new pan-drag start so the player can grab
+   *  the world to redirect even mid-snap. */
+  private tween: { targetQ: number; targetR: number } | null = null;
 
   private readonly unsubDragStart: () => void;
   private readonly unsubDragStop: () => void;
@@ -64,6 +80,9 @@ export class WorldPanManager {
       // way.
       if (data.hit !== this.worldView) return;
       this.active = true;
+      // Drag wins over an in-flight recenter tween — the player's
+      // active grab takes precedence over the snap-back animation.
+      this.tween = null;
       this.startPointerX = data.x;
       this.startPointerY = data.y;
       const anchor = ctx.zones.viewportAnchor;
@@ -79,25 +98,59 @@ export class WorldPanManager {
     });
   }
 
-  /** Called once per frame by `GameScene.update`. No-op when not
-   *  panning; otherwise reads `input.lastPointer` and pushes a fresh
-   *  viewport anchor. */
+  /** Kick off a smooth recenter to world hex `(q, r)`. Replaces any
+   *  in-flight tween. Cancels itself if a pan-drag starts mid-snap
+   *  (`active = true` short-circuits the tween branch in `update`).
+   *
+   *  Call site: `GameScene`'s Space-key handler, which resolves the
+   *  soul's current hex from `ctx.souls.getSoul()` and passes it
+   *  here. */
+  tweenTo(q: number, r: number): void {
+    this.tween = { targetQ: q, targetR: r };
+  }
+
+  /** Called once per frame by `GameScene.update`. Three branches:
+   *   - Active pan drag → read pointer, push fresh anchor.
+   *   - Active recenter tween → exponential-lerp the anchor toward
+   *     the tween target, snapping when within `TWEEN_SNAP_HEX`.
+   *   - Idle → no-op.
+   *  Pan wins over tween: any new drag clears the tween (see the
+   *  drag-start listener). */
   update(): void {
-    if (!this.active) return;
-    const input = this.ctx.input;
-    if (!input) return;
-    const dx = input.lastPointer.x - this.startPointerX;
-    const dy = input.lastPointer.y - this.startPointerY;
-    const dr = (2 / 3) * dy / WORLD_HEX_RADIUS;
-    const dq = dx / (WORLD_HEX_RADIUS * Math.sqrt(3)) - dr / 2;
-    // Subtract: the world moves with the cursor, so the viewport
-    // anchor (which stays fixed under the cursor's start point)
-    // shifts opposite to the cursor's pixel drag.
-    this.ctx.zones.setAnchor(
-      "viewport",
-      this.startViewQ - dq,
-      this.startViewR - dr,
-    );
+    if (this.active) {
+      const input = this.ctx.input;
+      if (!input) return;
+      const dx = input.lastPointer.x - this.startPointerX;
+      const dy = input.lastPointer.y - this.startPointerY;
+      const dr = (2 / 3) * dy / WORLD_HEX_RADIUS;
+      const dq = dx / (WORLD_HEX_RADIUS * Math.sqrt(3)) - dr / 2;
+      // Subtract: the world moves with the cursor, so the viewport
+      // anchor (which stays fixed under the cursor's start point)
+      // shifts opposite to the cursor's pixel drag.
+      this.ctx.zones.setAnchor(
+        "viewport",
+        this.startViewQ - dq,
+        this.startViewR - dr,
+      );
+      return;
+    }
+    if (this.tween !== null) {
+      const anchor = this.ctx.zones.viewportAnchor;
+      const dq = this.tween.targetQ - anchor.q;
+      const dr = this.tween.targetR - anchor.r;
+      if (Math.hypot(dq, dr) < TWEEN_SNAP_HEX) {
+        // Snap to the exact target and end the tween. Without the
+        // snap the exponential lerp would asymptote forever.
+        this.ctx.zones.setAnchor("viewport", this.tween.targetQ, this.tween.targetR);
+        this.tween = null;
+        return;
+      }
+      this.ctx.zones.setAnchor(
+        "viewport",
+        anchor.q + dq * TWEEN_LERP,
+        anchor.r + dr * TWEEN_LERP,
+      );
+    }
   }
 
   dispose(): void {

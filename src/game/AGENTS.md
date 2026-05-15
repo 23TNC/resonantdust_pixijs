@@ -4,13 +4,18 @@
 Game logic for in-play cards: spawn/destroy, stack chains, drag-drop, inventory layout, recipe matching, definition decoding. Everything that's "what's happening to the cards the player can see" lives here. Pure data flows in (`ctx.data.cardsLocal`) and pure layout / reducer calls flow out — this folder doesn't talk to the SpacetimeDB SDK directly (that's `../server/`).
 
 ## Subfolders
-- `cards/`: `Card` (composite of game + layout halves), `CardManager` (registry, zones, stack chain ops, splice), `cardData` (microZone/microLocation packing helpers), `layout/rectangle` and `layout/hexagon` (per-shape `Game*Card` + `Layout*Card` pairs).
+- `cards/`: `Card` (composite of game + layout halves), `CardManager` (registry, zones, stack chain ops, splice), `cardData` (microZone/microLocation packing helpers), `layout/rectangle` and `layout/hexagon` (per-shape `RectCard` / `HexCard` subclasses, each integrating both game and layout concerns).
 - `actions/`: `ActionManager` — the recipe pre-filter + submission queue.
+- `chat/`: `ChatPanel` (bottom-left resizable tabbed panel — general chat + logs tab) + `LogManager` (scene-scoped ring buffer of flavor-text events pushed by game systems). See [chat/AGENTS.md](chat/AGENTS.md).
 - `definitions/`: `DefinitionManager` — wasm-backed wrapper around the `resonantdust-content` crate. Exposes `decode`, `findPackedByKey`, `cardFlagBit`, `matchStackRecipe`. Bootstraps via `await initDefinitions()` in `main.ts`.
-- `input/`: `InputManager` (canvas-level pointer + keyboard plumbing), `DragManager` (pickup / drop, with `position_hold` / `drop_hold` flag enforcement).
+- `input/`: `InputManager` (canvas-level pointer + keyboard plumbing), `DragManager` (pickup / drop, with `position_hold` / `drop_hold` flag enforcement), `DragGhost` (translucent ghost-drag visual for non-pickup flows like soul movement).
 - `inventory/`: `GameInventory` (per-zone overlap-push and clamp), `InventoryLayout` (the right-column `LayoutNode`).
 - `layout/`: scene-agnostic layout primitives (`LayoutManager`, `LayoutNode`).
-- `titlebar/`, `zones/`: title bar HUD; ZoneManager (subscription bookkeeping).
+- `permissions.ts`: `canPickUpCard(ctx, card)` — the single ownership-check entry point for whether the local player may drag a card. Walks the `ownerId` chain through `cardsLocal`; orthogonal to `position_hold` / `position_locked` flag checks in `DragManager` (both must pass for a successful pickup).
+- `titlebar/`: `TitleBar` UI component.
+- `toolbar/`: `ToolBar` — top-left emoji-button strip; width is derived from the button list so `GameLayout` reads `ToolBar.WIDTH` to position it.
+- `world/`: `LayoutWorld` (hex tile grid + world card surface) + `WorldPanManager` (drag-to-pan + programmatic recenter tween). See [world/AGENTS.md](world/AGENTS.md).
+- `zones/`: `ZoneManager` — tiered zone refcount with per-tier add/remove listeners and the named world-anchor system.
 
 ## Data tier rule (load-bearing)
 **Read `ctx.data.cardsLocal`. Never `ctx.data.cards.current` from this folder.**

@@ -37,16 +37,23 @@ import {
 import AddCardReducer from "./add_card_reducer";
 import BootstrapReducer from "./bootstrap_reducer";
 import ClaimOrLoginReducer from "./claim_or_login_reducer";
+import CreateCharacterReducer from "./create_character_reducer";
+import DeployMiniZoneReducer from "./deploy_mini_zone_reducer";
 import EquipCardReducer from "./equip_card_reducer";
 import GenerateForestTerrainReducer from "./generate_forest_terrain_reducer";
 import MoveSoulReducer from "./move_soul_reducer";
+import PickupMiniZoneReducer from "./pickup_mini_zone_reducer";
 import ProposeActionReducer from "./propose_action_reducer";
+import SendChatMessageReducer from "./send_chat_message_reducer";
+import SetLastLoginReducer from "./set_last_login_reducer";
 
 // Import all procedure arg schemas
 
 // Import all table schema definitions
 import CardsRow from "./cards_table";
+import ChatMessagesRow from "./chat_messages_table";
 import MagneticActionsRow from "./magnetic_actions_table";
+import PlayerProfilesRow from "./player_profiles_table";
 import PlayersRow from "./players_table";
 import SoulsRow from "./souls_table";
 import ZonesRow from "./zones_table";
@@ -75,6 +82,20 @@ const tablesSchema = __schema({
       { name: 'cards_valid_at_key', constraint: 'unique', columns: ['validAt'] },
     ],
   }, CardsRow),
+  chat_messages: __table({
+    name: 'chat_messages',
+    indexes: [
+      { accessor: 'sender_player_id', name: 'chat_messages_sender_player_id_idx_btree', algorithm: 'btree', columns: [
+        'senderPlayerId',
+      ] },
+      { accessor: 'sent_at', name: 'chat_messages_sent_at_idx_btree', algorithm: 'btree', columns: [
+        'sentAt',
+      ] },
+    ],
+    constraints: [
+      { name: 'chat_messages_sent_at_key', constraint: 'unique', columns: ['sentAt'] },
+    ],
+  }, ChatMessagesRow),
   magnetic_actions: __table({
     name: 'magnetic_actions',
     indexes: [
@@ -89,6 +110,17 @@ const tablesSchema = __schema({
       { name: 'magnetic_actions_magnetic_id_key', constraint: 'unique', columns: ['magneticId'] },
     ],
   }, MagneticActionsRow),
+  player_profiles: __table({
+    name: 'player_profiles',
+    indexes: [
+      { accessor: 'player_id', name: 'player_profiles_player_id_idx_btree', algorithm: 'btree', columns: [
+        'playerId',
+      ] },
+    ],
+    constraints: [
+      { name: 'player_profiles_player_id_key', constraint: 'unique', columns: ['playerId'] },
+    ],
+  }, PlayerProfilesRow),
   players: __table({
     name: 'players',
     indexes: [
@@ -147,10 +179,15 @@ const reducersSchema = __reducers(
   __reducerSchema("add_card", AddCardReducer),
   __reducerSchema("bootstrap", BootstrapReducer),
   __reducerSchema("claim_or_login", ClaimOrLoginReducer),
+  __reducerSchema("create_character", CreateCharacterReducer),
+  __reducerSchema("deploy_mini_zone", DeployMiniZoneReducer),
   __reducerSchema("equip_card", EquipCardReducer),
   __reducerSchema("generate_forest_terrain", GenerateForestTerrainReducer),
   __reducerSchema("move_soul", MoveSoulReducer),
+  __reducerSchema("pickup_mini_zone", PickupMiniZoneReducer),
   __reducerSchema("propose_action", ProposeActionReducer),
+  __reducerSchema("send_chat_message", SendChatMessageReducer),
+  __reducerSchema("set_last_login", SetLastLoginReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

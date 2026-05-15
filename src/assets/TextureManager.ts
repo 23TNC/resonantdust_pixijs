@@ -24,13 +24,13 @@ export const HEX_TEXTURE_WIDTH  = Math.sqrt(3) * HEX_TEXTURE_RADIUS;
 export const HEX_TEXTURE_HEIGHT = HEX_TEXTURE_RADIUS * 2;
 
 // Fake definition used to drive HexCardVisual when rendering empty world tiles.
-// secondary === primary so the inner band is invisible; name is blank.
+// secondary === primary so the inner band is invisible; key is blank so the
+// visual's bare-key fallback renders empty text.
 const EMPTY_TILE_DEF: CardDefinition = {
   cardType:     0,
   cardCategory: 0,
   definitionId: 0,
   key:          "",
-  name:         "",
   style:        ["#141e28", "#141e28", "#243040"],
   aspects:      [],
   flags:        0,
@@ -53,7 +53,6 @@ const CUSTOM_DEFS: Record<CustomCard, CardDefinition> = {
     cardCategory: 0,
     definitionId: 0,
     key:          "",
-    name:         "",
     style:        ["#141e28", "#141e28", "#243040"],
     aspects:      [],
     flags:        0,

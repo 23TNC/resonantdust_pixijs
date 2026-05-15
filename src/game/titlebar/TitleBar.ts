@@ -1,9 +1,12 @@
 import { Graphics, Text } from "pixi.js";
 import { LayoutNode } from "../layout/LayoutNode";
+import { NOTO_EMOJI_FAMILY } from "../../assets/fonts";
+import { SettingsMenu } from "./SettingsMenu";
 
 const HEIGHT = 32;
 const PADDING = 12;
 const FONT_SIZE = 14;
+const FONT_WEIGHT = "400";
 const FPS_SMOOTHING = 0.05;
 
 export class TitleBar extends LayoutNode {
@@ -13,17 +16,14 @@ export class TitleBar extends LayoutNode {
   private readonly nameText: Text;
   private readonly drawCallsText: Text;
   private readonly fpsText: Text;
+  private readonly settingsText: Text;
   private fps = 60;
   private readonly playerName: string;
-  private playerId: number;
-  /** `0` until the soul subscription lands. Re-set via `setSoulCardId`
-   *  when `SoulManager` resolves the player's soul card. */
-  private soulCardId = 0;
+  readonly settingsMenu = new SettingsMenu();
 
-  constructor(playerName: string, playerId: number) {
+  constructor(playerName: string) {
     super();
     this.playerName = playerName;
-    this.playerId = playerId;
     this.nameText = new Text({
       text: this.formatNameLine(),
       style: {
@@ -54,10 +54,25 @@ export class TitleBar extends LayoutNode {
     });
     this.fpsText.anchor.set(1, 0.5);
 
+    this.settingsText = new Text({
+      text: "⚙",
+      style: {
+        fill: 0xffffff,
+        fontFamily: NOTO_EMOJI_FAMILY,
+        fontSize: FONT_SIZE,
+        fontWeight: FONT_WEIGHT,
+      },
+    });
+    this.settingsText.anchor.set(1, 0.5);
+    this.settingsText.eventMode = "static";
+    this.settingsText.cursor = "pointer";
+    this.settingsText.on("pointertap", () => this.settingsMenu.toggle());
+
     this.container.addChild(this.bg);
     this.container.addChild(this.nameText);
     this.container.addChild(this.drawCallsText);
     this.container.addChild(this.fpsText);
+    this.container.addChild(this.settingsText);
   }
 
   updateStats(deltaMS: number, drawCalls: number): void {
@@ -68,21 +83,13 @@ export class TitleBar extends LayoutNode {
     this.fpsText.text = `${Math.round(this.fps)} fps`;
   }
 
-  /** Update the displayed soul card id (after `SoulManager` resolves
-   *  it on first login / lazy migration / character switch). Re-renders
-   *  the name line to include the new id alongside the player id. */
-  setSoulCardId(soulCardId: number): void {
-    if (this.soulCardId === soulCardId) return;
-    this.soulCardId = soulCardId;
-    this.nameText.text = this.formatNameLine();
+  private formatNameLine(): string {
+    return this.playerName;
   }
 
-  /** Compose the name line: `"<name> p:<player_id> s:<soul_id>"`. Both
-   *  ids are appended for spawn-by-id debugging — copy the values
-   *  straight into a `bin/st`-style command to target this player or
-   *  soul. Soul id reads as `s:0` until the subscription resolves it. */
-  private formatNameLine(): string {
-    return `${this.playerName} p:${this.playerId} s:${this.soulCardId}`;
+  override destroy(): void {
+    this.settingsMenu.destroy();
+    super.destroy();
   }
 
   protected override layout(): void {
@@ -91,7 +98,8 @@ export class TitleBar extends LayoutNode {
 
     const cy = this.height / 2;
     this.nameText.position.set(PADDING, cy);
-    this.fpsText.position.set(this.width - PADDING, cy);
+    this.settingsText.position.set(this.width - PADDING, cy);
+    this.fpsText.position.set(this.settingsText.x - this.settingsText.width - PADDING, cy);
     this.drawCallsText.position.set(this.fpsText.x - this.fpsText.width - PADDING, cy);
   }
 }

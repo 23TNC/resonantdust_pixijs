@@ -61,6 +61,14 @@ export class CardManager {
     // parent and missed setting its back-pointer. Repair once now that
     // every card is in the registry.
     this.repairBackPointers();
+    // Spawn order also means a child whose parent wasn't yet in the
+    // registry hit `Card`'s `fallbackToInventory` branch and attached
+    // to the inventory surface instead of its parent's stack host.
+    // Now that every Card exists, walk them all and re-evaluate
+    // parenting — anything that should be chained but isn't gets
+    // detached + re-attached to the right parent. Bare-loose cards
+    // and cards already correctly parented are no-ops.
+    this.repairParenting();
     this.unsubscribe = ctx.data.subscribeLocalCard((change) => {
       if (change.kind === "added") this.spawn(change.key);
       else if (change.kind === "removed") this.destroy(change.key);
@@ -576,9 +584,21 @@ export class CardManager {
         microZone: clearStackedState(row.microZone),
       };
     } else if (state.kind === "inventory") {
+      // Under the post-flag-20 card-owner model, the inventory
+      // bucket address is the soul's card_id. For cards already in
+      // inventory, `row.ownerId` IS the soul's card_id (the pun
+      // preserves). For cards coming from the world (`ownerId = 0`)
+      // we fall back to the active soul (`SoulManager.getSoulId()`)
+      // so the drop lands in the player's currently-controlled soul's
+      // inventory rather than at `macroZone = 0`. Also re-stamp
+      // `ownerId` so future drags from this row resolve consistently.
+      const inventoryBucket = row.ownerId !== 0
+        ? row.ownerId
+        : (this.ctx.souls.getSoulId() ?? 0);
       newRow = {
         ...row,
-        macroZone: row.ownerId,
+        ownerId: inventoryBucket,
+        macroZone: inventoryBucket,
         surface: 1,
         microLocation: encodeLooseXY(state.x, state.y),
         microZone: clearStackedState(row.microZone),
@@ -1069,6 +1089,24 @@ export class CardManager {
         direction: toDir,
       });
       parentId = id;
+    }
+  }
+
+  /** Re-attach each Card's Pixi container to its true parent when
+   *  the constructor's `fallbackToInventory` left it dangling.
+   *  Called once after the initial spawn pass + `repairBackPointers`,
+   *  when every Card is guaranteed to be in the registry — the
+   *  earlier reason a child fell back was its parent hadn't spawned
+   *  yet, which can't be true anymore.
+   *
+   *  Each Card's `repairParenting` is a no-op unless its row says
+   *  it should be chained AND it isn't currently chained to the
+   *  right parent. Steady-state spawns (post-init) don't hit this
+   *  race in practice, so the pass only ever does real work on
+   *  scene entry. */
+  private repairParenting(): void {
+    for (const card of this.cards.values()) {
+      card.repairParenting();
     }
   }
 

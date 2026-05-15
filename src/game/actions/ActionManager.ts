@@ -449,9 +449,14 @@ export class ActionManager {
     // root == actor). This over-permits in the rare cross-owner
     // case; `propose_action::resolve_has` is the authoritative
     // server-side check that catches it.
-    const ownerId = this.ctx.data.cardsLocal.get(rootCard.cardId)?.ownerId ?? 0;
-    const above = this.topStackDefs(ownerId, STACK_DIRECTION_UP);
-    const below = this.topStackDefs(ownerId, STACK_DIRECTION_DOWN);
+    //
+    // Resolution: walk `ownerId` up to the soul (the row carrying
+    // `FLAG_OWNED_BY_PLAYER`). Under the post-flag-20 card-owner
+    // model, `card.ownerId` is a card_id (the container), so a
+    // direct lookup by player_id is no longer correct.
+    const soulId = this.owningSoulCardId(rootCard.cardId);
+    const above = this.topStackDefs(soulId, STACK_DIRECTION_UP);
+    const below = this.topStackDefs(soulId, STACK_DIRECTION_DOWN);
     const match = this.ctx.definitions.matchStackRecipe(
       hexDef,
       matchRoot,
@@ -736,11 +741,30 @@ export class ActionManager {
     return `${looseRootId}:${direction}:${recipeIndex}:${actorId}`;
   }
 
-  /** Packed defs of cards currently stacked on `ownerId`'s soul card
-   *  in the given `direction` (UP = equipment / above, DOWN = action
-   *  stack / below). Used by `tryMatch` to feed `has` /
-   *  `reagents.has` / `has_below` predicate filters into the wasm
-   *  matcher.
+  /** Walk `cardsLocal.ownerId` up from `cardId` until reaching a row
+   *  carrying `FLAG_OWNED_BY_PLAYER` — that row IS the soul, and its
+   *  card_id is returned. Returns `0` if the walk reaches world
+   *  (`ownerId === 0` without the flag), hits a card not present
+   *  locally, or trips the depth cap (defensive against cycles).
+   *  Mirrors server-side `cards::owning_soul`. */
+  private owningSoulCardId(cardId: number): number {
+    const FLAG_OWNED_BY_PLAYER = 1 << 20;
+    const DEPTH_CAP = 32;
+    let cur = cardId;
+    for (let i = 0; i < DEPTH_CAP; i++) {
+      const row = this.ctx.data.cardsLocal.get(cur);
+      if (!row) return 0;
+      if ((row.flags & FLAG_OWNED_BY_PLAYER) !== 0) return cur;
+      if (row.ownerId === 0) return 0;
+      cur = row.ownerId;
+    }
+    return 0;
+  }
+
+  /** Packed defs of cards currently stacked on `soulId` in the given
+   *  `direction` (UP = equipment / above, DOWN = action stack /
+   *  below). Used by `tryMatch` to feed `has` / `reagents.has` /
+   *  `has_below` predicate filters into the wasm matcher.
    *
    *  Walks the chain BFS-style from the soul outward, accepting both
    *  state-1 (`Slot`, `microLocation = immediate parent`) and
@@ -756,15 +780,12 @@ export class ActionManager {
    *  `microLocation` points into the already-visited chain set is
    *  picked up.
    *
-   *  Returns an empty array when the owner has no player row, no
-   *  soul, or no chained cards in that direction. The matcher
-   *  treats an empty pool as "this slot has no candidate," filtering
-   *  any recipe that declares a has-predicate for it. */
-  private topStackDefs(ownerId: number, direction: number): number[] {
-    if (ownerId === 0) return [];
-    const player = this.ctx.data.playersLocal.get(ownerId);
-    if (!player || player.soulCardId === 0) return [];
-    const soulId = player.soulCardId;
+   *  Returns an empty array when `soulId === 0` or no chained cards
+   *  in that direction. The matcher treats an empty pool as "this
+   *  slot has no candidate," filtering any recipe that declares a
+   *  has-predicate for it. */
+  private topStackDefs(soulId: number, direction: number): number[] {
+    if (soulId === 0) return [];
 
     // Build a `parentId -> children[]` index over chain rows in this
     // direction. `parentId` is whatever `microLocation` points at,

@@ -37,7 +37,8 @@ export class DragGhost {
     private readonly offsetY: number,
   ) {
     const def = ctx.definitions.decode(packedDefinition) ?? null;
-    this.visual.draw(def, "top");
+    const label = ctx.definitions.label(packedDefinition);
+    this.visual.draw(def, "top", label);
     this.container.addChild(this.visual);
     this.container.alpha = GHOST_ALPHA;
     this.container.eventMode = "none";

@@ -3,15 +3,22 @@ import type { DataManager } from "../data/DataManager";
 import type { PlayerManager } from "./PlayerManager";
 
 /**
- * Tracks the local player's soul — the in-world avatar carrying the
- * player's positional state plus per-soul stat / fatigue / injury
- * counts. The chain is:
+ * Tracks the local player's *active soul* — the in-world avatar
+ * carrying positional state plus per-soul stat / fatigue / injury
+ * counts.
  *
- *   `PlayerManager` → `player.soul_card_id` (set by server at login) →
- *   `SoulManager` installs `subscribeSoul(id)` + `subscribeCard(id)` →
- *   the Soul row flows into `souls.current` / `soulsLocal`, the soul
- *   card row flows into `cards.current` / `cardsLocal` →
- *   listeners get a `(soul: Soul | null) => void` callback.
+ * Source of the active-soul id: `CharacterSelectScene.handlePlay`
+ * calls `setActiveSoul(cardId)` with the soul the user picked. There
+ * is no server-side "currently controlled soul" — `Player` rows
+ * carry only identity (id + name); each reducer that needs a soul
+ * takes one explicitly, and the client-side active soul is purely
+ * a UI-layer construct.
+ *
+ * Once set, this manager installs `subscribeSoul(id)` +
+ * `subscribeCard(id)`, the Soul row flows into `souls.current` /
+ * `soulsLocal`, the soul card row flows into `cards.current` /
+ * `cardsLocal`, and listeners get a `(soul: Soul | null) => void`
+ * callback.
  *
  * Why both subscriptions: the Soul row carries the data we *react*
  * to (position + stats); the Card row is needed for the rect-card
@@ -20,23 +27,19 @@ import type { PlayerManager } from "./PlayerManager";
  * bootstrap path so we can *learn* where the soul lives.
  *
  * Listeners fire on:
- * - First soul row arrival (soul_card_id resolves and the row lands
- *   via the new subscription).
+ * - First soul row arrival after `setActiveSoul`.
  * - Any subsequent change to the soul row (position update, stat
  *   change, fatigue tick, etc.).
- * - Soul transitions (multi-character switch — not used today but the
- *   subscription teardown / reinstall path is ready).
+ * - Soul transitions (subsequent `setActiveSoul` calls).
  *
- * Wired up in `main.ts` after `PlayerManager` and `DataManager`. The
- * soul-tracking subscription is installed lazily on the first player
- * row that carries a non-zero `soul_card_id`, and torn down on
- * `dispose`.
+ * Wired up in `main.ts` after `PlayerManager` and `DataManager`.
+ * The soul-tracking subscription is installed when
+ * `setActiveSoul(id)` is first called with a non-zero id, and torn
+ * down on `dispose` or `setActiveSoul(0)`.
  */
 export class SoulManager {
-  /** Current soul `card_id` we're subscribed to, or `null` if not
-   *  yet known. Tracked separately from `soul` because the
-   *  subscription lifecycle (install / tear-down) keys on the id,
-   *  whereas listeners care about the row content. */
+  /** Current soul `card_id` we're subscribed to, or `null` if no
+   *  active soul has been set yet (pre-character-select). */
   private currentSoulId: number | null = null;
   /** Latest Soul row we've observed, or `null` if not yet delivered
    *  by the subscription (or the soul has no row in `soulsLocal`
@@ -46,22 +49,39 @@ export class SoulManager {
   private unsubPlayer: (() => void) | null = null;
   private unsubSoulRow: (() => void) | null = null;
   private disposed = false;
+  private lastSeenPlayerId: number | null = null;
 
   constructor(
     private readonly players: PlayerManager,
     private readonly data: DataManager,
   ) {
-    // React to player-row changes from PlayerManager. The setPlayer
-    // path fires on first login and on every subsequent player-row
-    // update (multi-character switch would land here too).
+    // Listen for player-id transitions (login / logout / switch).
+    // When the active player changes, clear the active soul so a
+    // stale id from the previous session doesn't leak across.
+    // We do NOT pick a default soul from the player row — there
+    // is no server-side "current soul" pointer anymore;
+    // `CharacterSelectScene` is what sets the active soul.
     this.unsubPlayer = this.players.on((player) => {
-      this.handlePlayerChange(player?.soulCardId ?? 0);
+      const newPlayerId = player?.playerId ?? null;
+      if (newPlayerId !== this.lastSeenPlayerId) {
+        this.lastSeenPlayerId = newPlayerId;
+        // Drop any soul we were tracking under the prior player.
+        this.handleActiveSoulChange(0);
+      }
     });
-    // If PlayerManager already had a player when we attached
-    // (unlikely under current main.ts ordering, but cheap to cover),
-    // pull its initial soul id.
     const initial = this.players.getPlayer();
-    if (initial) this.handlePlayerChange(initial.soulCardId);
+    if (initial) {
+      this.lastSeenPlayerId = initial.playerId;
+    }
+  }
+
+  /** Set the soul this manager tracks. Called by
+   *  `CharacterSelectScene.handlePlay` when the user picks a soul
+   *  to play. Pass `0` (or any non-positive id) to clear and tear
+   *  down the soul subscription. */
+  setActiveSoul(soulCardId: number): void {
+    if (this.disposed) return;
+    this.handleActiveSoulChange(soulCardId <= 0 ? 0 : soulCardId);
   }
 
   /** Latest Soul row, or `null` if the soul hasn't been resolved yet
@@ -97,11 +117,11 @@ export class SoulManager {
     this.listeners.clear();
   }
 
-  /** Player row's `soul_card_id` changed (or first arrived). Manage
-   *  the subscription accordingly: drop the old soul subscription if
-   *  the id changed or cleared, install a new one if we have a
-   *  non-zero id. */
-  private handlePlayerChange(soulCardId: number): void {
+  /** Active soul transitioned (set via `setActiveSoul` or cleared by
+   *  a player-id change). Manage the subscription accordingly: drop
+   *  the old soul subscription if the id changed or cleared, install
+   *  a new one if we have a non-zero id. */
+  private handleActiveSoulChange(soulCardId: number): void {
     if (this.disposed) return;
     const next = soulCardId === 0 ? null : soulCardId;
     if (next === this.currentSoulId) return;
@@ -110,8 +130,8 @@ export class SoulManager {
     this.currentSoulId = next;
 
     if (next === null) {
-      // Player logged out, or migrated row arrived with
-      // `soul_card_id = 0`. Drop the soul reference and notify.
+      // Active soul cleared (logout / pre-character-select). Drop
+      // the soul reference and notify.
       this.setSoul(null);
       return;
     }
