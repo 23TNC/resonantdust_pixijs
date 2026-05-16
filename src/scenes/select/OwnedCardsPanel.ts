@@ -120,9 +120,15 @@ export class OwnedCardsPanel extends LayoutNode {
     this.container.addChild(this.createButton);
 
     // Seed from anything already in cardsLocal — the subscription
-    // only fires on diffs from registration forward.
+    // only fires on diffs from registration forward. Deduplicate by
+    // cardId so each card appears at most once even if cardsLocal is
+    // iterated while a concurrent subscription push is in flight.
+    const seenIds = new Set<number>();
     for (const row of this.gameContext.data.cardsLocal.values()) {
-      if (row.ownerId === this.ownerId) this.upsertVisual(row);
+      if (row.ownerId === this.ownerId && !seenIds.has(row.cardId)) {
+        seenIds.add(row.cardId);
+        this.upsertVisual(row);
+      }
     }
 
     this.unsubLocalCard = this.gameContext.data.subscribeLocalCard((change) => {

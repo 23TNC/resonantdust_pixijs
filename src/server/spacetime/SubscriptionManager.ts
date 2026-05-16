@@ -1,6 +1,6 @@
 import { MINI_ZONE_LAYER, unpackZoneId, WORLD_LAYER, type ZoneId } from "../data/packing";
 import { DbConnection as ShardDbConnection } from "./bindings/shard";
-import type { Card, MagneticAction, Player, Soul, Zone } from "./bindings/types";
+import type { Card, Player, Soul, Zone } from "./bindings/types";
 import type { ConnectionManager } from "./ConnectionManager";
 import { SubscriptionBase, type TableHandlers } from "./SubscriptionBase";
 
@@ -12,7 +12,6 @@ type ShardTableRowMap = {
   players: Player;
   souls: Soul;
   zones: Zone;
-  magnetic_actions: MagneticAction;
 } & Record<string, unknown>;
 
 /**
@@ -90,18 +89,6 @@ export class SubscriptionManager extends SubscriptionBase<
       this.fanOut("zones", "onDelete", (h) => h.onDelete?.(row));
     });
 
-    conn.db.magnetic_actions.onInsert((ctx, row) => {
-      this.captureReducerTimestamp(ctx);
-      this.fanOut("magnetic_actions", "onInsert", (h) => h.onInsert?.(row));
-    });
-    conn.db.magnetic_actions.onUpdate((ctx, oldRow, newRow) => {
-      this.captureReducerTimestamp(ctx);
-      this.fanOut("magnetic_actions", "onUpdate", (h) => h.onUpdate?.(oldRow, newRow));
-    });
-    conn.db.magnetic_actions.onDelete((ctx, row) => {
-      this.captureReducerTimestamp(ctx);
-      this.fanOut("magnetic_actions", "onDelete", (h) => h.onDelete?.(row));
-    });
   }
 
   async subscribeCards(zoneId: ZoneId): Promise<void> {
@@ -190,19 +177,5 @@ export class SubscriptionManager extends SubscriptionBase<
 
   unsubscribeSoul(cardId: number): void {
     this.removeSubscription(`soul:${cardId}`);
-  }
-
-  async subscribeMagneticActions(zoneId: ZoneId): Promise<void> {
-    const { macroZone, layer: surface } = unpackZoneId(zoneId);
-    return this.installSubscription(`magnetic_actions:${zoneId}`, {
-      queries: [
-        `SELECT * FROM magnetic_actions WHERE macro_zone = ${macroZone} AND surface = ${surface}`,
-      ],
-      scopeKey: `zone:${zoneId}`,
-    });
-  }
-
-  unsubscribeMagneticActions(zoneId: ZoneId): void {
-    this.removeSubscription(`magnetic_actions:${zoneId}`);
   }
 }

@@ -3,6 +3,7 @@ import { LayoutNode } from "../layout/LayoutNode";
 import type { GameContext } from "../../GameContext";
 import type { CardDefinition } from "../definitions/DefinitionManager";
 import type { AspectInfo } from "../definitions/DefinitionManager";
+import { NOTO_EMOJI_FAMILY } from "../../assets/fonts";
 import localeRaw from "../../content/locales/cards/en.json";
 
 // ── Locale lookup ─────────────────────────────────────────────────────────────
@@ -49,34 +50,38 @@ function aspectColor(id: number, group: string): number {
   return CATEGORY_COLOR[group] ?? 0x556677;
 }
 
-// ── Per-pip display data (populated in show(), consumed in layout()) ──────────
+// ── Per-pip display data ───────────────────────────────────────────────────────
 interface PipData { aspectId: number; value: number; icon: string; group: string }
 
 // ── Layout constants ──────────────────────────────────────────────────────────
-const WIDTH          = 180;
-const COMPACT_HEIGHT = 130;
-const EXPANDED_HEIGHT = 280;
-const PADDING        = 8;
+const WIDTH           = 320;
+const PADDING         = 8;
 
-const HEADER_H       = 16;  // "DETAILS" micro-label
-const NAME_FONT_SIZE = 13;
-const NAME_H         = NAME_FONT_SIZE * 2 + 2; // allow two lines
-const PIPS_Y         = HEADER_H + NAME_H + 8;
-const PIP_DIAM       = 18;
-const PIP_GAP        = 6;
-const PIP_SLOT       = PIP_DIAM + PIP_GAP;
-const PIPS_PER_ROW   = 4;
-const TOGGLE_H       = 22;
-const COMPACT_BODY_BOTTOM = COMPACT_HEIGHT - TOGGLE_H;  // 108
+const NAME_FONT_SIZE  = 13;
+const NAME_Y          = 8;
+const NAME_H          = NAME_FONT_SIZE + 6;   // single-line name area
 
-const DESC_HEADER_Y  = COMPACT_BODY_BOTTOM + 8;
-const DESC_HEADER_H  = 14;
-const DESC_Y         = DESC_HEADER_Y + DESC_HEADER_H + 4;
-const DESC_FONT      = 12;
-const DESC_LINE_H    = 17;
-const EXPANDED_BODY_BOTTOM = EXPANDED_HEIGHT - TOGGLE_H; // 258
+const PIP_SIZE        = 44;
+const PIP_GAP         = 6;
+const PIP_SLOT        = PIP_SIZE + PIP_GAP;
+const PIP_ICON_FONT   = 20;
+const PIP_VALUE_FONT  = 9;
 
-const MAX_PIPS       = 20;
+const PIPS_Y          = NAME_Y + NAME_H + 6;  // top of the single pip row
+
+const TOGGLE_H        = 20;
+const COMPACT_HEIGHT  = PIPS_Y + PIP_SIZE + 6 + TOGGLE_H;
+const COMPACT_BODY_BOTTOM = COMPACT_HEIGHT - TOGGLE_H;
+
+const DESC_HEADER_Y   = COMPACT_BODY_BOTTOM + 8;
+const DESC_HEADER_H   = 14;
+const DESC_Y          = DESC_HEADER_Y + DESC_HEADER_H + 4;
+const DESC_FONT       = 12;
+const DESC_LINE_H     = 17;
+const EXPANDED_HEIGHT = 270;
+const EXPANDED_BODY_BOTTOM = EXPANDED_HEIGHT - TOGGLE_H;
+
+const MAX_PIPS        = 20;
 
 // ── ToggleButton ──────────────────────────────────────────────────────────────
 class ToggleButton extends LayoutNode {
@@ -89,11 +94,7 @@ class ToggleButton extends LayoutNode {
     this.container.addChild(this.bg);
     this.chevron = new Text({
       text: "▼",
-      style: {
-        fill: 0xaab5c4,
-        fontFamily: "sans-serif",
-        fontSize: 11,
-      },
+      style: { fill: 0xaab5c4, fontFamily: "sans-serif", fontSize: 11 },
     });
     this.chevron.anchor.set(0.5, 0.5);
     this.container.addChild(this.chevron);
@@ -107,48 +108,40 @@ class ToggleButton extends LayoutNode {
 
   protected override layout(): void {
     this.bg.clear();
-    this.bg
-      .rect(0, 0, this.width, this.height)
-      .fill({ color: 0x12161b });
+    this.bg.rect(0, 0, this.width, this.height).fill({ color: 0x12161b });
     this.chevron.text = this._expanded ? "▲" : "▼";
     this.chevron.position.set(this.width / 2, this.height / 2);
   }
 }
 
 // ── DetailsPanel ──────────────────────────────────────────────────────────────
-interface Pip { gfx: Graphics; label: Text }
+interface Pip { gfx: Graphics; iconText: Text; valueText: Text }
 
 /**
- * Left-column details panel. Sits below the ToolBar and shows information
- * about the last-clicked card or world tile.
+ * Details panel. Sits to the left of the inventory and shows information
+ * about the last-clicked card.
  *
- * Standard (compact) mode: card name + style color band + aspect pips.
+ * Compact mode: card name + aspect pips (single horizontal row, NotoEmoji
+ * icons centred, value at bottom-right of each square).
  * Expanded mode: same header + full text description.
- *
- * Call `show(cardId, ctx)` from a click handler to populate and display.
- * Call `hide()` to dismiss. `handleClick(hit)` returns true when the click
- * landed on the panel (including the toggle) so callers can skip dismiss logic.
  */
 export class DetailsPanel extends LayoutNode {
-  static readonly WIDTH          = WIDTH;
-  static readonly COMPACT_HEIGHT = COMPACT_HEIGHT;
+  static readonly WIDTH           = WIDTH;
+  static readonly COMPACT_HEIGHT  = COMPACT_HEIGHT;
   static readonly EXPANDED_HEIGHT = EXPANDED_HEIGHT;
 
   private _isVisible = false;
   private _expanded  = false;
 
-  // Current display state
-  private cardName = "";
+  private cardName    = "";
   private def: CardDefinition | null = null;
   private description = "";
   private pipData: PipData[] = [];
 
-  // Visuals
-  private readonly bg             = new Graphics();
-  private readonly headerLabel:   Text;
-  private readonly nameText:      Text;
-  private readonly pips:          Pip[];
-  private readonly dividerGfx     = new Graphics();
+  private readonly bg              = new Graphics();
+  private readonly nameText:       Text;
+  private readonly pips:           Pip[];
+  private readonly dividerGfx      = new Graphics();
   private readonly descHeaderText: Text;
   private readonly descText:       Text;
   readonly toggleButton: ToggleButton;
@@ -163,20 +156,7 @@ export class DetailsPanel extends LayoutNode {
   constructor() {
     super();
     this.container.visible = false;
-
     this.container.addChild(this.bg);
-
-    this.headerLabel = new Text({
-      text: "DETAILS",
-      style: {
-        fill: 0x556677,
-        fontFamily: "sans-serif",
-        fontSize: 9,
-        letterSpacing: 1,
-      },
-    });
-    this.headerLabel.anchor.set(0, 0.5);
-    this.container.addChild(this.headerLabel);
 
     this.nameText = new Text({
       text: "",
@@ -192,24 +172,39 @@ export class DetailsPanel extends LayoutNode {
     this.nameText.anchor.set(0, 0);
     this.container.addChild(this.nameText);
 
-    // Pip pool
+    // Pip pool — one row of squares, each with a centred emoji and a
+    // small value number at the bottom-right corner.
     this.pips = Array.from({ length: MAX_PIPS }, (): Pip => {
       const gfx = new Graphics();
       gfx.visible = false;
-      const label = new Text({
+
+      const iconText = new Text({
+        text: "",
+        style: {
+          fill: 0xffffff,
+          fontFamily: NOTO_EMOJI_FAMILY,
+          fontSize: PIP_ICON_FONT,
+        },
+      });
+      iconText.anchor.set(0.5, 0.5);
+      iconText.visible = false;
+
+      const valueText = new Text({
         text: "",
         style: {
           fill: 0xffffff,
           fontFamily: "sans-serif",
-          fontSize: 9,
+          fontSize: PIP_VALUE_FONT,
           fontWeight: "700",
         },
       });
-      label.anchor.set(0.5, 0.5);
-      label.visible = false;
+      valueText.anchor.set(1, 1);
+      valueText.visible = false;
+
       this.container.addChild(gfx);
-      this.container.addChild(label);
-      return { gfx, label };
+      this.container.addChild(iconText);
+      this.container.addChild(valueText);
+      return { gfx, iconText, valueText };
     });
 
     this.container.addChild(this.dividerGfx);
@@ -248,20 +243,18 @@ export class DetailsPanel extends LayoutNode {
     const row = ctx.data.cardsLocal.get(cardId);
     if (!row) return;
 
-    this.def = ctx.definitions.decode(row.packedDefinition);
+    this.def      = ctx.definitions.decode(row.packedDefinition);
     this.cardName = ctx.definitions.label(row.packedDefinition);
 
     const locEntry = this.def ? LOCALE.get(this.def.key) : undefined;
-    this.description =
-      locEntry?.description?.simple ??
-      (this.def ? "" : "");
+    this.description = locEntry?.description?.simple ?? "";
 
     this.pipData = (this.def?.aspects ?? []).map(([aspectId, value]) => {
       const info: AspectInfo | null = ctx.definitions.aspectInfo(aspectId);
       return {
         aspectId,
         value,
-        icon: info?.icon ?? "?",
+        icon:  info?.icon  ?? "?",
         group: info?.group ?? "states",
       };
     });
@@ -279,11 +272,6 @@ export class DetailsPanel extends LayoutNode {
     this.parent?.invalidate();
   }
 
-  /**
-   * Call from the scene's left_click handler. Returns `true` when the
-   * click was inside the panel (consume it — don't hide). Handles the
-   * toggle button itself.
-   */
   handleClick(hit: LayoutNode | null): boolean {
     if (!this._isVisible) return false;
     if (hit === this.toggleButton) {
@@ -293,7 +281,6 @@ export class DetailsPanel extends LayoutNode {
       this.invalidate();
       return true;
     }
-    // Any other hit inside our subtree: keep panel visible.
     let node: LayoutNode | null = hit;
     while (node) {
       if (node === this) return true;
@@ -309,45 +296,40 @@ export class DetailsPanel extends LayoutNode {
 
     this.bg.clear();
     this.bg.rect(0, 0, WIDTH, h).fill({ color: 0x1a1f24 });
-    // Subtle right border to visually separate from world view.
     this.bg.rect(WIDTH - 1, 0, 1, h).fill({ color: 0x2a2f36 });
-
-    // ── Header micro-label ────────────────────────────────────────────
-    this.headerLabel.position.set(PADDING, HEADER_H / 2);
 
     // ── Card name ─────────────────────────────────────────────────────
     this.nameText.text = this.cardName;
-    this.nameText.position.set(PADDING, HEADER_H + 2);
+    this.nameText.position.set(PADDING, NAME_Y);
 
-    // ── Aspect pips ───────────────────────────────────────────────────
-    // In compact, cap at 3 rows (12 pips); in expanded show all.
-    const maxPips = this._expanded ? MAX_PIPS : PIPS_PER_ROW * 3;
-    const count = Math.min(this.pipData.length, maxPips);
+    // ── Aspect pips — single left-to-right row ────────────────────────
+    const count = Math.min(this.pipData.length, MAX_PIPS);
 
     for (let i = 0; i < MAX_PIPS; i++) {
-      const { gfx, label } = this.pips[i];
+      const { gfx, iconText, valueText } = this.pips[i];
       if (i >= count) {
-        gfx.visible = false;
-        label.visible = false;
+        gfx.visible       = false;
+        iconText.visible  = false;
+        valueText.visible = false;
         continue;
       }
       const { aspectId, value, icon, group } = this.pipData[i];
-      const col = i % PIPS_PER_ROW;
-      const row = Math.floor(i / PIPS_PER_ROW);
-      const cx = PADDING + col * PIP_SLOT + PIP_DIAM / 2;
-      const cy = PIPS_Y + row * PIP_SLOT + PIP_DIAM / 2;
-      const r = PIP_DIAM / 2;
+      const x     = PADDING + i * PIP_SLOT;
+      const y     = PIPS_Y;
       const color = aspectColor(aspectId, group);
 
       gfx.clear();
-      gfx.rect(cx - r, cy - r, PIP_DIAM, PIP_DIAM).fill({ color });
-      gfx.rect(cx - r, cy - r, PIP_DIAM, PIP_DIAM).stroke({ color: 0xffffff, width: 0.5, alpha: 0.2 });
+      gfx.rect(x, y, PIP_SIZE, PIP_SIZE).fill({ color });
+      gfx.rect(x, y, PIP_SIZE, PIP_SIZE).stroke({ color: 0xffffff, width: 0.5, alpha: 0.2 });
       gfx.visible = true;
 
-      label.text = `${icon}\n${value}`;
-      label.style.fontSize = 9;
-      label.position.set(cx, cy);
-      label.visible = true;
+      iconText.text = icon;
+      iconText.position.set(x + PIP_SIZE / 2, y + PIP_SIZE / 2);
+      iconText.visible = true;
+
+      valueText.text = String(value);
+      valueText.position.set(x + PIP_SIZE - 2, y + PIP_SIZE - 2);
+      valueText.visible = true;
     }
 
     // ── Divider (expanded only) ───────────────────────────────────────
@@ -361,20 +343,18 @@ export class DetailsPanel extends LayoutNode {
     // ── Description (expanded only) ───────────────────────────────────
     const showDesc = this._expanded;
     this.descHeaderText.visible = showDesc;
-    this.descText.visible = showDesc;
+    this.descText.visible       = showDesc;
     if (showDesc) {
       this.descHeaderText.position.set(PADDING, DESC_HEADER_Y);
       this.descText.text = this.description.length > 0
         ? this.description
         : "No description available.";
       this.descText.position.set(PADDING, DESC_Y);
-      // Clamp description rendering to available height.
-      const maxDescH = EXPANDED_BODY_BOTTOM - DESC_Y;
-      void maxDescH; // future: could mask or truncate
+      void (EXPANDED_BODY_BOTTOM - DESC_Y); // available height for future clamp
     }
 
     // ── Toggle button ─────────────────────────────────────────────────
-    const toggleY = (this._expanded ? EXPANDED_HEIGHT : COMPACT_HEIGHT) - TOGGLE_H;
+    const toggleY = h - TOGGLE_H;
     this.toggleButton.setBounds(0, toggleY, WIDTH, TOGGLE_H);
     this.toggleButton.layoutIfDirty();
   }

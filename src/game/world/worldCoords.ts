@@ -35,9 +35,42 @@ export function unpackMacroZone(macroZone: number): { zoneQ: number; zoneR: numb
   return { zoneQ: chunkQ * ZONE_SIZE, zoneR: chunkR * ZONE_SIZE };
 }
 
-/** Extract definition_id byte at `byteIndex` (0-7) from a u64 t-field (BigInt). */
-function extractTByte(t: bigint, byteIndex: number): number {
-  return Number((t >> BigInt(byteIndex * 8)) & 0xFFn);
+/** Number of u64 tile-data fields on a `Zone` row. Mirrors
+ *  `ZONE_TILE_U64_COUNT` in `content/src/packed.rs`. */
+const ZONE_TILE_U64_COUNT = 12;
+
+/** Bits per tile in the packed zone storage. 64 tiles × 12 bits =
+ *  768 bits = 12 u64. */
+const ZONE_TILE_BITS = 12;
+
+/** Read tile `idx` (0..64) from the zone's 12-u64 packed tile array.
+ *  Tile `i` lives at bits `12*i .. 12*i + 11` across the flat u64
+ *  array; some tiles straddle a u64 boundary. Mirrors `tile_at` in
+ *  `content/src/packed.rs`. Returns the u12 def_id (0 = empty slot). */
+function tileAt(packed: readonly bigint[], idx: number): number {
+  const startBit = ZONE_TILE_BITS * idx;
+  const u64Idx = Math.floor(startBit / 64);
+  const bitOffset = startBit % 64;
+  if (bitOffset + ZONE_TILE_BITS <= 64) {
+    return Number((packed[u64Idx] >> BigInt(bitOffset)) & 0xFFFn);
+  }
+  const lowBits = 64 - bitOffset;
+  const highBits = ZONE_TILE_BITS - lowBits;
+  const lowMask = (1n << BigInt(lowBits)) - 1n;
+  const highMask = (1n << BigInt(highBits)) - 1n;
+  const low = (packed[u64Idx] >> BigInt(bitOffset)) & lowMask;
+  const high = packed[u64Idx + 1] & highMask;
+  return Number((high << BigInt(lowBits)) | low);
+}
+
+/** Collect the 12 u64 tile-data fields on a `Zone` row into a flat
+ *  array suitable for [`tileAt`]. */
+function zoneTilesArray(zone: Zone): bigint[] {
+  return [
+    zone.t0, zone.t1, zone.t2, zone.t3,
+    zone.t4, zone.t5, zone.t6, zone.t7,
+    zone.t8, zone.t9, zone.t10, zone.t11,
+  ];
 }
 
 export interface ZoneTile {
@@ -60,39 +93,39 @@ export function decodeZoneTiles(
   definitions: DefinitionManager,
 ): ZoneTile[] {
   const { zoneQ, zoneR } = unpackMacroZone(zone.macroZone);
-  const typeId     = (zone.packedDefinition >> 4) & 0xF;
-  const categoryId =  zone.packedDefinition       & 0xF;
-  const ts: bigint[] = [zone.t0, zone.t1, zone.t2, zone.t3,
-                        zone.t4, zone.t5, zone.t6, zone.t7];
+  // `zone.packedDefinition` is u8 = `[card_type:u4 | 0:u4]` after the
+  // category retire. Top nibble is the type; low nibble is reserved
+  // (always 0). See docs/CATEGORY_RETIRE_AND_TILE_EXPAND.md.
+  const typeId = (zone.packedDefinition >> 4) & 0xF;
+  const ts = zoneTilesArray(zone);
 
   debug.log(["zone"],
     `[decodeZoneTiles] macroZone=${zone.macroZone} → zoneQ=${zoneQ} zoneR=${zoneR}` +
     ` packedDef=0x${zone.packedDefinition.toString(16).padStart(2,"0")}` +
-    ` typeId=${typeId} categoryId=${categoryId}` +
+    ` typeId=${typeId}` +
     ` t=[${ts.map(t => "0x" + t.toString(16)).join(", ")}]`,
   );
 
   const result: ZoneTile[] = [];
   let missCount = 0;
-  for (let tIndex = 0; tIndex < 8; tIndex++) {
-    const t = ts[tIndex];
-    if (t === 0n) continue;
-    for (let byteIndex = 0; byteIndex < 8; byteIndex++) {
-      const definitionId = extractTByte(t, byteIndex);
-      if (definitionId === 0) continue;
-      const packed = DefinitionManager.pack(typeId, categoryId, definitionId);
-      const def = definitions.decode(packed);
-      if (!def) {
-        debug.warn(["zone"],
-          `[decodeZoneTiles] no def for packed=0x${packed.toString(16)}` +
-          ` (typeId=${typeId} categoryId=${categoryId} definitionId=${definitionId})` +
-          ` at tIndex=${tIndex} byteIndex=${byteIndex}`,
-        );
-        missCount++;
-        continue;
-      }
-      result.push({ q: zoneQ + byteIndex, r: zoneR + tIndex, definition: def, packed });
+  // 64 tiles, row-major. Row index = tile/8, column index = tile%8.
+  for (let i = 0; i < 64; i++) {
+    const definitionId = tileAt(ts, i);
+    if (definitionId === 0) continue;
+    const row = Math.floor(i / 8);
+    const col = i % 8;
+    const packed = DefinitionManager.pack(typeId, definitionId);
+    const def = definitions.decode(packed);
+    if (!def) {
+      debug.warn(["zone"],
+        `[decodeZoneTiles] no def for packed=0x${packed.toString(16)}` +
+        ` (typeId=${typeId} definitionId=${definitionId})` +
+        ` at row=${row} col=${col}`,
+      );
+      missCount++;
+      continue;
     }
+    result.push({ q: zoneQ + col, r: zoneR + row, definition: def, packed });
   }
 
   debug.log(["zone"], `[decodeZoneTiles] → ${result.length} tiles decoded, ${missCount} definition misses`);
@@ -111,9 +144,8 @@ export function decodeZoneTiles(
  * The packing is the inverse of `decodeZoneTiles`'s per-tile loop:
  *
  *   typeId       = (zone.packedDefinition >> 4) & 0xF
- *   categoryId   =  zone.packedDefinition       & 0xF
- *   definitionId = byte localQ of t[localR]
- *   result       = DefinitionManager.pack(typeId, categoryId, definitionId)
+ *   definitionId = tileAt(zone.t0..t11, localR * 8 + localQ)   // u12
+ *   result       = DefinitionManager.pack(typeId, definitionId)
  *
  * Used by `ActionManager.evaluateRoot` to resolve the hex tier for a
  * chain rooted at a state-3 card with no hex-Card parent — the recipe
@@ -131,14 +163,9 @@ export function getZoneTileDef(
     if (zone.macroZone !== macroZone) continue;
     if (zone.surface < 64 /* WORLD_LAYER */) continue;
     const typeId = (zone.packedDefinition >> 4) & 0xF;
-    const categoryId = zone.packedDefinition & 0xF;
-    const ts: bigint[] = [
-      zone.t0, zone.t1, zone.t2, zone.t3,
-      zone.t4, zone.t5, zone.t6, zone.t7,
-    ];
-    const definitionId = Number((ts[localR] >> BigInt(localQ * 8)) & 0xFFn);
+    const definitionId = tileAt(zoneTilesArray(zone), localR * 8 + localQ);
     if (definitionId === 0) return 0;
-    return DefinitionManager.pack(typeId, categoryId, definitionId);
+    return DefinitionManager.pack(typeId, definitionId);
   }
   return 0;
 }

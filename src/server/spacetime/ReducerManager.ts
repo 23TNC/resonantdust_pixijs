@@ -61,15 +61,18 @@ export class ReducerManager {
     return Number(nowMicros) / 1_000;
   }
 
+  /** Move the caller's soul along a client-computed path. Client
+   *  A* runs in [pixijs/src/game/world/pathfind.ts](../../game/world/pathfind.ts);
+   *  this just submits the result. The server validates adjacency +
+   *  traversability per step and queues the per-step row writes. See
+   *  [docs/MOVEMENT_REWRITE.md](../../../../docs/MOVEMENT_REWRITE.md). */
   async moveSoul(args: {
     soulId: number;
-    targetSurface: number;
-    targetMacroZone: number;
-    targetMicroZone: number;
+    path: Array<{ surface: number; macroZone: number; microZone: number }>;
   }): Promise<void> {
     debug.log(
       ["spacetime"],
-      `[spacetime] moveSoul soul=${args.soulId} surface=${args.targetSurface} macroZone=${args.targetMacroZone} microZone=0x${args.targetMicroZone.toString(16)}`,
+      `[spacetime] moveSoul soul=${args.soulId} steps=${args.path.length}`,
       5,
     );
     const conn = await this.registry.shard.connect();

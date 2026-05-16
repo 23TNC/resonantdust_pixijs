@@ -15,6 +15,7 @@ import { ValidAtTable, type TableChange, type TableListener } from "./ValidAtTab
 import { AppendTable } from "./AppendTable";
 
 const INVENTORY_LAYER = 1;
+const FLAG_SLOT_HOLD = 1 << 5;
 const FLAG_ACTION_DEAD = 1 << 7;
 // `progress_style` is the u3 field at bits 8..=10 of `Card.flags`. See
 // `content/cards/flags.json`. Set on the actor's completion row by
@@ -27,6 +28,17 @@ const FLAG_PROGRESS_STYLE_MASK = 0b111;
 // bit inside `microZone` itself; moved to `flags` to free the bit for
 // chain `direction`. See `content/cards/flags.json`.
 const FLAG_FORCE_POSITION = 1 << 11;
+// `magnetic` (bit 12): card is in a magnetic-anchor state. Set by
+// `cards::write_at`'s install hook on the first row whose def carries
+// a `magnetic` block. While set AND `slot_hold` is clear, the
+// `LifecycleResolutionManager` is counting down to either resolve
+// (pull cards from inventory) or fire the failure recipe.
+const FLAG_LIFECYCLE_PENDING = 1 << 12;
+// `progress_style` value used for the synthetic magnetic-expiry bar.
+// `ltr` matches the cw render the success recipes already declare,
+// so the visual is consistent across the magnetic phase and the
+// subsequent action commit.
+const LIFECYCLE_PROGRESS_STYLE = 1;
 /** A single progress indicator on a card. Today the `progress` array on
  *  `LocalCard` is populated with at most one entry (the future
  *  completion row with the highest `valid_at`, last-write-wins). The
@@ -134,6 +146,14 @@ export class DataManager {
    *  client-driven (`setLocalCard` / `clearLocalCard`). */
   private readonly cardLocalListeners = new Set<TableListener<LocalCard>>();
   private readonly cardLocalKeyListeners = new Map<number, Set<TableListener<LocalCard>>>();
+
+  /** Server-time of the previous `promote()` call. Used by
+   *  `kickProgressExpiries` to detect progress entries whose `endSecs`
+   *  was in the future last frame and is in the past this frame. `null`
+   *  on the first promote — that fire seeds the timestamp without
+   *  firing kicks, so a fresh subscription's historical-progress
+   *  endpoints don't spuriously trigger. */
+  private lastProgressCheckMs: number | null = null;
 
   /** Listeners on the local souls overlay. Same shape as the cards
    *  variants but keyed on Soul rows. RectCard's resource meter
@@ -363,6 +383,46 @@ export class DataManager {
     this.players.promote(now);
     this.souls.promote(now);
     this.zones.promote(now);
+    this.kickProgressExpiries(now);
+  }
+
+  /** Re-fire `updated` events for cards whose progress endpoint just
+   *  crossed `now`. Generalizes the "card changed → recheck recipe
+   *  triggers" pattern to time-based transitions that have no
+   *  associated server row promote:
+   *
+   *  - **Synthetic magnetic-expiry progress** ([`mirrorCard`]) ends at
+   *    `installValidAt + lifecycleDurationMs`. No server row promotes
+   *    at that moment, so without this kick, the
+   *    [`LifecycleResolutionManager`] never wakes up to fire the
+   *    failure recipe.
+   *  - **Action-completion progress** ends when the completion row
+   *    itself promotes — that promote fires its own `updated` event
+   *    already, so the re-fire here is redundant but harmless.
+   *
+   *  Comparison: each progress's `endSecs` is checked against the
+   *  `(lastProgressCheckMs, now]` half-open interval. First call after
+   *  a session start seeds `lastProgressCheckMs` without firing — a
+   *  re-subscribe could otherwise replay every historical endpoint at
+   *  once. */
+  private kickProgressExpiries(nowMs: number): void {
+    const last = this.lastProgressCheckMs;
+    this.lastProgressCheckMs = nowMs;
+    if (last === null) return;
+    if (nowMs <= last) return;
+    for (const [id, row] of this.cardsLocal) {
+      if (row.progress === undefined) continue;
+      let kick = false;
+      for (const p of row.progress) {
+        if (p.endSecs > last && p.endSecs <= nowMs) {
+          kick = true;
+          break;
+        }
+      }
+      if (kick) {
+        this.fireCardLocal({ kind: "updated", key: id, oldRow: row, newRow: row });
+      }
+    }
   }
 
   /** Tear down: drop mirror subscriptions, dispose the SubscriptionManager
@@ -502,6 +562,20 @@ export class DataManager {
       2,
     );
 
+    // Skip already-dead first-arrival rows. When the client re-
+    // subscribes (login, zone change), the SDK replays every row in
+    // scope, including historical card_ids whose latest row is dead
+    // (awaiting the periodic GC sweep). Without this gate we'd write
+    // a `dead: 1` row into `cardsLocal` and fire "added" → CardManager
+    // spawns a sprite → Card.ts plays the death animation → splice
+    // bookkeeping fires. All of that for a card the player should
+    // never see. Bail before any of it: don't write the row, don't
+    // fire the event. If a fresh row for the same id arrives later
+    // it'll come in as "added" again and we'll handle it correctly.
+    if (prev === undefined && (serverRow.flags & FLAG_ACTION_DEAD) !== 0) {
+      return;
+    }
+
     // Defensive: state-1 (Slot) requires a present parent row at
     // `microLocation`. The server can't see the client's local overlay
     // — if for any reason the parent isn't here (subscription gap,
@@ -594,7 +668,7 @@ export class DataManager {
     // latest written, in time). The list shape on `LocalCard.progress`
     // is forward-looking: a later iteration can return all matching
     // rows for stacked indicators.
-    const progress = this.scanProgress(change.key, baseRow);
+    let progress = this.scanProgress(change.key, baseRow);
     // Continuity carry: when an intermediate row promotes for a card
     // that's already mid-action (e.g. a magnetic commit's
     // release+set_start row landing at `commit_at` between the
@@ -624,6 +698,54 @@ export class DataManager {
       prev.def !== undefined
         ? prev.def
         : this.definitions.decode(baseRow.packedDefinition);
+    // Synthetic magnetic-expiry progress. A magnetic anchor in its
+    // pending phase (magnetic flag set, no `slot_hold` claiming it
+    // for an in-flight recipe) has no server-side completion row to
+    // count down against — the expiry is computed from
+    // `def.lifecycleDurationMs` and the install row's `validAt`. Build
+    // a progress entry so the player can see how long until
+    // `LifecycleResolutionManager` flips to the failure path. As soon
+    // as a propose_action stitches the anchor as root (`slot_hold`
+    // set) OR `scanProgress` finds a real completion row, this
+    // branch is skipped and the action-completion progress takes over
+    // naturally. Cleared at death too (no point counting down).
+    if (
+      progress === undefined &&
+      def !== null &&
+      def.lifecycleDurationMs &&
+      (baseRow.flags & FLAG_LIFECYCLE_PENDING) !== 0 &&
+      (baseRow.flags & FLAG_SLOT_HOLD) === 0 &&
+      !flagDead
+    ) {
+      // Install row = earliest validAt for this card_id. Older rows
+      // can be GC'd, but the install row carries the magnetic flag
+      // and is force-position, so it sticks around until the card
+      // dies or transitions out of the magnetic phase. Walk the
+      // server tier to find it — small per-card row count makes this
+      // cheap.
+      let installValidAt = validAtOf(baseRow.validAt);
+      for (const [packed, row] of this.cards.server) {
+        if (row.cardId !== change.key) continue;
+        const v = validAtOf(packed);
+        if (v < installValidAt) installValidAt = v;
+      }
+      progress = [
+        {
+          style: LIFECYCLE_PROGRESS_STYLE,
+          startSecs: installValidAt,
+          endSecs: installValidAt + def.lifecycleDurationMs,
+        },
+      ];
+      // Same continuity carry as above — if the previous local row
+      // already had this synthetic entry, hold onto its startSecs so
+      // re-promotes don't flicker the bar back to 0.
+      if (prev?.progress) {
+        const carried = prev.progress.find(
+          (pp) => pp.endSecs === progress![0]!.endSecs && pp.style === progress![0]!.style,
+        );
+        if (carried) progress[0]!.startSecs = carried.startSecs;
+      }
+    }
     const nextRow: LocalCard = {
       ...baseRow,
       def,

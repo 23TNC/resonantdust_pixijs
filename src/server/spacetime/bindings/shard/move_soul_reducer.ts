@@ -10,9 +10,13 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+import {
+  TilePoint,
+} from "./types";
+
 export default {
   soulId: __t.u32(),
-  targetSurface: __t.u8(),
-  targetMacroZone: __t.u32(),
-  targetMicroZone: __t.u8(),
+  get path() {
+    return __t.array(TilePoint);
+  },
 };

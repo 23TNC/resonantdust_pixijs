@@ -29,19 +29,18 @@ export const CardIdCounter = __t.object("CardIdCounter", {
 });
 export type CardIdCounter = __Infer<typeof CardIdCounter>;
 
-export const MagneticAction = __t.object("MagneticAction", {
-  magneticId: __t.u64(),
-  anchorCardId: __t.u32(),
+export const GcSchedule = __t.object("GcSchedule", {
+  id: __t.u64(),
   scheduledAt: __t.scheduleAt(),
-  outerRecipeId: __t.u16(),
-  successRecipeId: __t.u16(),
-  failureRecipeId: __t.u16(),
-  durationAt: __t.u64(),
-  delayMs: __t.u64(),
-  callerPlayerId: __t.u32(),
-  pulledCards: __t.array(__t.u32()),
 });
-export type MagneticAction = __Infer<typeof MagneticAction>;
+export type GcSchedule = __Infer<typeof GcSchedule>;
+
+export const LifecyclePending = __t.object("LifecyclePending", {
+  cardId: __t.u32(),
+  expiresAtMs: __t.u64(),
+  playerId: __t.u32(),
+});
+export type LifecyclePending = __Infer<typeof LifecyclePending>;
 
 export const Player = __t.object("Player", {
   validAt: __t.u64(),
@@ -60,6 +59,8 @@ export type PlayerIdCounter = __Infer<typeof PlayerIdCounter>;
 export const PlayerProfile = __t.object("PlayerProfile", {
   playerId: __t.u32(),
   starterPacks: __t.u64(),
+  lifecycleCount: __t.u32(),
+  earliestLifecycleExpiresMs: __t.u64(),
 });
 export type PlayerProfile = __Infer<typeof PlayerProfile>;
 
@@ -68,27 +69,6 @@ export const PlayerSession = __t.object("PlayerSession", {
   playerId: __t.u32(),
 });
 export type PlayerSession = __Infer<typeof PlayerSession>;
-
-export const ScheduleDeleteCards = __t.object("ScheduleDeleteCards", {
-  deleteId: __t.u64(),
-  cardId: __t.u32(),
-  scheduledAt: __t.scheduleAt(),
-});
-export type ScheduleDeleteCards = __Infer<typeof ScheduleDeleteCards>;
-
-export const ScheduleDeletePlayers = __t.object("ScheduleDeletePlayers", {
-  deleteId: __t.u64(),
-  playerId: __t.u32(),
-  scheduledAt: __t.scheduleAt(),
-});
-export type ScheduleDeletePlayers = __Infer<typeof ScheduleDeletePlayers>;
-
-export const ScheduleDeleteSouls = __t.object("ScheduleDeleteSouls", {
-  deleteId: __t.u64(),
-  cardId: __t.u32(),
-  scheduledAt: __t.scheduleAt(),
-});
-export type ScheduleDeleteSouls = __Infer<typeof ScheduleDeleteSouls>;
 
 export const SequenceCounter = __t.object("SequenceCounter", {
   id: __t.u8(),
@@ -110,6 +90,13 @@ export const Soul = __t.object("Soul", {
 });
 export type Soul = __Infer<typeof Soul>;
 
+export const TilePoint = __t.object("TilePoint", {
+  surface: __t.u8(),
+  macroZone: __t.u32(),
+  microZone: __t.u8(),
+});
+export type TilePoint = __Infer<typeof TilePoint>;
+
 export const Zone = __t.object("Zone", {
   validAt: __t.u64(),
   zoneId: __t.u32(),
@@ -125,6 +112,10 @@ export const Zone = __t.object("Zone", {
   t5: __t.u64(),
   t6: __t.u64(),
   t7: __t.u64(),
+  t8: __t.u64(),
+  t9: __t.u64(),
+  t10: __t.u64(),
+  t11: __t.u64(),
 });
 export type Zone = __Infer<typeof Zone>;
 

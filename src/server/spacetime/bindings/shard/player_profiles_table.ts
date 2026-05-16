@@ -13,4 +13,6 @@ import {
 export default __t.row({
   playerId: __t.u32().primaryKey().name("player_id"),
   starterPacks: __t.u64().name("starter_packs"),
+  lifecycleCount: __t.u32().name("lifecycle_count"),
+  earliestLifecycleExpiresMs: __t.u64().name("earliest_lifecycle_expires_ms"),
 });

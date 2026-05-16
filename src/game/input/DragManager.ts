@@ -17,6 +17,7 @@ import type { LayoutNode } from "../layout/LayoutNode";
 import { DragGhost } from "./DragGhost";
 import { packMacroZone, packMicroZone, packZoneId, ZONE_SIZE, WORLD_LAYER } from "../../server/data/packing";
 import { STACKED_ON_HEX } from "../cards/cardData";
+import { findPathForSoul } from "../world/pathfind";
 import type { PointerEventData } from "./InputManager";
 
 /** Maximum allowed chain depth from root to leaf, exclusive of the
@@ -190,12 +191,12 @@ export class DragManager {
   }
 
   /** Ghost-drag drop resolution. Destroys the ghost regardless of
-   *  outcome and, on a valid world-tile drop, fires the `move_soul`
-   *  reducer with the packed target. The server resolves the move
-   *  (validation + soul row rewrite) and we just observe the row
-   *  update flow back through the normal mirror path. Drops outside
-   *  the world view are no-ops — the user released the soul
-   *  somewhere meaningless. */
+   *  outcome and, on a valid world-tile drop, computes the path
+   *  client-side via `findPathForSoul` and fires `move_soul_path`
+   *  with the result. Server validates adjacency + traversability
+   *  per step and queues the same per-step row writes the old
+   *  `move_soul` produced. Drops outside the world view are no-ops.
+   *  See [docs/MOVEMENT_REWRITE.md](../../../../docs/MOVEMENT_REWRITE.md). */
   private handleGhostDrop(sourceCardId: number, ghost: DragGhost, up: PointerEventData): void {
     ghost.destroy();
     const worldDrop = this.resolveWorldDrop(up);
@@ -214,22 +215,49 @@ export class DragManager {
     const localR = worldDrop.r - zoneR;
     const targetMacroZone = packMacroZone(zoneQ, zoneR);
     const targetMicroZone = packMicroZone(localQ, localR, STACKED_ON_HEX);
-    debug.log(
-      ["drag"],
-      `[drag] ghost drop card=${sourceCardId} → world tile (${worldDrop.q}, ${worldDrop.r}) — moveSoul surface=${WORLD_LAYER} macroZone=${targetMacroZone} microZone=0x${targetMicroZone.toString(16)}`,
-      2,
-    );
+
     // `sourceCardId` is the soul card the ghost was minted from in
     // `handleDragStart` — already gated there on
     // `souls.getSoulId() === card.cardId`, so it's guaranteed to be
-    // the local player's currently-active soul. Server still
-    // re-validates ownership in `move_soul` via
+    // the local player's currently-active soul. The server still
+    // re-validates ownership in `move_soul_path` via
     // `resolve_caller` + `cards[soul_id].owner_id` comparison.
+    const soul = this.ctx.data.cardsLocal.get(sourceCardId);
+    if (!soul) {
+      debug.log(
+        ["drag"],
+        `[drag] ghost drop card=${sourceCardId} — soul not in local view; dropping`,
+        2,
+      );
+      return;
+    }
+    const result = findPathForSoul(
+      this.ctx.data.zonesLocal,
+      this.ctx.definitions,
+      soul,
+      { surface: WORLD_LAYER, macroZone: targetMacroZone, microZone: targetMicroZone },
+    );
+    if (result === null) {
+      debug.log(
+        ["drag"],
+        `[drag] ghost drop card=${sourceCardId} → (${worldDrop.q}, ${worldDrop.r}) — no path (unreachable, off-map, or unsubscribed zone)`,
+        2,
+      );
+      return;
+    }
+    if (result.path.length === 0) {
+      // Drop on the soul's current tile — no-op, same as
+      // `move_soul`'s `start == goal` early return.
+      return;
+    }
+    debug.log(
+      ["drag"],
+      `[drag] ghost drop card=${sourceCardId} → world tile (${worldDrop.q}, ${worldDrop.r}) — moveSoul ${result.path.length} steps`,
+      2,
+    );
     void this.ctx.reducers.moveSoul({
       soulId: sourceCardId,
-      targetSurface: WORLD_LAYER,
-      targetMacroZone,
-      targetMicroZone,
+      path: result.path,
     });
   }
 

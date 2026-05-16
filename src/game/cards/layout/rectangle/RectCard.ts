@@ -218,7 +218,7 @@ export class LayoutRectCard extends LayoutCard {
    *  the normal rect-chain path (state-2 OnRoot, microLocation =
    *  anchor_id) so no other rendering changes are needed.
    *
-   *  Naming note: the Rust constant is `FLAG_MAGNETIC_HOLD`, but the
+   *  Naming note: the Rust constant is `FLAG_LIFECYCLE_PENDING`, but the
    *  registry name in `flags.json` is `"magnetic"`. `hasCardFlag` is
    *  keyed off the registry. */
   private readonly magneticText: Text;

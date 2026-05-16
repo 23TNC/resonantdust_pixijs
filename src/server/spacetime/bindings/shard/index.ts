@@ -50,7 +50,6 @@ import SetLastLoginReducer from "./set_last_login_reducer";
 
 // Import all table schema definitions
 import CardsRow from "./cards_table";
-import MagneticActionsRow from "./magnetic_actions_table";
 import PlayerProfilesRow from "./player_profiles_table";
 import PlayersRow from "./players_table";
 import SoulsRow from "./souls_table";
@@ -80,20 +79,6 @@ const tablesSchema = __schema({
       { name: 'cards_valid_at_key', constraint: 'unique', columns: ['validAt'] },
     ],
   }, CardsRow),
-  magnetic_actions: __table({
-    name: 'magnetic_actions',
-    indexes: [
-      { accessor: 'anchor_card_id', name: 'magnetic_actions_anchor_card_id_idx_btree', algorithm: 'btree', columns: [
-        'anchorCardId',
-      ] },
-      { accessor: 'magnetic_id', name: 'magnetic_actions_magnetic_id_idx_btree', algorithm: 'btree', columns: [
-        'magneticId',
-      ] },
-    ],
-    constraints: [
-      { name: 'magnetic_actions_magnetic_id_key', constraint: 'unique', columns: ['magneticId'] },
-    ],
-  }, MagneticActionsRow),
   player_profiles: __table({
     name: 'player_profiles',
     indexes: [

@@ -297,7 +297,6 @@ function packCardDef(soulDef: CardDefinition | null, packId: string): CardDefini
   if (soulDef === null) {
     return {
       cardType: 0,
-      cardCategory: 0,
       definitionId: 0,
       key: packId,
       style: ["#3a3a4a", "#7a7a8a", "#ecd6aa"] as const,

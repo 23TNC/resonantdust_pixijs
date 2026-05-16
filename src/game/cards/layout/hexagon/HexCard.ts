@@ -10,12 +10,12 @@ import {
   STACKED_LOOSE,
   type LooseXY,
 } from "../../cardData";
-// Magnetic-action subsystem is offline while ActionManager is stripped.
-// Restore when actions return:
-//   import {
-//     FLAG_ACTION_CANCELED, FLAG_ACTION_COMPLETE, FLAG_ACTION_DEAD,
-//     type CachedMagneticAction,
-//   } from "../actions/ActionManager";
+// Magnetic-action progress rendering used to live here against a
+// dedicated `MagneticAction` server table. That table was retired by
+// the magnetic rewrite (see docs/MAGNETIC_REWRITE.md). The magnetic
+// progress bar now renders against the magnetic card row's
+// future-stamped completion row in the cards table — see
+// `progress_style` handling in the card-data layer.
 import { GameCard } from "../../game/CardGame";
 import { hexPoints } from "./HexVisual";
 import { WORLD_HEX_RADIUS } from "../../../world/hexSize";
@@ -107,7 +107,7 @@ export class LayoutHexCard extends LayoutCard {
   private readonly progressBar   = new Graphics();
   /** Magnetic-anchor indicator — see the same field on LayoutRectCard
    *  for the full doc. Bit 12 of `cards.flags`; registry name
-   *  `"magnetic"` (the Rust constant is `FLAG_MAGNETIC_HOLD`).
+   *  `"magnetic"` (the Rust constant is `FLAG_LIFECYCLE_PENDING`).
    *  The despair hex anchor is the canonical case. */
   private readonly magneticText: Text;
   private currentPackedDefinition: number | null = null;
@@ -122,11 +122,6 @@ export class LayoutHexCard extends LayoutCard {
   private deathParticleContainer: ParticleContainer | null = null;
   private deathParticleHandle: ParticleHandle | null = null;
   private unsubDying: (() => void) | null = null;
-  // Magnetic-action subsystem stripped — restore when actions return:
-  //   private currentMagneticAction: CachedMagneticAction | null = null;
-  //   private unsubMagnetic: (() => void) | null = null;
-  //   private lastMagneticProgress = 0;
-  //   private lastMagneticActionId: number | null = null;
 
   constructor(cardId: number, ctx: GameContext) {
     super(cardId, ctx);
@@ -139,14 +134,6 @@ export class LayoutHexCard extends LayoutCard {
     //     this.invalidate();
     //   }
     // });
-
-    // Magnetic-action subscription stripped. Restore when actions return:
-    //   if (ctx.actions) {
-    //     this.unsubMagnetic = ctx.actions.subscribeMagneticCard(cardId, (action) => {
-    //       this.currentMagneticAction = action;
-    //       this.invalidate();
-    //     });
-    //   }
 
     this.visual.addChild(this.hexSprite);
     this.visual.addChild(this.stateOverlay);
@@ -191,7 +178,7 @@ export class LayoutHexCard extends LayoutCard {
     if (row.packedDefinition !== this.currentPackedDefinition) {
       this.currentPackedDefinition = row.packedDefinition;
       const def = this.ctx.definitions.decode(row.packedDefinition) ?? null;
-      this.hexSprite.texture = this.ctx.textures.getHexTexture(def, row.packedDefinition);
+      this.hexSprite.texture = this.ctx.cardTextures.getHex(def);
       // Texture is baked at HEX_TEXTURE_* (TextureManager-owned); rescale
       // to this card's graphical size every time the texture is swapped,
       // since Pixi's sprite scale is computed from texture dimensions.
@@ -253,11 +240,9 @@ export class LayoutHexCard extends LayoutCard {
     const cx = HEX_CARD_WIDTH  / 2;
     const cy = HEX_CARD_HEIGHT / 2;
 
-    // Magnetic-action progress ring stripped along with the actions
-    // subsystem. When actions return, restore: a Graphics child for the
-    // progress bar, the action-row fetch + flag-bit suppression check,
-    // recipe decode for ring colors, and a call into `_drawMagneticProgress`
-    // (kept in git history) to render the per-side hex outline.
+    // Magnetic-phase progress ring rendering moved off the retired
+    // MagneticAction table to the card row's own progress_style
+    // field — see the bar render below for the new derivation.
 
     this.stateOverlay.clear();
     if (this.state.selected) {

@@ -44,8 +44,6 @@ Construction order: `ConnectionManager` → `ReducerManager` → `DataManager` (
 | --- | --- | --- |
 | `subscribeCards(zoneId)` | `WHERE macro_zone = X AND surface = Y` | `cards` |
 | `subscribePlayerByName(name)` | `WHERE name = X` | `players` (single row — the caller's own player) |
-| `subscribeActions(zoneId)` | same shape as cards | `actions` (table not yet in `TableRowMap`; method ready) |
-| `subscribeMagneticActions(zoneId)` | same | `magnetic_actions` (likewise) |
 | `subscribeWorldZone(macroZone)` | `WHERE macro_zone = X` | `zones` + `cards` (`surface == WORLD_LAYER`) |
 | `subscribeWorldPlayers(macroZone)` | `WHERE macro_zone = X AND surface = WORLD_LAYER` | `players` (only those whose soul is in this chunk) |
 | `subscribeOwnedCards(ownerId)` | `WHERE owner_id = X` | `cards` |
@@ -138,6 +136,6 @@ Because the server marks death via UPDATE (not DELETE) so the row carries `valid
 - `mirrorCard`'s inventory-loose rule does not propagate position changes from server to client when both sides agree on inventory-loose — by design. If the server *does* need to move a card within an inventory zone (admin teleport, anti-cheat reset), the server row must NOT match the rule (e.g. transition through a non-inventory state, or set `localQ != 0`) for the change to land on the client.
 
 ## Stripped / not yet wired
-- **`actions` and `magnetic_actions` tables** are not in `TableRowMap` and have no row handlers. The client only sees recipe outcomes via the affected `cards` rows (slot_hold / dead flags). `subscribeActions` / `subscribeMagneticActions` build SQL but rows would be silently dropped by SubscriptionManager's fan-out today.
+- **No server-side actions table.** The retired `actions` / `magnetic_actions` tables are gone. Recipe outcomes are observed via flag changes on `cards` rows (`slot_hold` / `dead`). Lifecycle resolution (magnetic anchors + on_create decay) is client-driven via [`LifecycleResolutionManager`](../game/lifecycle/LifecycleResolutionManager.ts). See [docs/LIFECYCLE_REWRITE.md](../../../docs/LIFECYCLE_REWRITE.md).
 - **World zone subscriptions are not yet driven by viewport changes.** `subscribeWorldZone` / `subscribeWorldPlayers` exist and build correct SQL, but the call from `ZoneManager.onAnchorChange("viewport", …)` into `DataManager.subscriptions.subscribeWorldZone(…)` is not yet wired in `main.ts`. World tile data arrives only via manually-triggered zone subscriptions today.
 - **No display buffer.** `promote(now)` accepts any `now`, so a client-side latency cushion can be added at the call site by passing `wallClock - bufferSeconds` — but `main.ts` currently uses raw `Date.now() / 1000`.

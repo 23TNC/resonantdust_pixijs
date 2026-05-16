@@ -1,9 +1,14 @@
 import { Application } from "pixi.js";
 import { debug } from "./debug";
 import { DrawCallCounter } from "./debug/DrawCallCounter";
-import { TextureManager } from "./assets/TextureManager";
+import { TextureManager } from "./assets/textures/TextureManager";
+import { CardTextureManager } from "./assets/textures/CardTextureManager";
+import { ObjectTextureManager } from "./assets/textures/ObjectTextureManager";
+import { ObjectManager } from "./assets/ObjectManager";
+import { initTextures } from "./game/definitions/TextureRegistry";
 import { loadFonts } from "./assets/fonts";
 import { DefinitionManager, initDefinitions } from "./game/definitions/DefinitionManager";
+import { LifecycleResolutionManager } from "./game/lifecycle/LifecycleResolutionManager";
 // import { RecipeManager } from "./definitions/RecipeManager";
 import { PlayerManager } from "./server/player/PlayerManager";
 import { SoulManager } from "./server/player/SoulManager";
@@ -56,6 +61,9 @@ async function main(): Promise<Runtime> {
 
   const scenes = new SceneManager(app);
   const textures = new TextureManager(app.renderer);
+  const cardTextures = new CardTextureManager(app.renderer, textures);
+  const objectTextures = new ObjectTextureManager(textures);
+  const objects = new ObjectManager(objectTextures);
   const drawCallCounter = new DrawCallCounter();
   drawCallCounter.patch(app.renderer);
 
@@ -65,7 +73,16 @@ async function main(): Promise<Runtime> {
   // doesn't pay for them serially. Fonts must finish before Pixi
   // renders anything that uses them — otherwise canvas-based Text
   // caches a fallback-font rasterisation and never re-renders.
-  await Promise.all([initDefinitions(), loadFonts()]);
+  await Promise.all([
+    initDefinitions(),
+    loadFonts(),
+  ]);
+
+  // TextureRegistry reads its data from the wasm content crate, so it
+  // must be initialised after initDefinitions resolves. Sync — just a
+  // Map build.
+  initTextures();
+
   const definitions = new DefinitionManager();
   // const recipes = new RecipeManager(definitions);
   const zones = new ZoneManager();
@@ -154,6 +171,20 @@ async function main(): Promise<Runtime> {
   const playerSession = new PlayerManager(connections.shard, data);
   const souls = new SoulManager(playerSession, data);
 
+  // Lifecycle resolution: client-side state machine that submits
+  // propose_action calls for the success or failure recipe of any
+  // owned lifecycle-pending card. See docs/LIFECYCLE_REWRITE.md
+  // for context. Bootstrap-scoped — lives for the application
+  // lifetime, observes cards via DataManager and login via
+  // PlayerManager.
+  const lifecycle = new LifecycleResolutionManager({
+    data,
+    reducers,
+    definitions,
+    playerSession,
+  });
+  lifecycle.start();
+
   // Drive ZoneManager's `"soul"` anchor off the local soul card's
   // current `macro_zone`. Whenever the soul row arrives or moves
   // between world chunks, the soul anchor follows — its surrounding
@@ -171,6 +202,9 @@ async function main(): Promise<Runtime> {
     app,
     scenes,
     textures,
+    cardTextures,
+    objectTextures,
+    objects,
     drawCallCounter,
     definitions,
     // recipes,
@@ -178,6 +212,7 @@ async function main(): Promise<Runtime> {
     reducers,
     playerSession,
     souls,
+    lifecycle,
     data,
     zones,
     cards: null,

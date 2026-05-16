@@ -14,12 +14,15 @@ import init, {
   cardLabel as wasmCardLabel,
   decodeDefinition as wasmDecode,
   findPackedByKey as wasmFindPackedByKey,
+  findRecipeByKey as wasmFindRecipeByKey,
   isHexType as wasmIsHexType,
   cardFlagBit as wasmCardFlagBit,
   cardFlagFieldValue as wasmCardFlagFieldValue,
   cardTypeId as wasmCardTypeId,
+  matchMagneticRecipe as wasmMatchMagneticRecipe,
   matchStackRecipe as wasmMatchStackRecipe,
   starterPacksForSoul as wasmStarterPacksForSoul,
+  traitValue as wasmTraitValue,
 } from "../../content/pkg/resonantdust_content";
 import type { StackMatch } from "../actions/ActionManager";
 
@@ -49,7 +52,9 @@ export interface StarterPack {
 
 export interface CardDefinition {
   cardType: number;
-  cardCategory: number;
+  /** 1-based id within the type's bucket. u12 (1..=4095) since the
+   *  `card_category` dimension was retired — see
+   *  docs/CATEGORY_RETIRE_AND_TILE_EXPAND.md. */
   definitionId: number;
   /** Programmatic key from the JSON, e.g. `"axe"`. Stable identifier
    *  used as the lookup key in `content/locales/cards/<lang>.json`
@@ -57,8 +62,9 @@ export interface CardDefinition {
    *  NOT carried on the definition itself — clients resolve them via
    *  the locales registry; the bare key is the dev-side fallback. */
   key: string;
-  /** Three CSS hex colors `[primary, secondary, outline]`, validated server-side. */
-  style: readonly [string, string, string];
+  /** Style array. Indices 0-2 are CSS hex colors `[primary, secondary, outline]`.
+   *  Optional indices 3-4 are sprite filenames (`""` = none): 3 = bg sprite, 4 = fg sprite. */
+  style: readonly string[];
   /** `(aspectId, value)` pairs. */
   aspects: ReadonlyArray<readonly [number, number]>;
   /** Bit-mask of flags carried by this definition, built from the JSON
@@ -68,6 +74,40 @@ export interface CardDefinition {
    *  call-site bookkeeping. Same `cards/flags.json` bit positions the
    *  rest of the codebase uses. */
   flags: number;
+  /** Magnetic-resolution recipe key, for cards that declare a
+   *  `magnetic` block in their JSON def. `null`/`undefined` for
+   *  non-magnetic cards. Consumed by `LifecycleResolutionManager` to
+   *  look up the success recipe to submit via `proposeAction`. */
+  lifecycleRecipeKey?: string | null;
+  /** Magnetic phase duration in milliseconds. Phase ends at
+   *  `installRow.validAtTime + lifecycleDurationMs`. `null`/`undefined`
+   *  for non-magnetic cards. */
+  lifecycleDurationMs?: number | null;
+}
+
+/** Compact view of a recipe returned by `findRecipeByKey`. Matches
+ *  the `RecipeBrief` shape on the wasm side. */
+export interface RecipeBrief {
+  /** Packed recipe id — pass to `proposeAction` as `recipeId`. */
+  recipeIndex: number;
+  /** `"stack" | "magnetic" | "on_create"`. */
+  recipeType: "stack" | "magnetic" | "on_create";
+  /** `0 = up, 1 = down`. Meaningful for `stack` and `magnetic`;
+   *  always `0` for `on_create`. */
+  direction: number;
+  slotCount: number;
+  hasRoot: boolean;
+  hasHex: boolean;
+}
+
+/** Shape returned by `matchMagneticRecipe` — same as `StackMatch` on
+ *  the stack-matcher side, just for magnetic recipes. */
+export interface MagneticMatch {
+  recipeIndex: number;
+  slotStart: number;
+  slotCount: number;
+  hasRoot: boolean;
+  hasHex: boolean;
 }
 
 let initialized = false;
@@ -94,8 +134,8 @@ export class DefinitionManager {
     return raw === null ? null : (raw as AspectInfo);
   }
 
-  /** Decode a packed `(cardType:u4 | cardCategory:u4 | definitionId:u8)`
-   *  value into its CardDefinition. Returns `null` if no card matches. */
+  /** Decode a packed `(cardType:u4 | definitionId:u12)` value into
+   *  its CardDefinition. Returns `null` if no card matches. */
   decode(packed: number): CardDefinition | null {
     const raw = wasmDecode(packed);
     return raw === null ? null : (raw as CardDefinition);
@@ -170,6 +210,17 @@ export class DefinitionManager {
     return wasmCardTypeId(name);
   }
 
+  /** Read the numeric value of a named trait off a packed card
+   *  definition. Returns `null` when the trait isn't declared in
+   *  `traits.json`, the def doesn't carry that trait, or the packed
+   *  id doesn't resolve. Pairs 1:1 with the server's
+   *  `def.trait_value(trait_id(name))` lookup so client and server
+   *  agree on cost / speed numbers by construction. */
+  traitValue(packedDefinition: number, name: string): number | null {
+    const v = wasmTraitValue(packedDefinition, name);
+    return v === undefined ? null : v;
+  }
+
   /** True iff this `packedDefinition`'s `card_type` matches the
    *  given type name. Decodes the def and compares card_type. Returns
    *  false for unknown packed ids or unknown type names. */
@@ -228,6 +279,56 @@ export class DefinitionManager {
     return raw === null ? null : (raw as StackMatch);
   }
 
+  /** Look up a recipe by its tree-key (e.g. `"despair_success"`).
+   *  Returns a compact `RecipeBrief` (packed id, type, direction,
+   *  slot count) or `null` if no recipe exists with that key.
+   *
+   *  Used by `LifecycleResolutionManager` to resolve a magnetic card
+   *  def's `lifecycleRecipeKey` into the data needed to drive a
+   *  `proposeAction` call. */
+  findRecipeByKey(key: string): RecipeBrief | null {
+    const raw = wasmFindRecipeByKey(key);
+    return raw === null ? null : (raw as RecipeBrief);
+  }
+
+  /** Try a single-shot match against the magnetic recipe declared by
+   *  `rootDef`'s magnetic key. `slotDefs` must list packed
+   *  definitions in the recipe's declared slot order. Returns a
+   *  `MagneticMatch` on hit or `null` if predicates fail / the root
+   *  isn't magnetic / direction mismatch.
+   *
+   *  Use this to validate a candidate `(root, slots)` combination
+   *  before submitting a `proposeAction` — failures here would also
+   *  be rejected server-side, but client-side pre-check avoids the
+   *  reducer call and surfaces a friendlier error path. */
+  matchMagneticRecipe(
+    rootDef: number,
+    slotDefs: readonly number[],
+    direction: "up" | "down",
+    hasCandidates?: {
+      rootAbove?: readonly number[];
+      actorAbove?: readonly number[];
+      rootBelow?: readonly number[];
+      actorBelow?: readonly number[];
+    },
+  ): MagneticMatch | null {
+    const dirCode = direction === "up" ? 0 : 1;
+    const rootAbove = new Uint16Array(hasCandidates?.rootAbove ?? []);
+    const actorAbove = new Uint16Array(hasCandidates?.actorAbove ?? []);
+    const rootBelow = new Uint16Array(hasCandidates?.rootBelow ?? []);
+    const actorBelow = new Uint16Array(hasCandidates?.actorBelow ?? []);
+    const raw = wasmMatchMagneticRecipe(
+      rootDef,
+      new Uint16Array(slotDefs),
+      dirCode,
+      rootAbove,
+      actorAbove,
+      rootBelow,
+      actorBelow,
+    ) as unknown;
+    return raw === null ? null : (raw as MagneticMatch);
+  }
+
   /** All starter packs registered for the given soul card key
    *  (e.g. `"human"`), in stable-id order. Empty array for unknown
    *  soul keys — there's no enum of valid souls on the client, so
@@ -240,22 +341,21 @@ export class DefinitionManager {
   /** Static unpack of a `packedDefinition` u16. Bit layout matches
    *  `pack_definition` in `content/src/packed.rs`:
    *    high u4  = cardType
-   *    mid u4   = cardCategory
-   *    low u8   = definitionId */
+   *    low u12  = definitionId
+   *  (The middle `cardCategory` u4 was retired — see
+   *  docs/CATEGORY_RETIRE_AND_TILE_EXPAND.md.) */
   static unpack(packedDef: number): {
     typeId: number;
-    categoryId: number;
     definitionId: number;
   } {
     return {
       typeId: (packedDef >> 12) & 0xf,
-      categoryId: (packedDef >> 8) & 0xf,
-      definitionId: packedDef & 0xff,
+      definitionId: packedDef & 0xfff,
     };
   }
 
   /** Inverse of `unpack`. Same bit layout as Rust's `pack_definition`. */
-  static pack(typeId: number, categoryId: number, definitionId: number): number {
-    return ((typeId & 0xf) << 12) | ((categoryId & 0xf) << 8) | (definitionId & 0xff);
+  static pack(typeId: number, definitionId: number): number {
+    return ((typeId & 0xf) << 12) | (definitionId & 0xfff);
   }
 }

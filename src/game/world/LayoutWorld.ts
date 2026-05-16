@@ -4,11 +4,26 @@ import { LayoutNode } from "../layout/LayoutNode";
 import type { LayoutManager } from "../layout/LayoutManager";
 import { debug } from "../../debug";
 import { WORLD_HEX_HEIGHT, WORLD_HEX_RADIUS, WORLD_HEX_WIDTH } from "./hexSize";
-import { EMPTY_TILE_PACKED } from "../../assets/TextureManager";
+import { getTextureRegistry } from "../definitions/TextureRegistry";
 import { decodeZoneTiles, unpackMacroZone, WORLD_LAYER } from "./worldCoords";
 import { unpackZoneId } from "../../server/data/packing";
 
 const BG_COLOR = "#0d1218";
+
+/** Number of decorative sprites placed per tile that has an object
+ *  aspect. >1 fans them around the tile centre in a ring. */
+const OBJECTS_PER_TILE = 3;
+
+/** Fast integer hash → uint32. Used to seed per-tile texture picks and
+ *  per-sprite scale variation. Stable across syncs since the inputs
+ *  are world-hex coordinates that don't change as the camera pans. */
+function hash(a: number, b: number, c: number): number {
+  let h = ((a * 92821) ^ (b * 31337) ^ (c * 7919)) >>> 0;
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x45d9f3b) >>> 0;
+  h ^= h >>> 16;
+  return h;
+}
 
 /**
  * Hit-passthrough panning surface for world cards.
@@ -69,6 +84,7 @@ class WorldCardSurface extends LayoutNode {
 export class LayoutWorld extends LayoutNode {
   private readonly bg = new Graphics();
   private readonly tileLayer = new Container();
+  private readonly objectContainer: Container;
   private readonly worldCardSurface = new WorldCardSurface();
 
   /** Pixi container that holds world cards and pans with the
@@ -97,13 +113,15 @@ export class LayoutWorld extends LayoutNode {
   private readonly unsubZones: () => void;
   private readonly unsubZoneAdded: () => void;
   private readonly unsubZoneRemoved: () => void;
+  private readonly unsubObjectLoad: () => void;
 
   constructor(ctx: GameContext, layoutManager: LayoutManager) {
     super();
 
-    // Container z-order: bg < tileLayer < worldCardSurface. bg is the
-    // dark backdrop; tileLayer holds tile sprites; cards live in
-    // worldCardSurface so they draw on top of tiles.
+    // Container z-order: bg < tileLayer < objectLayer < worldCardSurface.
+    // bg is the dark backdrop; tileLayer holds tile sprites; objectLayer
+    // holds decorative object sprites (trees, rocks) that sit above tiles
+    // but below world cards; cards live in worldCardSurface on top.
     //
     // No clip mask: GameLayout draws the world view first and the
     // title bar / inventory views after, so any world content that
@@ -112,8 +130,10 @@ export class LayoutWorld extends LayoutNode {
     // the adjacent views. The masked-clip path costs ~2 extra draw
     // calls; the over-draw cost of letting world bleed get painted
     // and then overwritten is cheaper.
+    this.objectContainer = ctx.objects.createContainer();
     this.container.addChild(this.bg);
     this.container.addChild(this.tileLayer);
+    this.container.addChild(this.objectContainer);
 
     // Wire worldCardSurface into the LayoutNode tree manually — we
     // want its PIXI container to sit on top of tileLayer for z-order,
@@ -148,6 +168,12 @@ export class LayoutWorld extends LayoutNode {
       this.viewR = r;
       this.invalidate();
     });
+
+    // Re-layout once any object texture pack finishes loading. The
+    // first sync after a fresh `get` returns null until the pack lands
+    // in the atlas; this hook ensures we run a second sync once it's
+    // ready instead of waiting for a pan to invalidate us.
+    this.unsubObjectLoad = ctx.objectTextures.onLoad(() => this.invalidate());
 
     // Hydrate tile cache from zones already in `data.zones.current`.
     for (const zone of ctx.data.zones.current.values()) {
@@ -289,12 +315,9 @@ export class LayoutWorld extends LayoutNode {
         const sprite = this.acquireSprite();
         if (packed !== undefined) {
           const def = this.ctx.definitions.decode(packed) ?? null;
-          sprite.texture = this.ctx.textures.getHexTexture(def, packed);
+          sprite.texture = this.ctx.cardTextures.getHex(def);
         } else {
-          sprite.texture = this.ctx.textures.getHexTexture(
-            null,
-            EMPTY_TILE_PACKED,
-          );
+          sprite.texture = this.ctx.cardTextures.getHex(null);
         }
         sprite.position.set(x - WORLD_HEX_WIDTH / 2, y - WORLD_HEX_HEIGHT / 2);
       }
@@ -305,6 +328,64 @@ export class LayoutWorld extends LayoutNode {
     // ends up in the right spot after the surface's PIXI translation.
     const origin = this.worldToLocal(0, 0);
     this.worldCardSurface.setBounds(origin.x, origin.y, w, h);
+
+    // Queue an object sprite for every visible tile with a matching
+    // aspect texture. We iterate the same hex range used for the tile
+    // sprites above; per-tile we resolve the first aspect that has a
+    // texture entry in the registry, then place OBJECTS_PER_TILE
+    // sprites in a ring around the tile centre.
+    const reg = getTextureRegistry();
+    const ringRadius = OBJECTS_PER_TILE > 1 ? WORLD_HEX_RADIUS / 2 : 0;
+    for (let dq = -range; dq <= range; dq++) {
+      for (let dr = -range; dr <= range; dr++) {
+        const q = baseQ + dq;
+        const r = baseR + dr;
+        const packed = this.tileData.get(`${q},${r}`);
+        if (packed === undefined) continue;
+        const def = this.ctx.definitions.decode(packed);
+        if (!def) continue;
+
+        let tex = undefined;
+        for (const [aspectId] of def.aspects) {
+          const aspectName = this.ctx.definitions.aspectInfo(aspectId)?.name;
+          if (!aspectName) continue;
+          const candidate = reg.find(def.cardType, aspectName);
+          if (candidate) { tex = candidate; break; }
+        }
+        if (!tex) continue;
+
+        const { x: cx, y: cy } = this.worldToLocal(q, r);
+        // Cull only when every sprite's bounding box is fully off-screen.
+        // The cluster spans `ringRadius` from the tile centre; each sprite
+        // adds its own scaled half-width / anchor-offset on top, so the
+        // effective cluster footprint is ringRadius + sprite extent.
+        // Anchor is (0.5, 0.75): sprite extends 0.5 to each side
+        // horizontally, 0.75 above its position and 0.25 below.
+        const maxSpriteSize = tex.size * tex.scale.max;
+        const halfX  = ringRadius + maxSpriteSize * 0.5;
+        const topY   = ringRadius + maxSpriteSize * 0.75;
+        const botY   = ringRadius + maxSpriteSize * 0.25;
+        if (cx + halfX < 0 || cx - halfX > w) continue;
+        if (cy + botY < 0 || cy - topY > h) continue;
+
+        for (let n = 0; n < OBJECTS_PER_TILE; n++) {
+          const angle = (2 * Math.PI * n) / OBJECTS_PER_TILE;
+          const x = cx + Math.cos(angle) * ringRadius;
+          const y = cy + Math.sin(angle) * ringRadius;
+          const t = hash(q, r, n) / 0x1_0000_0000;
+          const scale = tex.scale.min + t * (tex.scale.max - tex.scale.min);
+          this.ctx.objects.add(this.objectContainer, {
+            object: tex.object,
+            size: tex.size,
+            seed: hash(q, r, n + OBJECTS_PER_TILE),
+            x, y,
+            scale,
+            sortKey: y,
+          });
+        }
+      }
+    }
+    this.ctx.objects.sync(this.objectContainer);
   }
 
   override destroy(): void {
@@ -319,6 +400,8 @@ export class LayoutWorld extends LayoutNode {
     this.unsubZones();
     this.unsubZoneAdded();
     this.unsubZoneRemoved();
+    this.unsubObjectLoad();
+    this.ctx.objects.destroyContainer(this.objectContainer);
     for (const s of this.activeSprites) s.destroy();
     this.activeSprites.length = 0;
     for (const s of this.spritePool) s.destroy();

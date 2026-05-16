@@ -1,9 +1,13 @@
 import type { Application } from "pixi.js";
 import type { ActionManager } from "./game/actions/ActionManager";
-import type { TextureManager } from "./assets/TextureManager";
+import type { TextureManager } from "./assets/textures/TextureManager";
+import type { CardTextureManager } from "./assets/textures/CardTextureManager";
+import type { ObjectTextureManager } from "./assets/textures/ObjectTextureManager";
+import type { ObjectManager } from "./assets/ObjectManager";
 import type { CardManager } from "./game/cards/CardManager";
 import type { DrawCallCounter } from "./debug/DrawCallCounter";
 import type { DefinitionManager } from "./game/definitions/DefinitionManager";
+import type { LifecycleResolutionManager } from "./game/lifecycle/LifecycleResolutionManager";
 // import type { RecipeManager } from "./definitions/RecipeManager";
 import type { PlayerManager } from "./server/player/PlayerManager";
 import type { SoulManager } from "./server/player/SoulManager";
@@ -22,6 +26,9 @@ import type { LogManager } from "./game/chat/LogManager";
 export interface GameContext {
   readonly app: Application;
   readonly textures: TextureManager;
+  readonly cardTextures: CardTextureManager;
+  readonly objectTextures: ObjectTextureManager;
+  readonly objects: ObjectManager;
   readonly drawCallCounter: DrawCallCounter;
   readonly scenes: SceneManager;
   readonly definitions: DefinitionManager;
@@ -30,6 +37,11 @@ export interface GameContext {
   readonly reducers: ReducerManager;
   readonly playerSession: PlayerManager;
   readonly souls: SoulManager;
+  /** Client-side lifecycle-resolution state machine. Bootstrap-
+   *  scoped; observes owned lifecycle-pending cards and submits
+   *  success / failure recipes via `reducers.proposeAction`. See
+   *  `docs/LIFECYCLE_REWRITE.md`. */
+  readonly lifecycle: LifecycleResolutionManager;
   readonly data: DataManager;
   readonly zones: ZoneManager;
   /** Scene-scoped: set by GameScene on enter, cleared on exit. Null otherwise. */
