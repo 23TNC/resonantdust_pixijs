@@ -221,6 +221,7 @@ async function main(): Promise<Runtime> {
     input: null,
     actions: null,
     logs: null,
+    worldOverlay: null,
   };
   scenes.setContext(ctx);
 

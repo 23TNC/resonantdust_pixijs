@@ -1,4 +1,4 @@
-import type { Application } from "pixi.js";
+import type { Application, RenderTexture } from "pixi.js";
 import type { ActionManager } from "./game/actions/ActionManager";
 import type { TextureManager } from "./assets/textures/TextureManager";
 import type { CardTextureManager } from "./assets/textures/CardTextureManager";
@@ -57,4 +57,13 @@ export interface GameContext {
   /** Scene-scoped: set by GameScene on enter, cleared on exit. Null otherwise.
    *  Client-only flavor-text feed rendered by `ChatPanel`'s `logs` tab. */
   logs: LogManager | null;
+  /** Scene-scoped: set by LayoutWorld on construction, cleared on
+   *  destroy. Renders a per-card "objects in front of this card"
+   *  snapshot into a caller-provided RenderTexture sized
+   *  (width, height). Returns true if any sprite was drawn. Used by
+   *  hex cards on world surfaces to overlay nearby trees / rocks at
+   *  50% alpha and imply depth without scene-tree reshuffling. */
+  worldOverlay:
+    | ((q: number, r: number, target: RenderTexture, width: number, height: number) => boolean)
+    | null;
 }

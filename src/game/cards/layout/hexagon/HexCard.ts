@@ -1,4 +1,4 @@
-import { Container, Graphics, ParticleContainer, Sprite, Text, Texture } from "pixi.js";
+import { Container, Graphics, ParticleContainer, RenderTexture, Sprite, Text, Texture } from "pixi.js";
 import type { GameContext } from "../../../../GameContext";
 import { LayoutNode } from "../../../layout/LayoutNode";
 import type { Card as CardRow } from "../../../../server/spacetime/bindings/types";
@@ -123,6 +123,18 @@ export class LayoutHexCard extends LayoutCard {
   private deathParticleHandle: ParticleHandle | null = null;
   private unsubDying: (() => void) | null = null;
 
+  /** Per-card "objects in front of this card" snapshot. Lazily created
+   *  for hex cards landing on world surfaces; baked from LayoutWorld
+   *  via `ctx.worldOverlay` and refreshed when the card moves or when
+   *  an object texture pack finishes loading. Drawn on top of the
+   *  card at 50% alpha so the user perceives the nearby trees / rocks
+   *  as occluding the card without any scene-graph reshuffling. */
+  private overlayTexture: RenderTexture | null = null;
+  private overlaySprite: Sprite | null = null;
+  private overlayQ: number | null = null;
+  private overlayR: number | null = null;
+  private unsubObjectLoad: (() => void) | null = null;
+
   constructor(cardId: number, ctx: GameContext) {
     super(cardId, ctx);
     // TODO: re-wire death detection. The old `change.kind === "dying"` event
@@ -172,6 +184,15 @@ export class LayoutHexCard extends LayoutCard {
     this.addChild(this.stackBottomHost);
     this.addChild(this.stackTopHost);
     this.setSize(HEX_CARD_WIDTH, HEX_CARD_HEIGHT);
+
+    // Refresh the in-front-objects overlay whenever an object texture
+    // pack finishes loading; the first snapshot a card builds at
+    // placement time can miss sprites whose pack was still loading.
+    this.unsubObjectLoad = ctx.objectTextures.onLoad(() => {
+      if (this.overlayQ !== null && this.overlayR !== null) {
+        this.refreshObjectOverlay(this.overlayQ, this.overlayR);
+      }
+    });
   }
 
   applyData(row: CardRow): void {
@@ -225,8 +246,15 @@ export class LayoutHexCard extends LayoutCard {
       // hex's pixel centre. When the card's own size diverges from
       // the world tile size, this still yields card-center == hex-center.
       this.setTarget(px - HEX_CARD_WIDTH / 2, py - HEX_CARD_HEIGHT / 2);
+      if (q !== this.overlayQ || r !== this.overlayR) {
+        this.refreshObjectOverlay(q, r);
+      }
       return;
     }
+    // Non-world surfaces: ensure any leftover overlay from a previous
+    // world placement is hidden so an inventoried card doesn't drag
+    // its world-tile snapshot along with it.
+    this.clearObjectOverlay();
 
     const stacked = getStackedState(row.microZone);
     if (stacked === STACKED_LOOSE) {
@@ -426,6 +454,39 @@ export class LayoutHexCard extends LayoutCard {
     }
   }
 
+  /** Re-bake the in-front-objects snapshot for this card's current
+   *  world hex. Creates the overlay RT and Sprite on first call; on
+   *  subsequent calls reuses them. Hides the sprite if the world's
+   *  snapshot service reports no overlapping objects (empty tile, or
+   *  all neighbour packs still loading). */
+  private refreshObjectOverlay(q: number, r: number): void {
+    const overlay = this.ctx.worldOverlay;
+    if (!overlay) return;
+    if (!this.overlayTexture) {
+      this.overlayTexture = RenderTexture.create({
+        width:      HEX_CARD_WIDTH,
+        height:     HEX_CARD_HEIGHT,
+        resolution: Math.min(window.devicePixelRatio, 2),
+      });
+    }
+    if (!this.overlaySprite) {
+      this.overlaySprite = new Sprite(this.overlayTexture);
+      this.overlaySprite.alpha = 0.5;
+      this.visual.addChild(this.overlaySprite);
+    }
+    this.overlayQ = q;
+    this.overlayR = r;
+    this.overlaySprite.visible = overlay(q, r, this.overlayTexture, HEX_CARD_WIDTH, HEX_CARD_HEIGHT);
+  }
+
+  /** Hide the overlay and forget the cached tile. The RT and Sprite
+   *  stay around for reuse if the card re-enters a world surface. */
+  private clearObjectOverlay(): void {
+    this.overlayQ = null;
+    this.overlayR = null;
+    if (this.overlaySprite) this.overlaySprite.visible = false;
+  }
+
   /** Spawn the ascend-particle emitter at the bottom-center of the
    *  hex's bounding box. Mirrors `LayoutRectCard._spawnDeathEffect`;
    *  the bottom-center emission point matches because the mask wipe
@@ -451,6 +512,16 @@ export class LayoutHexCard extends LayoutCard {
     this.deathParticleHandle = null;
     this.unsubDying?.();
     this.unsubDying = null;
+    this.unsubObjectLoad?.();
+    this.unsubObjectLoad = null;
+    if (this.overlaySprite) {
+      this.overlaySprite.destroy();
+      this.overlaySprite = null;
+    }
+    if (this.overlayTexture) {
+      this.overlayTexture.destroy(true);
+      this.overlayTexture = null;
+    }
     // this.unsubMagnetic?.();        // magnetic stripped
     // this.unsubMagnetic = null;
     super.destroy();

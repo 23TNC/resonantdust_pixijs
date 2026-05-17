@@ -1,4 +1,4 @@
-import { Container, Graphics, Sprite, Texture } from "pixi.js";
+import { Container, Graphics, type RenderTexture, Sprite, Texture } from "pixi.js";
 import type { GameContext } from "../../GameContext";
 import { LayoutNode } from "../layout/LayoutNode";
 import type { LayoutManager } from "../layout/LayoutManager";
@@ -23,6 +23,15 @@ function hash(a: number, b: number, c: number): number {
   h = Math.imul(h, 0x45d9f3b) >>> 0;
   h ^= h >>> 16;
   return h;
+}
+
+/** Deterministic starting angle (radians) for a tile's object ring, so
+ *  every tile's three objects rotate uniformly together but different
+ *  tiles get different orientations. Caller adds this to
+ *  `2π * n / OBJECTS_PER_TILE` for each `n`. Hash seed is offset past
+ *  the ones used for texture pick / scale so they don't correlate. */
+function tileAngleOffset(q: number, r: number): number {
+  return (hash(q, r, OBJECTS_PER_TILE * 2) / 0x1_0000_0000) * 2 * Math.PI;
 }
 
 /**
@@ -174,6 +183,12 @@ export class LayoutWorld extends LayoutNode {
     // in the atlas; this hook ensures we run a second sync once it's
     // ready instead of waiting for a pan to invalidate us.
     this.unsubObjectLoad = ctx.objectTextures.onLoad(() => this.invalidate());
+
+    // Expose the per-card "in-front objects" snapshot service for hex
+    // cards on world surfaces. Cards call this when their (q, r)
+    // changes to refresh their alpha-overlay sprite. Scene-scoped:
+    // cleared in destroy().
+    ctx.worldOverlay = (q, r, target, width, height) => this.makeObjectOverlayForTile(q, r, target, width, height);
 
     // Hydrate tile cache from zones already in `data.zones.current`.
     for (const zone of ctx.data.zones.current.values()) {
@@ -368,8 +383,9 @@ export class LayoutWorld extends LayoutNode {
         if (cx + halfX < 0 || cx - halfX > w) continue;
         if (cy + botY < 0 || cy - topY > h) continue;
 
+        const startAngle = tileAngleOffset(q, r);
         for (let n = 0; n < OBJECTS_PER_TILE; n++) {
-          const angle = (2 * Math.PI * n) / OBJECTS_PER_TILE;
+          const angle = startAngle + (2 * Math.PI * n) / OBJECTS_PER_TILE;
           const x = cx + Math.cos(angle) * ringRadius;
           const y = cy + Math.sin(angle) * ringRadius;
           const t = hash(q, r, n) / 0x1_0000_0000;
@@ -388,6 +404,107 @@ export class LayoutWorld extends LayoutNode {
     this.ctx.objects.sync(this.objectContainer);
   }
 
+  /** Render the "in-front objects" snapshot for a card on tile (q, r)
+   *  into the caller-provided RenderTexture. Returns true if any
+   *  sprite was drawn (false ⇒ no overlay needed for this tile).
+   *
+   *  The snapshot includes the bottom-half ring objects of the card's
+   *  own tile plus the top-half ring objects of the two southern
+   *  neighbours (q-1, r+1) and (q, r+1) — the three tiles whose
+   *  visible sprites can overlap the card's bounding box.
+   *
+   *  Coordinate space inside the target RT is overlay-local: origin
+   *  at the RT's (0, 0), card centre at (width/2, height/2). World
+   *  pixel offsets from the card's tile centre are applied verbatim
+   *  (the card sits centred on its world hex, so world deltas map
+   *  directly to overlay-local deltas around the centre). */
+  makeObjectOverlayForTile(
+    q_c: number,
+    r_c: number,
+    target: RenderTexture,
+    width: number,
+    height: number,
+  ): boolean {
+    const cardCenterX = width / 2;
+    const cardCenterY = height / 2;
+    const dyNeighbor  = 1.5 * WORLD_HEX_RADIUS;
+    const dxNeighbor  = WORLD_HEX_WIDTH / 2;
+
+    const temp = new Container();
+    let any = false;
+    any = this.placeOverlayObjectsForTile(temp, q_c,       r_c,       cardCenterX,               cardCenterY,               "bottom") || any;
+    any = this.placeOverlayObjectsForTile(temp, q_c - 1,   r_c + 1,   cardCenterX - dxNeighbor,  cardCenterY + dyNeighbor,  "top")    || any;
+    any = this.placeOverlayObjectsForTile(temp, q_c,       r_c + 1,   cardCenterX + dxNeighbor,  cardCenterY + dyNeighbor,  "top")    || any;
+    any = this.placeOverlayObjectsForTile(temp, q_c - 1,   r_c + 1,   cardCenterX - dxNeighbor,  cardCenterY + dyNeighbor,  "bottom")    || any;
+    any = this.placeOverlayObjectsForTile(temp, q_c,       r_c + 1,   cardCenterX + dxNeighbor,  cardCenterY + dyNeighbor,  "bottom")    || any;
+
+    if (any) {
+      this.ctx.app.renderer.render({ container: temp, target, clear: true });
+    }
+    temp.destroy({ children: true });
+    return any;
+  }
+
+  /** Helper for makeObjectOverlayForTile: place this tile's ring
+   *  objects whose sin(angle) sign matches `half` ("bottom" = sin ≥ 0,
+   *  "top" = sin < 0) into `container`, positioned around (centerX,
+   *  centerY) in container-local coords. Returns true if any sprite
+   *  was added. Skips silently if the tile has no aspect-mapped
+   *  texture or if the object pack hasn't finished loading yet (the
+   *  card's onLoad subscription will trigger a re-snapshot). */
+  private placeOverlayObjectsForTile(
+    container: Container,
+    q: number,
+    r: number,
+    centerX: number,
+    centerY: number,
+    half: "top" | "bottom",
+  ): boolean {
+    const packed = this.tileData.get(`${q},${r}`);
+    if (packed === undefined) return false;
+    const def = this.ctx.definitions.decode(packed);
+    if (!def) return false;
+
+    const reg = getTextureRegistry();
+    let tex = undefined;
+    for (const [aspectId] of def.aspects) {
+      const aspectName = this.ctx.definitions.aspectInfo(aspectId)?.name;
+      if (!aspectName) continue;
+      const candidate = reg.find(def.cardType, aspectName);
+      if (candidate) { tex = candidate; break; }
+    }
+    if (!tex) return false;
+
+    const ringRadius = OBJECTS_PER_TILE > 1 ? WORLD_HEX_RADIUS / 2 : 0;
+    const startAngle = tileAngleOffset(q, r);
+    let any = false;
+    for (let n = 0; n < OBJECTS_PER_TILE; n++) {
+      const angle = startAngle + (2 * Math.PI * n) / OBJECTS_PER_TILE;
+      const sinA = Math.sin(angle);
+      // bottom half (in front of card): sin >= 0 (equator + below).
+      // top half (behind card): sin < 0 (strictly above).
+      if (half === "bottom" && sinA < 0) continue;
+      if (half === "top" && sinA >= 0) continue;
+
+      const t = hash(q, r, n) / 0x1_0000_0000;
+      const scale = tex.scale.min + t * (tex.scale.max - tex.scale.min);
+      const seed = hash(q, r, n + OBJECTS_PER_TILE);
+      const objTex = this.ctx.objectTextures.get(tex.object, tex.size, seed);
+      if (!objTex) continue;
+
+      const sprite = new Sprite(objTex);
+      sprite.anchor.set(0.5, 0.75);
+      sprite.position.set(
+        centerX + Math.cos(angle) * ringRadius,
+        centerY + Math.sin(angle) * ringRadius,
+      );
+      sprite.scale.set(scale);
+      container.addChild(sprite);
+      any = true;
+    }
+    return any;
+  }
+
   override destroy(): void {
     // Detach card nodes without destroying — CardManager owns their
     // lifecycle, and we're just the host. Children will reparent
@@ -401,6 +518,7 @@ export class LayoutWorld extends LayoutNode {
     this.unsubZoneAdded();
     this.unsubZoneRemoved();
     this.unsubObjectLoad();
+    this.ctx.worldOverlay = null;
     this.ctx.objects.destroyContainer(this.objectContainer);
     for (const s of this.activeSprites) s.destroy();
     this.activeSprites.length = 0;

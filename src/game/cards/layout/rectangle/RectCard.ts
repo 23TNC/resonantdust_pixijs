@@ -1,4 +1,4 @@
-import { Container, Graphics, ParticleContainer, Text } from "pixi.js";
+import { Container, Graphics, ParticleContainer, RenderTexture, Sprite, Text } from "pixi.js";
 import type { GameContext } from "../../../../GameContext";
 import type { DefinitionManager } from "../../../definitions/DefinitionManager";
 import type { Card as CardRow, Soul } from "../../../../server/spacetime/bindings/types";
@@ -253,6 +253,16 @@ export class LayoutRectCard extends LayoutCard {
   private deathParticleContainer: ParticleContainer | null = null;
   private deathParticleHandle: ParticleHandle | null = null;
 
+  /** Per-card "objects in front of this card" snapshot. Same idea as
+   *  LayoutHexCard's overlay — lazily created when a rect card lands
+   *  on a world tile (STACKED_ON_HEX with no parent), refreshed when
+   *  the tile changes or when an object texture pack finishes loading. */
+  private overlayTexture: RenderTexture | null = null;
+  private overlaySprite: Sprite | null = null;
+  private overlayQ: number | null = null;
+  private overlayR: number | null = null;
+  private unsubObjectLoad: (() => void) | null = null;
+
   constructor(cardId: number, ctx: GameContext) {
     super(cardId, ctx);
     // TODO: re-wire death detection. The old `change.kind === "dying"` event
@@ -315,6 +325,15 @@ export class LayoutRectCard extends LayoutCard {
     this.unsubResourceMeter = ctx.data.subscribeLocalSoul(() => {
       this.invalidate();
     });
+
+    // Refresh the in-front-objects overlay whenever an object texture
+    // pack finishes loading — the first snapshot a card builds when
+    // placed can miss sprites whose pack was still loading.
+    this.unsubObjectLoad = ctx.objectTextures.onLoad(() => {
+      if (this.overlayQ !== null && this.overlayR !== null) {
+        this.refreshObjectOverlay(this.overlayQ, this.overlayR);
+      }
+    });
   }
 
   setTitlePosition(position: RectCardTitlePosition): void {
@@ -355,6 +374,7 @@ export class LayoutRectCard extends LayoutCard {
       this.setTitlePosition("top");
       const { x, y } = decodeLooseXY(row.microLocation);
       this.setTarget(x, y);
+      this.clearObjectOverlay();
     } else if (stacked === STACKED_ON_ROOT || stacked === STACKED_SLOT) {
       // Both modes draw at the same offset from the parent — Pixi
       // parent-child does the heavy lifting via `Card.stackParentOf`,
@@ -387,6 +407,7 @@ export class LayoutRectCard extends LayoutCard {
       // magnetic-pulled cards land at. HexCard re-parents the stack
       // hosts to render in front of the hex visual; here we just
       // need the correct centering offset.
+      this.clearObjectOverlay();
       const parentIsHex = parentCard?.gameCard instanceof GameHexCard;
       if (parentIsHex) {
         this.setTitlePosition("top");
@@ -411,6 +432,9 @@ export class LayoutRectCard extends LayoutCard {
         const y = WORLD_HEX_RADIUS * (3 / 2 * r);
         this.setTitlePosition("top");
         this.setTarget(x - RECT_CARD_WIDTH / 2, y - RECT_CARD_HEIGHT / 2);
+        if (q !== this.overlayQ || r !== this.overlayR) {
+          this.refreshObjectOverlay(q, r);
+        }
       } else {
         const parentId = row.microLocation;
         if (!this.ctx.data.cardsLocal.get(parentId)) {
@@ -426,6 +450,7 @@ export class LayoutRectCard extends LayoutCard {
           (LayoutHexCard.WIDTH  - RECT_CARD_WIDTH)  / 2,
           (LayoutHexCard.HEIGHT - RECT_CARD_HEIGHT) / 2,
         );
+        this.clearObjectOverlay();
       }
     }
   }
@@ -694,6 +719,35 @@ export class LayoutRectCard extends LayoutCard {
     this.deathParticleHandle = pm.createEmitter(pc, "ascend", { startColor: primary });
   }
 
+  /** Re-bake the in-front-objects snapshot for the world tile this
+   *  card sits on. Lazily creates the RT + Sprite the first time it
+   *  fires. */
+  private refreshObjectOverlay(q: number, r: number): void {
+    const overlay = this.ctx.worldOverlay;
+    if (!overlay) return;
+    if (!this.overlayTexture) {
+      this.overlayTexture = RenderTexture.create({
+        width:      RECT_CARD_WIDTH,
+        height:     RECT_CARD_HEIGHT,
+        resolution: Math.min(window.devicePixelRatio, 2),
+      });
+    }
+    if (!this.overlaySprite) {
+      this.overlaySprite = new Sprite(this.overlayTexture);
+      this.overlaySprite.alpha = 0.75;
+      this.visual.addChild(this.overlaySprite);
+    }
+    this.overlayQ = q;
+    this.overlayR = r;
+    this.overlaySprite.visible = overlay(q, r, this.overlayTexture, RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
+  }
+
+  private clearObjectOverlay(): void {
+    this.overlayQ = null;
+    this.overlayR = null;
+    if (this.overlaySprite) this.overlaySprite.visible = false;
+  }
+
   override destroy(): void {
     this.deathParticleHandle?.destroy();
     this.deathParticleHandle = null;
@@ -701,6 +755,16 @@ export class LayoutRectCard extends LayoutCard {
     this.unsubDying = null;
     this.unsubResourceMeter?.();
     this.unsubResourceMeter = null;
+    this.unsubObjectLoad?.();
+    this.unsubObjectLoad = null;
+    if (this.overlaySprite) {
+      this.overlaySprite.destroy();
+      this.overlaySprite = null;
+    }
+    if (this.overlayTexture) {
+      this.overlayTexture.destroy(true);
+      this.overlayTexture = null;
+    }
     super.destroy();
   }
 }
