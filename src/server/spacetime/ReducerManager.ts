@@ -85,6 +85,20 @@ export class ReducerManager {
     await conn.reducers.equipCard(args);
   }
 
+  async unequipCard(args: {
+    cardId: number;
+    targetX: number;
+    targetY: number;
+  }): Promise<void> {
+    debug.log(
+      ["spacetime"],
+      `[spacetime] unequipCard card=${args.cardId} target=(${args.targetX},${args.targetY})`,
+      5,
+    );
+    const conn = await this.registry.shard.connect();
+    await conn.reducers.unequipCard(args);
+  }
+
   async createCharacter(args: { starterPackId: number }): Promise<void> {
     debug.log(
       ["spacetime"],

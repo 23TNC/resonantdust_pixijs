@@ -249,6 +249,7 @@ export class LifecycleResolutionManager {
     for (const direction of ["up", "down"] as const) {
       const match = this.ctx.definitions.matchStackRecipe(
         0,
+        null,
         card.packedDefinition,
         [],
         direction,

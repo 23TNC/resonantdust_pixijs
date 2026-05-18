@@ -29,4 +29,8 @@ export default __t.row({
   t9: __t.u64().name("t_9"),
   t10: __t.u64().name("t_10"),
   t11: __t.u64().name("t_11"),
+  t12: __t.u64().name("t_12"),
+  t13: __t.u64().name("t_13"),
+  t14: __t.u64().name("t_14"),
+  t15: __t.u64().name("t_15"),
 });

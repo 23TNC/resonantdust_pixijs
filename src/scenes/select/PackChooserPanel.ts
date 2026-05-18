@@ -302,6 +302,7 @@ function packCardDef(soulDef: CardDefinition | null, packId: string): CardDefini
       style: ["#3a3a4a", "#7a7a8a", "#ecd6aa"] as const,
       aspects: [],
       flags: 0,
+      stock: [],
     };
   }
   return {

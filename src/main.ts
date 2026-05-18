@@ -1,10 +1,11 @@
-import { Application } from "pixi.js";
+import { Application, Assets } from "pixi.js";
 import { debug } from "./debug";
 import { DrawCallCounter } from "./debug/DrawCallCounter";
 import { TextureManager } from "./assets/textures/TextureManager";
 import { CardTextureManager } from "./assets/textures/CardTextureManager";
 import { ObjectTextureManager } from "./assets/textures/ObjectTextureManager";
 import { ObjectManager } from "./assets/ObjectManager";
+import { allCardSpriteUrls } from "./assets/objectUrls";
 import { initTextures } from "./game/definitions/TextureRegistry";
 import { loadFonts } from "./assets/fonts";
 import { DefinitionManager, initDefinitions } from "./game/definitions/DefinitionManager";
@@ -69,13 +70,22 @@ async function main(): Promise<Runtime> {
 
   // Bootstrap the wasm-built content crate before any code calls into the
   // definitions API. `initDefinitions` is idempotent — safe to await
-  // multiple times. Run in parallel with font loading so cold start
-  // doesn't pay for them serially. Fonts must finish before Pixi
-  // renders anything that uses them — otherwise canvas-based Text
-  // caches a fallback-font rasterisation and never re-renders.
+  // multiple times. Run in parallel with font loading + card-sprite
+  // pre-warm so cold start doesn't pay for them serially. Fonts must
+  // finish before Pixi renders anything that uses them — otherwise
+  // canvas-based Text caches a fallback-font rasterisation and never
+  // re-renders.
+  //
+  // The card-sprite pre-warm just runs `Assets.load` against every
+  // PNG under `public/textures/cards/`; that way `applySprite`'s
+  // `Assets.get(url)` calls resolve synchronously and a freshly drawn
+  // rect / hex card shows its sprite on the first frame instead of
+  // popping in after an async load. Bundle impact is bounded by the
+  // glob in `objectUrls.ts` (cards-only).
   await Promise.all([
     initDefinitions(),
     loadFonts(),
+    Assets.load([...allCardSpriteUrls()]),
   ]);
 
   // TextureRegistry reads its data from the wasm content crate, so it
@@ -222,6 +232,8 @@ async function main(): Promise<Runtime> {
     actions: null,
     logs: null,
     worldOverlay: null,
+    worldHexAt: null,
+    onTilesChanged: null,
   };
   scenes.setContext(ctx);
 

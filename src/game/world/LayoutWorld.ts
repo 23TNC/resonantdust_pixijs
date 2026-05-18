@@ -4,7 +4,7 @@ import { LayoutNode } from "../layout/LayoutNode";
 import type { LayoutManager } from "../layout/LayoutManager";
 import { debug } from "../../debug";
 import { WORLD_HEX_HEIGHT, WORLD_HEX_RADIUS, WORLD_HEX_WIDTH } from "./hexSize";
-import { getTextureRegistry } from "../definitions/TextureRegistry";
+import { getTextureRegistry, type TextureDefinition } from "../definitions/TextureRegistry";
 import { decodeZoneTiles, unpackMacroZone, WORLD_LAYER } from "./worldCoords";
 import { unpackZoneId } from "../../server/data/packing";
 
@@ -33,6 +33,80 @@ function hash(a: number, b: number, c: number): number {
 function tileAngleOffset(q: number, r: number): number {
   return (hash(q, r, OBJECTS_PER_TILE * 2) / 0x1_0000_0000) * 2 * Math.PI;
 }
+
+/** Maximum stock per definition slot (matches the u2 width on
+ *  `stock0` / `stock1`). The tile's full "instance roster" is
+ *  `MAX_STOCK_PER_SLOT * def.stock.length` long regardless of current
+ *  stock — that fixed length is what gives slot stability. */
+const MAX_STOCK_PER_SLOT = 3;
+
+/** Per-instance hash seed bases. Each tile builds a fixed-length
+ *  "instance roster" sized by the definition (not by current stock),
+ *  so per-instance properties (scale variation, texture seed) need
+ *  seeds keyed off the instance's roster index — that's what stays
+ *  stable when stock decreases. Bands sit past everything else
+ *  (slot permutation tops out at ~102) with room to spare. */
+const INSTANCE_SCALE_SEED_BASE = 128;
+const INSTANCE_TEX_SEED_BASE   = 144;
+
+/** Hash seed band for [`ringAngleJitter`]. Past permutation (16-21 at
+ *  max stock); 32 leaves headroom. */
+const RING_ANGLE_JITTER_SEED_BASE = 32;
+
+/** Per-sprite angle wiggle, expressed as a fraction of the inter-slot
+ *  gap (`2π / totalSprites`). `0.5` means each sprite can wiggle up to
+ *  half the gap in either direction — at which point neighbouring
+ *  slots' wiggle windows are tangent, the theoretical maximum before
+ *  sprites can trade slots. Tune downward if the result reads as too
+ *  chaotic; this is the headroom ceiling, not necessarily the look
+ *  you want. */
+const RING_ANGLE_JITTER_FRACTION = 0.25;
+
+/** Deterministic per-sprite angle wiggle in
+ *  `[-fraction * slotGap, +fraction * slotGap]`, where `slotGap =
+ *  2π / totalSprites`. Distance stays fixed (no centre bias), and
+ *  with fraction < 0.5 the wiggle windows don't overlap, so sprites
+ *  can't trade slots or cluster. */
+function ringAngleJitter(q: number, r: number, n: number, totalSprites: number): number {
+  const u = hash(q, r, RING_ANGLE_JITTER_SEED_BASE + n) / 0x1_0000_0000;
+  const slotGap = (2 * Math.PI) / totalSprites;
+  return (u * 2 - 1) * RING_ANGLE_JITTER_FRACTION * slotGap;
+}
+
+/** Fixed per-tile slot layout: 1 centre + 6 evenly-spaced ring slots
+ *  (60° apart). Total = 7. Sprites fill slots in the order chosen by
+ *  [`slotPermutation`]; the first `totalSprites` of that permutation
+ *  are used. When stock decreases the *trailing* slots drop away, so
+ *  remaining sprites keep their positions instead of getting
+ *  re-distributed. Slot 0 is the centre; slots 1-6 are on the ring. */
+const FIXED_SLOT_COUNT = 7;
+const RING_SLOT_COUNT  = FIXED_SLOT_COUNT - 1; // 6 ring slots
+
+/** Hash seed band for [`slotPermutation`]. Past angle jitter
+ *  (32-37 at max stock); 96 leaves headroom. */
+const SLOT_PERMUTATION_SEED_BASE = 96;
+
+/** Deterministic permutation of `[0, FIXED_SLOT_COUNT)` keyed by
+ *  `(q, r)`. Same shape as [`ringPermutation`]: returned as a fresh
+ *  array, stable across syncs. Sprite `n` (`0 <= n < totalSprites`)
+ *  occupies slot `slotPermutation(q, r)[n]`; trailing entries
+ *  represent slots that would be filled if the tile had more stock. */
+function slotPermutation(q: number, r: number): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < FIXED_SLOT_COUNT; i++) out.push(i);
+  out.sort((a, b) => hash(q, r, SLOT_PERMUTATION_SEED_BASE + a) - hash(q, r, SLOT_PERMUTATION_SEED_BASE + b));
+  return out;
+}
+
+/** Angle range (degrees, screen Y-down convention so 90° points down)
+ *  that counts as the "bottom" half for the overlay snapshot filter.
+ *  The "top" range is the same window rotated 180°. Tuneable —
+ *  narrower means fewer same-tile objects render in front of the card
+ *  but cleaner separation between in-front and behind. */
+const BOTTOM_HALF_MIN_DEG = 40;
+const BOTTOM_HALF_MAX_DEG = 140;
+const BOTTOM_HALF_MIN_RAD = (BOTTOM_HALF_MIN_DEG * Math.PI) / 180;
+const BOTTOM_HALF_MAX_RAD = (BOTTOM_HALF_MAX_DEG * Math.PI) / 180;
 
 /**
  * Hit-passthrough panning surface for world cards.
@@ -110,10 +184,14 @@ export class LayoutWorld extends LayoutNode {
   private readonly spritePool: Sprite[] = [];
   private readonly activeSprites: Sprite[] = [];
 
-  /** Flat tile cache keyed by `"${q},${r}"` — packed definition id of
-   *  the tile at world hex (q, r). Missing entries render as
-   *  `EMPTY_TILE_PACKED`. */
-  private readonly tileData = new Map<string, number>();
+  /** Flat tile cache keyed by `"${q},${r}"`. Each entry carries the
+   *  packed definition id plus the two row-mutable stock counters
+   *  (0..=3 each, indexed by the tile def's `stock` slot order).
+   *  Missing entries render as `EMPTY_TILE_PACKED`. */
+  private readonly tileData = new Map<
+    string,
+    { packed: number; stock0: number; stock1: number }
+  >();
 
   private viewQ = 0;
   private viewR = 0;
@@ -123,6 +201,7 @@ export class LayoutWorld extends LayoutNode {
   private readonly unsubZoneAdded: () => void;
   private readonly unsubZoneRemoved: () => void;
   private readonly unsubObjectLoad: () => void;
+  private readonly tileChangeListeners = new Set<() => void>();
 
   constructor(ctx: GameContext, layoutManager: LayoutManager) {
     super();
@@ -188,12 +267,32 @@ export class LayoutWorld extends LayoutNode {
     // cards on world surfaces. Cards call this when their (q, r)
     // changes to refresh their alpha-overlay sprite. Scene-scoped:
     // cleared in destroy().
-    ctx.worldOverlay = (q, r, target, width, height) => this.makeObjectOverlayForTile(q, r, target, width, height);
+    ctx.worldOverlay = (q, r, target, width, height, offsetX, offsetY) => this.makeObjectOverlayForTile(q, r, target, width, height, offsetX, offsetY);
+
+    // Inverse of `worldToLocal` for the world-card-surface coordinate
+    // space — given a pixel (px, py) where (0, 0) is the world hex
+    // (0, 0)'s centre (i.e. the same frame `setTarget` uses), returns
+    // the nearest axial hex `(q, r)`. Cards use this each frame while
+    // dragging or tweening to detect when their visual position
+    // crosses a tile boundary and refresh their overlay.
+    ctx.worldHexAt = (px, py) => this.worldHexAt(px, py);
+
+    // Tile-change subscription used by cards to refresh their
+    // overlay when zone data lands or updates. Fires from the
+    // `data.zones.subscribe` callback below.
+    ctx.onTilesChanged = (cb) => {
+      this.tileChangeListeners.add(cb);
+      return () => this.tileChangeListeners.delete(cb);
+    };
 
     // Hydrate tile cache from zones already in `data.zones.current`.
     for (const zone of ctx.data.zones.current.values()) {
       for (const tile of decodeZoneTiles(zone, ctx.definitions)) {
-        this.tileData.set(`${tile.q},${tile.r}`, tile.packed);
+        this.tileData.set(`${tile.q},${tile.r}`, {
+          packed: tile.packed,
+          stock0: tile.stock0,
+          stock1: tile.stock1,
+        });
       }
     }
 
@@ -233,10 +332,17 @@ export class LayoutWorld extends LayoutNode {
       if (change.kind !== "removed") {
         const newRow = change.kind === "added" ? change.row : change.newRow;
         for (const tile of decodeZoneTiles(newRow, ctx.definitions)) {
-          this.tileData.set(`${tile.q},${tile.r}`, tile.packed);
+          this.tileData.set(`${tile.q},${tile.r}`, {
+            packed: tile.packed,
+            stock0: tile.stock0,
+            stock1: tile.stock1,
+          });
         }
       }
       this.invalidate();
+      // Notify subscribed cards so their in-front-objects overlay
+      // re-bakes against the freshly arrived tile data.
+      for (const cb of this.tileChangeListeners) cb();
     });
   }
 
@@ -283,7 +389,25 @@ export class LayoutWorld extends LayoutNode {
     // the world display size every acquire (cheap, and lets a
     // WORLD_HEX_* change take effect on the next layout pass without
     // touching pooled sprites elsewhere).
-    s.setSize(WORLD_HEX_WIDTH, WORLD_HEX_HEIGHT);
+    //
+    // Oversize by 2px past the ceiled bbox. Why two: the bake's
+    // hex polygon has a vertical right edge at bake-x ≈ 124.7
+    // inside a 125-wide texture; Pixi's linear-filtered upscale
+    // to the display size adds ~1px of AA fringe at that edge.
+    // Position rounding (`Math.round` in the layout loop below)
+    // makes neighbour spacing alternate between 124 and 125 px in
+    // a periodic pattern set by the irrational `√3 * R` step
+    // (period ≈ 1 / (√3 mod 1) ≈ 3-4 tiles, which is exactly the
+    // beat the seams showed up at). With `ceil + 1` (126), the
+    // 125-spacing case leaves 1px of bbox overlap — not enough
+    // for both neighbours' AA fringes to land on each other's
+    // opaque interior, so the dark BG bleeds through at the seam
+    // and the seam visibly migrates with the viewport pan. `ceil
+    // + 2` (127) guarantees ≥2px overlap in every case, fully
+    // absorbing the AA fringe regardless of which side of the
+    // beat each pair lands on. Same reasoning on the height axis
+    // for safety even though row spacing has 36px of bbox slack.
+    s.setSize(Math.ceil(WORLD_HEX_WIDTH) + 2, Math.ceil(WORLD_HEX_HEIGHT) + 2);
     this.tileLayer.addChild(s);
     this.activeSprites.push(s);
     return s;
@@ -326,15 +450,23 @@ export class LayoutWorld extends LayoutNode {
         if (x + WORLD_HEX_WIDTH / 2 < 0 || x - WORLD_HEX_WIDTH / 2 > w) continue;
         if (y + WORLD_HEX_HEIGHT / 2 < 0 || y - WORLD_HEX_HEIGHT / 2 > h) continue;
 
-        const packed = this.tileData.get(`${q},${r}`);
+        const entry = this.tileData.get(`${q},${r}`);
         const sprite = this.acquireSprite();
-        if (packed !== undefined) {
-          const def = this.ctx.definitions.decode(packed) ?? null;
+        if (entry !== undefined) {
+          const def = this.ctx.definitions.decode(entry.packed) ?? null;
           sprite.texture = this.ctx.cardTextures.getHex(def);
         } else {
           sprite.texture = this.ctx.cardTextures.getHex(null);
         }
-        sprite.position.set(x - WORLD_HEX_WIDTH / 2, y - WORLD_HEX_HEIGHT / 2);
+        // Round to integer pixels. Sub-pixel positions smear the
+        // hex polygon's anti-aliased edges across two pixel rows /
+        // columns, so adjacent hexes can't meet cleanly — even
+        // with the size ceiled to overlap, fractional positions
+        // re-introduce a faint seam as the viewport pans.
+        sprite.position.set(
+          Math.round(x - WORLD_HEX_WIDTH / 2),
+          Math.round(y - WORLD_HEX_HEIGHT / 2),
+        );
       }
     }
 
@@ -344,30 +476,63 @@ export class LayoutWorld extends LayoutNode {
     const origin = this.worldToLocal(0, 0);
     this.worldCardSurface.setBounds(origin.x, origin.y, w, h);
 
-    // Queue an object sprite for every visible tile with a matching
-    // aspect texture. We iterate the same hex range used for the tile
-    // sprites above; per-tile we resolve the first aspect that has a
-    // texture entry in the registry, then place OBJECTS_PER_TILE
-    // sprites in a ring around the tile centre.
+    // Queue object sprites for every visible tile, sourced from the
+    // tile def's `stock` slots. Each slot contributes its row value
+    // (0..=3) of sprites — a tile with `wood: 2, stone: 1` renders
+    // 2 wood + 1 stone sprite. Defs without `stock` fall back to the
+    // legacy per-aspect single-texture path used by non-tile decor.
     const reg = getTextureRegistry();
-    const ringRadius = OBJECTS_PER_TILE > 1 ? WORLD_HEX_RADIUS / 2 : 0;
     for (let dq = -range; dq <= range; dq++) {
       for (let dr = -range; dr <= range; dr++) {
         const q = baseQ + dq;
         const r = baseR + dr;
-        const packed = this.tileData.get(`${q},${r}`);
-        if (packed === undefined) continue;
-        const def = this.ctx.definitions.decode(packed);
+        const entry = this.tileData.get(`${q},${r}`);
+        if (entry === undefined) continue;
+        const def = this.ctx.definitions.decode(entry.packed);
         if (!def) continue;
 
-        let tex = undefined;
-        for (const [aspectId] of def.aspects) {
-          const aspectName = this.ctx.definitions.aspectInfo(aspectId)?.name;
-          if (!aspectName) continue;
-          const candidate = reg.find(def.cardType, aspectName);
-          if (candidate) { tex = candidate; break; }
+        // Build the tile's "instance roster": one entry per *potential*
+        // object regardless of current stock. The roster length is
+        // fixed by the definition (`MAX_STOCK_PER_SLOT * def.stock.length`),
+        // so a wood-2/stone-1 tile and a wood-1/stone-0 tile share the
+        // same roster shape — they just differ in which entries have
+        // `present = true`. That fixed shape + index is what makes the
+        // slot assignment stable across stock changes. Legacy stockless
+        // defs use `OBJECTS_PER_TILE` copies of their first aspect, all
+        // marked present.
+        const instances: { tex: TextureDefinition; present: boolean }[] = [];
+        if (def.stock && def.stock.length > 0) {
+          for (let i = 0; i < def.stock.length; i++) {
+            const slot = def.stock[i];
+            if (!slot) continue;
+            const aspectName = this.ctx.definitions.aspectInfo(slot.aspectId)?.name;
+            if (!aspectName) continue;
+            const tex = reg.find(def.cardType, aspectName);
+            if (!tex) continue;
+            const cur = i === 0 ? entry.stock0 : entry.stock1;
+            for (let k = 0; k < MAX_STOCK_PER_SLOT; k++) {
+              instances.push({ tex, present: k < cur });
+            }
+          }
+        } else if (def.aspects) {
+          for (const pair of def.aspects) {
+            if (!pair) continue;
+            const aspectName = this.ctx.definitions.aspectInfo(pair[0])?.name;
+            if (!aspectName) continue;
+            const tex = reg.find(def.cardType, aspectName);
+            if (!tex) continue;
+            for (let k = 0; k < OBJECTS_PER_TILE; k++) {
+              instances.push({ tex, present: true });
+            }
+            break;
+          }
         }
-        if (!tex) continue;
+        if (instances.length === 0) continue;
+        let presentCount = 0;
+        for (const inst of instances) if (inst.present) presentCount++;
+        if (presentCount === 0) continue;
+
+        const ringRadius = WORLD_HEX_RADIUS / 2;
 
         const { x: cx, y: cy } = this.worldToLocal(q, r);
         // Cull only when every sprite's bounding box is fully off-screen.
@@ -376,27 +541,49 @@ export class LayoutWorld extends LayoutNode {
         // effective cluster footprint is ringRadius + sprite extent.
         // Anchor is (0.5, 0.75): sprite extends 0.5 to each side
         // horizontally, 0.75 above its position and 0.25 below.
-        const maxSpriteSize = tex.size * tex.scale.max;
+        let maxSpriteSize = 0;
+        for (const inst of instances) {
+          if (!inst.present) continue;
+          const s = inst.tex.size * inst.tex.scale.max;
+          if (s > maxSpriteSize) maxSpriteSize = s;
+        }
         const halfX  = ringRadius + maxSpriteSize * 0.5;
         const topY   = ringRadius + maxSpriteSize * 0.75;
         const botY   = ringRadius + maxSpriteSize * 0.25;
         if (cx + halfX < 0 || cx - halfX > w) continue;
         if (cy + botY < 0 || cy - topY > h) continue;
 
+        // Fixed 7-slot layout (1 centre + 6 ring). The roster index `i`
+        // maps to slot `slotOrder[i]` — a stable position that doesn't
+        // shift when other roster entries flip present/absent.
+        const slotOrder = slotPermutation(q, r);
         const startAngle = tileAngleOffset(q, r);
-        for (let n = 0; n < OBJECTS_PER_TILE; n++) {
-          const angle = startAngle + (2 * Math.PI * n) / OBJECTS_PER_TILE;
-          const x = cx + Math.cos(angle) * ringRadius;
-          const y = cy + Math.sin(angle) * ringRadius;
-          const t = hash(q, r, n) / 0x1_0000_0000;
-          const scale = tex.scale.min + t * (tex.scale.max - tex.scale.min);
+        for (let i = 0; i < instances.length; i++) {
+          const inst = instances[i];
+          if (!inst.present) continue;
+          const slot = slotOrder[i];
+          let x: number;
+          let y: number;
+          if (slot === 0) {
+            x = cx;
+            y = cy;
+          } else {
+            const ringN = slot - 1;
+            const angle = startAngle + (2 * Math.PI * ringN) / RING_SLOT_COUNT + ringAngleJitter(q, r, ringN, RING_SLOT_COUNT);
+            x = cx + Math.cos(angle) * ringRadius;
+            y = cy + Math.sin(angle) * ringRadius;
+          }
+          const t = hash(q, r, INSTANCE_SCALE_SEED_BASE + i) / 0x1_0000_0000;
+          const scale = inst.tex.scale.min + t * (inst.tex.scale.max - inst.tex.scale.min);
           this.ctx.objects.add(this.objectContainer, {
-            object: tex.object,
-            size: tex.size,
-            seed: hash(q, r, n + OBJECTS_PER_TILE),
+            object: inst.tex.object,
+            size: inst.tex.size,
+            seed: hash(q, r, INSTANCE_TEX_SEED_BASE + i),
             x, y,
             scale,
             sortKey: y,
+            anchorX: inst.tex.anchor.x,
+            anchorY: inst.tex.anchor.y,
           });
         }
       }
@@ -418,91 +605,210 @@ export class LayoutWorld extends LayoutNode {
    *  pixel offsets from the card's tile centre are applied verbatim
    *  (the card sits centred on its world hex, so world deltas map
    *  directly to overlay-local deltas around the centre). */
+  /** Convert a global pixel coord (Pixi stage frame) to the axial hex
+   *  `(q, r)` underneath it, plus the pixel offset from that point to
+   *  the tile's centre in the world-card-surface frame (so when the
+   *  caller is exactly centred on the tile, offset is `(0, 0)`).
+   *
+   *  Works regardless of which parent the caller is mounted under —
+   *  during drag the card is re-parented to a global overlay, so its
+   *  local position is no longer in the world-card-surface frame.
+   *  Going through global → surface-local via `getGlobalPosition()`
+   *  keeps both states equivalent. */
+  worldHexAt(
+    globalX: number,
+    globalY: number,
+  ): { q: number; r: number; offsetX: number; offsetY: number } {
+    const sg = this.worldCardSurface.container.getGlobalPosition();
+    const px = globalX - sg.x;
+    const py = globalY - sg.y;
+    const fq = px / (WORLD_HEX_RADIUS * Math.sqrt(3)) - py / (3 * WORLD_HEX_RADIUS);
+    const fr = (2 * py) / (3 * WORLD_HEX_RADIUS);
+    const fy = -fq - fr;
+    let rx = Math.round(fq);
+    let ry = Math.round(fy);
+    let rz = Math.round(fr);
+    const ddx = Math.abs(rx - fq);
+    const ddy = Math.abs(ry - fy);
+    const ddz = Math.abs(rz - fr);
+    if (ddx > ddy && ddx > ddz) rx = -ry - rz;
+    else if (ddy > ddz) ry = -rx - rz;
+    else rz = -rx - ry;
+    const tileCenterPx = WORLD_HEX_RADIUS * (Math.sqrt(3) * rx + (Math.sqrt(3) / 2) * rz);
+    const tileCenterPy = WORLD_HEX_RADIUS * ((3 / 2) * rz);
+    return { q: rx, r: rz, offsetX: tileCenterPx - px, offsetY: tileCenterPy - py };
+  }
+
   makeObjectOverlayForTile(
     q_c: number,
     r_c: number,
     target: RenderTexture,
     width: number,
     height: number,
+    offsetX: number = 0,
+    offsetY: number = 0,
   ): boolean {
-    const cardCenterX = width / 2;
-    const cardCenterY = height / 2;
+    // Tile centre in overlay-local coords. When the card is exactly
+    // centred on its tile, `offsetX/Y` are 0 and the tile centre
+    // lands at the overlay's geometric centre. When the card has
+    // drifted off-centre (mid-drag, mid-tween), the caller passes
+    // the displacement so the snapshot stays anchored to the world
+    // hex underneath rather than to the card.
+    const tileCenterX = width / 2 + offsetX;
+    const tileCenterY = height / 2 + offsetY;
     const dyNeighbor  = 1.5 * WORLD_HEX_RADIUS;
     const dxNeighbor  = WORLD_HEX_WIDTH / 2;
 
+    const dxSide = WORLD_HEX_WIDTH;
     const temp = new Container();
-    let any = false;
-    any = this.placeOverlayObjectsForTile(temp, q_c,       r_c,       cardCenterX,               cardCenterY,               "bottom") || any;
-    any = this.placeOverlayObjectsForTile(temp, q_c - 1,   r_c + 1,   cardCenterX - dxNeighbor,  cardCenterY + dyNeighbor,  "top")    || any;
-    any = this.placeOverlayObjectsForTile(temp, q_c,       r_c + 1,   cardCenterX + dxNeighbor,  cardCenterY + dyNeighbor,  "top")    || any;
-    any = this.placeOverlayObjectsForTile(temp, q_c - 1,   r_c + 1,   cardCenterX - dxNeighbor,  cardCenterY + dyNeighbor,  "bottom")    || any;
-    any = this.placeOverlayObjectsForTile(temp, q_c,       r_c + 1,   cardCenterX + dxNeighbor,  cardCenterY + dyNeighbor,  "bottom")    || any;
+    // Stage every sprite across all 5 contributing tiles, then sort
+    // by y and addChild in painter's order. The per-tile angle sweep
+    // visits ring positions in `n` order (uniform-jittered startAngle
+    // → no guarantee of y-monotonicity), and the implicit "tile call
+    // order = z order" used to mean a top-half sprite on a southern
+    // neighbour could paint over its own bottom-half neighbours on
+    // the same tile. One global y-sort settles both axes at once.
+    const staged: { sprite: Sprite; y: number }[] = [];
+    // Own tile + same-row neighbours: only the bottom slice (40°-140°)
+    // so trees / rocks in those halves can poke "in front of" the card.
+    this.placeOverlayObjectsForTile(staged, q_c,     r_c,     tileCenterX,              tileCenterY,              "bottom");
+    this.placeOverlayObjectsForTile(staged, q_c - 1, r_c,     tileCenterX - dxSide,     tileCenterY,              "bottom");
+    this.placeOverlayObjectsForTile(staged, q_c + 1, r_c,     tileCenterX + dxSide,     tileCenterY,              "bottom");
+    // Southern neighbours: every object — anything on either of the two
+    // tiles below us can end up in front of the card as we drift south.
+    this.placeOverlayObjectsForTile(staged, q_c - 1, r_c + 1, tileCenterX - dxNeighbor, tileCenterY + dyNeighbor, "all");
+    this.placeOverlayObjectsForTile(staged, q_c,     r_c + 1, tileCenterX + dxNeighbor, tileCenterY + dyNeighbor, "all");
 
-    if (any) {
+    if (staged.length > 0) {
+      staged.sort((a, b) => a.y - b.y);
+      for (const { sprite } of staged) temp.addChild(sprite);
       this.ctx.app.renderer.render({ container: temp, target, clear: true });
     }
     temp.destroy({ children: true });
-    return any;
+    return staged.length > 0;
   }
 
-  /** Helper for makeObjectOverlayForTile: place this tile's ring
-   *  objects whose sin(angle) sign matches `half` ("bottom" = sin ≥ 0,
-   *  "top" = sin < 0) into `container`, positioned around (centerX,
-   *  centerY) in container-local coords. Returns true if any sprite
-   *  was added. Skips silently if the tile has no aspect-mapped
-   *  texture or if the object pack hasn't finished loading yet (the
-   *  card's onLoad subscription will trigger a re-snapshot). */
+  /** Helper for makeObjectOverlayForTile: build sprites for this
+   *  tile's ring objects, positioned around `(centerX, centerY)` in
+   *  the overlay's local coords, and push them into `staged` paired
+   *  with their final y coordinate. The caller sorts the staged
+   *  array by y once across every contributing tile so painter's
+   *  order is correct regardless of which tile-call produced any
+   *  given sprite.
+   *
+   *  `half` filters the angle sweep:
+   *  - `"bottom"`: angles in the BOTTOM_HALF_*_DEG window (default
+   *    40°-140°), the "in front of card" half.
+   *  - `"top"`: that same window rotated 180°, the "behind card" half.
+   *  - `"all"`: every ring slot; useful for tiles whose objects can
+   *    cover any part of the card regardless of angle.
+   *
+   *  Skips silently if the tile has no aspect-mapped texture or if
+   *  the object pack hasn't finished loading yet (the card's
+   *  onLoad subscription will trigger a re-snapshot). */
   private placeOverlayObjectsForTile(
-    container: Container,
+    staged: { sprite: Sprite; y: number }[],
     q: number,
     r: number,
     centerX: number,
     centerY: number,
-    half: "top" | "bottom",
-  ): boolean {
-    const packed = this.tileData.get(`${q},${r}`);
-    if (packed === undefined) return false;
-    const def = this.ctx.definitions.decode(packed);
-    if (!def) return false;
+    half: "top" | "bottom" | "all",
+  ): void {
+    const entry = this.tileData.get(`${q},${r}`);
+    if (entry === undefined) return;
+    const def = this.ctx.definitions.decode(entry.packed);
+    if (!def) return;
 
+    // Build the same fixed-length "instance roster" the main sync
+    // uses (lines 477-503) — one entry per *potential* object,
+    // tagged with `present` based on the current stock counter.
+    // Identical inputs → identical roster → identical slot
+    // assignment, so the overlay lines up with the world surface.
     const reg = getTextureRegistry();
-    let tex = undefined;
-    for (const [aspectId] of def.aspects) {
-      const aspectName = this.ctx.definitions.aspectInfo(aspectId)?.name;
-      if (!aspectName) continue;
-      const candidate = reg.find(def.cardType, aspectName);
-      if (candidate) { tex = candidate; break; }
+    const instances: { tex: TextureDefinition; present: boolean }[] = [];
+    if (def.stock && def.stock.length > 0) {
+      for (let i = 0; i < def.stock.length; i++) {
+        const slot = def.stock[i];
+        if (!slot) continue;
+        const aspectName = this.ctx.definitions.aspectInfo(slot.aspectId)?.name;
+        if (!aspectName) continue;
+        const tex = reg.find(def.cardType, aspectName);
+        if (!tex) continue;
+        const cur = i === 0 ? entry.stock0 : entry.stock1;
+        for (let k = 0; k < MAX_STOCK_PER_SLOT; k++) {
+          instances.push({ tex, present: k < cur });
+        }
+      }
+    } else if (def.aspects) {
+      for (const pair of def.aspects) {
+        if (!pair) continue;
+        const aspectName = this.ctx.definitions.aspectInfo(pair[0])?.name;
+        if (!aspectName) continue;
+        const tex = reg.find(def.cardType, aspectName);
+        if (!tex) continue;
+        for (let k = 0; k < OBJECTS_PER_TILE; k++) {
+          instances.push({ tex, present: true });
+        }
+        break;
+      }
     }
-    if (!tex) return false;
+    if (instances.length === 0) return;
 
-    const ringRadius = OBJECTS_PER_TILE > 1 ? WORLD_HEX_RADIUS / 2 : 0;
+    const ringRadius = WORLD_HEX_RADIUS / 2;
     const startAngle = tileAngleOffset(q, r);
-    let any = false;
-    for (let n = 0; n < OBJECTS_PER_TILE; n++) {
-      const angle = startAngle + (2 * Math.PI * n) / OBJECTS_PER_TILE;
-      const sinA = Math.sin(angle);
-      // bottom half (in front of card): sin >= 0 (equator + below).
-      // top half (behind card): sin < 0 (strictly above).
-      if (half === "bottom" && sinA < 0) continue;
-      if (half === "top" && sinA >= 0) continue;
+    const TWO_PI = 2 * Math.PI;
+    // Must mirror the main sync — same `(q, r)` produces the same
+    // slot order, so the overlay's sprites line up with the world's.
+    const slotOrder = slotPermutation(q, r);
+    for (let i = 0; i < instances.length; i++) {
+      const inst = instances[i];
+      if (!inst.present) continue;
+      const tex = inst.tex;
+      const slot = slotOrder[i];
+      let sx: number;
+      let sy: number;
+      if (slot === 0) {
+        // Centre sprite — treat as "top half" for filtering. The
+        // sprite overlaps the tile centre but visually sits behind a
+        // card placed on the tile (anchor at 0.75 puts most of its
+        // height above its position, which is the part the card
+        // would occlude). Skip on "bottom" queries (the own-tile /
+        // same-row-neighbour overlay case) so the centre sprite
+        // doesn't bleed into the card's translucent overlay.
+        if (half === "bottom") continue;
+        sx = centerX;
+        sy = centerY;
+      } else {
+        const ringN = slot - 1;
+        const angle = startAngle + (TWO_PI * ringN) / RING_SLOT_COUNT + ringAngleJitter(q, r, ringN, RING_SLOT_COUNT);
+        // Normalize to [0, 2π) so the BOTTOM_HALF_*_RAD window is well
+        // defined regardless of how many times jitter has rotated past 0.
+        const norm = ((angle % TWO_PI) + TWO_PI) % TWO_PI;
+        if (
+          half === "bottom" &&
+          (norm < BOTTOM_HALF_MIN_RAD || norm > BOTTOM_HALF_MAX_RAD)
+        ) continue;
+        if (
+          half === "top" &&
+          (norm < BOTTOM_HALF_MIN_RAD + Math.PI || norm > BOTTOM_HALF_MAX_RAD + Math.PI)
+        ) continue;
+        // "all" — no angle filter.
+        sy = centerY + Math.sin(angle) * ringRadius;
+        sx = centerX + Math.cos(angle) * ringRadius;
+      }
 
-      const t = hash(q, r, n) / 0x1_0000_0000;
+      const t = hash(q, r, INSTANCE_SCALE_SEED_BASE + i) / 0x1_0000_0000;
       const scale = tex.scale.min + t * (tex.scale.max - tex.scale.min);
-      const seed = hash(q, r, n + OBJECTS_PER_TILE);
+      const seed = hash(q, r, INSTANCE_TEX_SEED_BASE + i);
       const objTex = this.ctx.objectTextures.get(tex.object, tex.size, seed);
       if (!objTex) continue;
 
       const sprite = new Sprite(objTex);
-      sprite.anchor.set(0.5, 0.75);
-      sprite.position.set(
-        centerX + Math.cos(angle) * ringRadius,
-        centerY + Math.sin(angle) * ringRadius,
-      );
+      sprite.anchor.set(tex.anchor.x, tex.anchor.y);
+      sprite.position.set(sx, sy);
       sprite.scale.set(scale);
-      container.addChild(sprite);
-      any = true;
+      staged.push({ sprite, y: sy });
     }
-    return any;
   }
 
   override destroy(): void {
@@ -519,6 +825,9 @@ export class LayoutWorld extends LayoutNode {
     this.unsubZoneRemoved();
     this.unsubObjectLoad();
     this.ctx.worldOverlay = null;
+    this.ctx.worldHexAt = null;
+    this.ctx.onTilesChanged = null;
+    this.tileChangeListeners.clear();
     this.ctx.objects.destroyContainer(this.objectContainer);
     for (const s of this.activeSprites) s.destroy();
     this.activeSprites.length = 0;

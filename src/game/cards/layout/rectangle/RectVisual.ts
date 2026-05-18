@@ -11,15 +11,34 @@ const FALLBACK_STYLE = ["#3a3a4a", "#7a7a8a", "#0b1426"] as const;
 const FALLBACK_NAME  = "?";
 
 /**
- * Lightweight reusable rect-card visual: body fill, title bar, outline stroke,
- * and name label. No progress bar, no state overlay, no death effect — those
- * are the caller's responsibility.
+ * Lightweight reusable rect-card *body*: body fill, title-bar fill,
+ * outline, and name label. No art / portrait — those layer on top
+ * at display time, sourced per-instance via
+ * `CardTextureManager.getCardArt` so a future bake (which doesn't
+ * exist today but `getRect` is wired for one) would stay keyed
+ * purely on the def. See [docs/AGENTS.md] in `assets/textures/` for
+ * the two-tier card-texture cache rationale.
  *
- * Width = RECT_CARD_WIDTH, Height = RECT_CARD_HEIGHT. Origin is the top-left
- * corner of the bounding box.
+ * Width = RECT_CARD_WIDTH, Height = RECT_CARD_HEIGHT. Origin is the
+ * top-left corner of the bounding box.
+ *
+ * Children are kept as **separate** Graphics so the caller
+ * (`LayoutRectCard`) can re-parent the body fill below the
+ * in-front-objects overlay while keeping the title-bar fill,
+ * outline, and label above it — preserves readability when nearby
+ * trees / rocks would otherwise occlude the card's identifying
+ * elements.
  */
 export class RectCardVisual extends Container {
-  private readonly bg = new Graphics();
+  /** Card body rectangle. Owned by this visual; sits at the bottom
+   *  of the z-order so per-instance art and the in-front-objects
+   *  overlay can layer on top. */
+  private readonly body = new Graphics();
+  /** Title-bar rectangle. Public so `LayoutRectCard` can re-parent
+   *  it above the in-front-objects overlay alongside the label /
+   *  outline / progress bars — the title is the card's primary
+   *  identifier and should stay readable through the overlay. */
+  readonly titleBar  = new Graphics();
   readonly cardOutline = new Graphics();
   readonly nameText: Text;
 
@@ -38,7 +57,8 @@ export class RectCardVisual extends Container {
       },
     });
     this.nameText.anchor.set(0.5);
-    this.addChild(this.bg);
+    this.addChild(this.body);
+    this.addChild(this.titleBar);
     this.addChild(this.nameText);
     this.addChild(this.cardOutline);
   }
@@ -56,9 +76,11 @@ export class RectCardVisual extends Container {
     const h = RECT_CARD_HEIGHT;
     const titleY = titlePosition === "top" ? 0 : h - RECT_CARD_TITLE_HEIGHT;
 
-    this.bg.clear();
-    this.bg.rect(0, 0, w, h).fill({ color: background });
-    this.bg.rect(0, titleY, w, RECT_CARD_TITLE_HEIGHT).fill({ color: titleBar });
+    this.body.clear();
+    this.body.rect(0, 0, w, h).fill({ color: background });
+
+    this.titleBar.clear();
+    this.titleBar.rect(0, titleY, w, RECT_CARD_TITLE_HEIGHT).fill({ color: titleBar });
 
     this.nameText.text = name;
     this.nameText.style.fill = textColor;

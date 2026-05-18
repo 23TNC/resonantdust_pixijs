@@ -1,5 +1,6 @@
 import { Container, Graphics, ParticleContainer, RenderTexture, Sprite, Text, Texture } from "pixi.js";
 import type { GameContext } from "../../../../GameContext";
+import type { CardDefinition } from "../../../definitions/DefinitionManager";
 import { LayoutNode } from "../../../layout/LayoutNode";
 import type { Card as CardRow } from "../../../../server/spacetime/bindings/types";
 import type { LocalCard } from "../../../../server/data/DataManager";
@@ -40,6 +41,11 @@ const HEX_GAME_HEIGHT = HEX_GAME_RADIUS * 2;
 const HEX_CARD_RADIUS = 72;
 const HEX_CARD_WIDTH  = Math.sqrt(3) * HEX_CARD_RADIUS;
 const HEX_CARD_HEIGHT = HEX_CARD_RADIUS * 2;
+
+/** Card-art square sized to this fraction of the hex's shorter
+ *  bounding-box axis (= inscribed-circle diameter). <1 keeps the
+ *  art tucked inside the hex outline so no per-card mask is needed. */
+const HEX_ART_FRACTION = 0.7;
 
 /** Passthrough hit-host for a rect card mounted on top of a hex (STACKED_ON_HEX).
  *  Always recurses into children; never returns itself — so clicks on the
@@ -96,6 +102,14 @@ export class LayoutHexCard extends LayoutCard {
 
   private readonly visual        = new Container();
   private readonly hexSprite     = new Sprite(Texture.EMPTY);
+  /** Per-instance card art sprite. Texture is resolved on demand
+   *  from `CardTextureManager.getCardArt(name)`, atlas-packed once
+   *  per filename. Sits above `hexSprite` (the baked hex
+   *  background) so different cards sharing one def can show
+   *  different art without re-baking the hex. Today no hex defs
+   *  declare a sprite; the field is wired through for parity with
+   *  rect cards and as a hook for future hex-card art. */
+  private readonly artSprite     = new Sprite();
   private readonly stateOverlay  = new Graphics();
   /** Magnetic-phase progress bar — thin filled strip along the
    *  bottom edge of the hex's bounding box. Driven the same way as
@@ -128,12 +142,19 @@ export class LayoutHexCard extends LayoutCard {
    *  via `ctx.worldOverlay` and refreshed when the card moves or when
    *  an object texture pack finishes loading. Drawn on top of the
    *  card at 50% alpha so the user perceives the nearby trees / rocks
-   *  as occluding the card without any scene-graph reshuffling. */
-  private overlayTexture: RenderTexture | null = null;
-  private overlaySprite: Sprite | null = null;
-  private overlayQ: number | null = null;
-  private overlayR: number | null = null;
+   *  as occluding the card without any scene-graph reshuffling.
+   *
+   *  Public so stacked rect children can read it directly and wrap a
+   *  sub-Texture around the same RT — saves baking the same content
+   *  per child. */
+  overlayTexture: RenderTexture | null = null;
+  overlaySprite: Sprite | null = null;
+  overlayQ: number | null = null;
+  overlayR: number | null = null;
+  overlayOffsetX = 0;
+  overlayOffsetY = 0;
   private unsubObjectLoad: (() => void) | null = null;
+  private unsubTileChange: (() => void) | null = null;
 
   constructor(cardId: number, ctx: GameContext) {
     super(cardId, ctx);
@@ -148,6 +169,12 @@ export class LayoutHexCard extends LayoutCard {
     // });
 
     this.visual.addChild(this.hexSprite);
+    // Card art sits directly above the baked hex (background +
+    // outline) and below stateOverlay so hover / pending overlays
+    // still read on top of the art.
+    this.artSprite.anchor.set(0.5, 0.5);
+    this.artSprite.visible = false;
+    this.visual.addChild(this.artSprite);
     this.visual.addChild(this.stateOverlay);
     // Magnetic indicator — centered on the hex, hidden until the
     // `magnetic` flag is observed. Added to `visual` so it fades
@@ -193,6 +220,13 @@ export class LayoutHexCard extends LayoutCard {
         this.refreshObjectOverlay(this.overlayQ, this.overlayR);
       }
     });
+    // Re-bake when world tile data lands or updates — keeps our
+    // snapshot in sync with new trees, terrain changes, etc.
+    this.unsubTileChange = ctx.onTilesChanged?.(() => {
+      if (this.overlayQ !== null && this.overlayR !== null) {
+        this.refreshObjectOverlay(this.overlayQ, this.overlayR, this.overlayOffsetX, this.overlayOffsetY);
+      }
+    }) ?? null;
   }
 
   applyData(row: CardRow): void {
@@ -204,6 +238,11 @@ export class LayoutHexCard extends LayoutCard {
       // to this card's graphical size every time the texture is swapped,
       // since Pixi's sprite scale is computed from texture dimensions.
       this.hexSprite.setSize(HEX_CARD_WIDTH, HEX_CARD_HEIGHT);
+      // Refresh the per-instance art layer alongside the def-keyed
+      // background — sprite name is static for hex cards (no
+      // per-row override today), so the only thing that can change
+      // it is a packedDefinition swap.
+      this.applyCardArt(def);
       this.invalidate();
     }
 
@@ -357,7 +396,6 @@ export class LayoutHexCard extends LayoutCard {
         this.ctx.cards?.spliceCard(this.cardId);
       }
     }
-    this.visual.alpha = this.state.dragging ? 0.7 : 1;
 
     let effX = this.targetX;
     let effY = this.targetY;
@@ -369,6 +407,30 @@ export class LayoutHexCard extends LayoutCard {
       }
     }
     const moving = this.tweenTo(effX, effY);
+
+    // While the card's visual position is changing (drag or tween),
+    // refresh the in-front-objects overlay when the underlying world
+    // hex changes. Gated on `overlayQ !== null` so it only runs for
+    // cards that were already on a world surface (inventory cards
+    // stay clear until they land, at which point applyData
+    // refreshes). Uses the card's *global* position because during
+    // drag the card is re-parented to the global drag overlay, so
+    // its local effX/effY is no longer in the world-card-surface
+    // frame — global coords work in both states.
+    if (
+      this.overlayQ !== null &&
+      this.ctx.worldHexAt &&
+      (this.state.dragging || moving)
+    ) {
+      const gp = this.container.getGlobalPosition();
+      const hex = this.ctx.worldHexAt(gp.x + HEX_CARD_WIDTH / 2, gp.y + HEX_CARD_HEIGHT / 2);
+      // Re-bake every frame while moving so the offset stays
+      // up-to-date — the tile snapshot needs to slide with the
+      // card's drift relative to the tile centre, not just snap on
+      // tile-boundary crossings.
+      this.refreshObjectOverlay(hex.q, hex.r, hex.offsetX, hex.offsetY);
+    }
+
     return this.state.dragging || moving || this.dying || showingProgress;
   }
 
@@ -459,7 +521,7 @@ export class LayoutHexCard extends LayoutCard {
    *  subsequent calls reuses them. Hides the sprite if the world's
    *  snapshot service reports no overlapping objects (empty tile, or
    *  all neighbour packs still loading). */
-  private refreshObjectOverlay(q: number, r: number): void {
+  private refreshObjectOverlay(q: number, r: number, offsetX = 0, offsetY = 0): void {
     const overlay = this.ctx.worldOverlay;
     if (!overlay) return;
     if (!this.overlayTexture) {
@@ -472,11 +534,16 @@ export class LayoutHexCard extends LayoutCard {
     if (!this.overlaySprite) {
       this.overlaySprite = new Sprite(this.overlayTexture);
       this.overlaySprite.alpha = 0.5;
-      this.visual.addChild(this.overlaySprite);
     }
+    // Re-add every refresh so the overlay stays the last child of
+    // `visual` (addChild on an existing child moves it to the end).
+    this.visual.addChild(this.overlaySprite);
     this.overlayQ = q;
     this.overlayR = r;
-    this.overlaySprite.visible = overlay(q, r, this.overlayTexture, HEX_CARD_WIDTH, HEX_CARD_HEIGHT);
+    this.overlayOffsetX = offsetX;
+    this.overlayOffsetY = offsetY;
+    this.overlaySprite.visible = overlay(q, r, this.overlayTexture, HEX_CARD_WIDTH, HEX_CARD_HEIGHT, offsetX, offsetY);
+    this.invalidateStackedChildren();
   }
 
   /** Hide the overlay and forget the cached tile. The RT and Sprite
@@ -484,7 +551,33 @@ export class LayoutHexCard extends LayoutCard {
   private clearObjectOverlay(): void {
     this.overlayQ = null;
     this.overlayR = null;
+    this.overlayOffsetX = 0;
+    this.overlayOffsetY = 0;
     if (this.overlaySprite) this.overlaySprite.visible = false;
+    this.invalidateStackedChildren();
+  }
+
+  /** Push our current overlay state down to every rect child mounted
+   *  on this hex (hexMount + the stack hosts). They use it plus their
+   *  own static `chainDelta` to bake their own RT — same content,
+   *  shifted to their position. Cascades automatically because the
+   *  child's `refreshObjectOverlay` calls its own push at the end. */
+  private invalidateStackedChildren(): void {
+    const q = this.overlayQ;
+    const r = this.overlayR;
+    const ox = this.overlayOffsetX;
+    const oy = this.overlayOffsetY;
+    if (this.hexMount) {
+      for (const child of this.hexMount.children) {
+        if (child instanceof LayoutCard) child.inheritObjectOverlay(q, r, ox, oy);
+      }
+    }
+    for (const child of this.stackTopHost.children) {
+      if (child instanceof LayoutCard) child.inheritObjectOverlay(q, r, ox, oy);
+    }
+    for (const child of this.stackBottomHost.children) {
+      if (child instanceof LayoutCard) child.inheritObjectOverlay(q, r, ox, oy);
+    }
   }
 
   /** Spawn the ascend-particle emitter at the bottom-center of the
@@ -493,6 +586,39 @@ export class LayoutHexCard extends LayoutCard {
    *  shrinks from the bottom upward, so particles trail the wipe
    *  edge. Uses the card definition's primary style color so the
    *  particles inherit the dying card's palette. */
+  /** Resolve and apply the card-art sprite. Currently hex defs
+   *  never declare `def.sprite` (no shipped hex card uses art on
+   *  top of its baked tile), but the wiring matches LayoutRectCard
+   *  so future hex art lands in the per-filename atlas cache
+   *  alongside rect-card art. Centred on the hex bounding box,
+   *  scaled so the art's longer side spans
+   *  [`HEX_ART_FRACTION`] of the inscribed circle's diameter (the
+   *  short axis of the hex bounding box) — keeps the art inside
+   *  the hex outline without per-card masking. */
+  private applyCardArt(def: CardDefinition | null): void {
+    const artName = def?.sprite ?? null;
+    if (!artName) {
+      this.artSprite.visible = false;
+      return;
+    }
+    const tex = this.ctx.cardTextures.getCardArt(artName);
+    if (!tex) {
+      this.artSprite.visible = false;
+      return;
+    }
+    this.artSprite.texture = tex;
+    // Hex bounding box: width = sqrt(3) * r, height = 2 * r — so
+    // `min(w, h) = w`. The inscribed-circle diameter equals the
+    // bounding box's shorter axis; scaling art to a fraction of
+    // that keeps every corner inside the outline regardless of the
+    // sprite's aspect ratio.
+    const target = HEX_ART_FRACTION * Math.min(HEX_CARD_WIDTH, HEX_CARD_HEIGHT);
+    const scale = target / Math.max(tex.width, tex.height);
+    this.artSprite.scale.set(scale);
+    this.artSprite.position.set(HEX_CARD_WIDTH / 2, HEX_CARD_HEIGHT / 2);
+    this.artSprite.visible = true;
+  }
+
   private _spawnDeathEffect(): void {
     const pm = ParticleManager.getInstance();
     if (!pm) return;
@@ -514,6 +640,8 @@ export class LayoutHexCard extends LayoutCard {
     this.unsubDying = null;
     this.unsubObjectLoad?.();
     this.unsubObjectLoad = null;
+    this.unsubTileChange?.();
+    this.unsubTileChange = null;
     if (this.overlaySprite) {
       this.overlaySprite.destroy();
       this.overlaySprite = null;

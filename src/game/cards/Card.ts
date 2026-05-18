@@ -55,6 +55,14 @@ export class Card {
   private currentParentId = 0;
   /** Mirror of `getStackedState(microZone)` in semantic form. null when loose. */
   private currentStackDirection: StackDirection | null = null;
+  /** Last-seen `microZone` byte. For state-3 (STACKED_ON_HEX) cards, the
+   *  localQ/localR bits of `microZone` encode the world-tile address;
+   *  parent/direction don't change when a virtual-world-hex-root card
+   *  (microLocation = 0) moves between empty tiles, so we track
+   *  microZone directly to fire a stack-change event on tile moves and
+   *  let `ActionManager.evaluateRoot` re-evaluate against the new tile's
+   *  hex def. */
+  private currentMicroZone = 0;
 
   /**
    * Card stacked directly on top of us (state 1), or 0 if none. Public so
@@ -193,6 +201,7 @@ export class Card {
       // server's view doesn't.
       this.currentParentId = Card.stackParentOf(initialRow, ctx.data.cardsLocal);
       this.currentStackDirection = Card.stackDirectionOf(initialRow);
+      this.currentMicroZone = initialRow.microZone;
       let row: CardRow = initialRow;
       if (this.currentParentId !== 0 && !cardManager.get(this.currentParentId)) {
         this.fallbackToInventory(initialRow);
@@ -203,6 +212,7 @@ export class Card {
         this.currentZoneId = packZoneId(row.macroZone, row.surface);
         this.currentParentId = 0;
         this.currentStackDirection = null;
+        this.currentMicroZone = row.microZone;
       }
       this.gameCard.applyData(row);
       this.layoutCard.applyData(row);
@@ -452,11 +462,24 @@ export class Card {
     const newZoneId = packZoneId(row.macroZone, row.surface);
     const newParentId = Card.stackParentOf(row, this.layoutCard.ctx.data.cardsLocal);
     const newStackDirection = Card.stackDirectionOf(row);
+    const newMicroZone = row.microZone;
     const zoneChanged = newZoneId !== this.currentZoneId;
     const parentChanged = newParentId !== this.currentParentId;
     const directionChanged = newStackDirection !== this.currentStackDirection;
+    // World-tile move detection: a state-3 (STACKED_ON_HEX) card on a
+    // world tile encodes its (localQ, localR) in microZone bits 2-7.
+    // Moving between two empty tiles (microLocation = 0 on both sides)
+    // doesn't change parent or direction — without this trigger,
+    // `ActionManager.evaluateRoot` never re-runs and a queued recipe
+    // (e.g. corpus on tree) keeps the stale hex def. The
+    // STACKED_ON_HEX state guard avoids firing for unrelated
+    // microZone changes (chain position bits on state-2 rows already
+    // surface via parent/direction changes).
+    const tileChanged =
+      getStackedState(newMicroZone) === STACKED_ON_HEX &&
+      newMicroZone !== this.currentMicroZone;
 
-    if (zoneChanged || parentChanged || directionChanged) {
+    if (zoneChanged || parentChanged || directionChanged || tileChanged) {
       debug.log(
         ["splice"],
         `[splice] onDataChange card=${this.cardId} state=${getStackedState(row.microZone)} microZone=0x${row.microZone.toString(16)} microLocation=${row.microLocation} zone=${this.currentZoneId}->${newZoneId} parent=${this.currentParentId}->${newParentId} dir=${this.currentStackDirection}->${newStackDirection}`,
@@ -516,13 +539,25 @@ export class Card {
 
       if (reparentNeeded) this.reparentSmoothly(nextParent);
 
+      // Stash the new microZone before firing so re-entrant subscribers
+      // see consistent state (mirrors the currentZoneId timing above).
+      this.currentMicroZone = newMicroZone;
+
       // Fire stack-change events for both affected chains. A chain is
       // "affected" if this card joined or left it; when both old and new
       // resolve to the same root (e.g. direction-only change on the same
       // parent) we only fire once. Loose-to-loose moves don't enter this
       // block so they don't fire — that matches the spec ("any case that
       // wasn't a rejected drop or a loose -> loose drop").
-      if (parentChanged || directionChanged) {
+      //
+      // `tileChanged` (state-3 card moved between world tiles with parent
+      // and direction both unchanged) also needs to fire. The card's
+      // chain is rooted at itself in the virtual-world-hex-root case
+      // (microLocation = 0) — `rootOf` returns the card id when the
+      // hex parent doesn't exist locally. Even when parent is a real
+      // hex Card, that hex Card doesn't move with the rect, so the
+      // re-evaluation we want is for this card's own chain.
+      if (parentChanged || directionChanged || tileChanged) {
         const oldRoot =
           oldParentId !== 0 && oldDirection !== "hex"
             ? this.cardManager.rootOf(oldParentId)

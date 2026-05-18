@@ -37,39 +37,49 @@ export function unpackMacroZone(macroZone: number): { zoneQ: number; zoneR: numb
 
 /** Number of u64 tile-data fields on a `Zone` row. Mirrors
  *  `ZONE_TILE_U64_COUNT` in `content/src/packed.rs`. */
-const ZONE_TILE_U64_COUNT = 12;
+const ZONE_TILE_U64_COUNT = 16;
 
-/** Bits per tile in the packed zone storage. 64 tiles × 12 bits =
- *  768 bits = 12 u64. */
-const ZONE_TILE_BITS = 12;
+/** Bits per tile in the packed zone storage. 64 tiles × 16 bits =
+ *  1024 bits = 16 u64. Per-tile layout:
+ *  `[ def_id:u12 | stock0:u2 | stock1:u2 ]`. */
+const ZONE_TILE_BITS = 16;
 
-/** Read tile `idx` (0..64) from the zone's 12-u64 packed tile array.
- *  Tile `i` lives at bits `12*i .. 12*i + 11` across the flat u64
- *  array; some tiles straddle a u64 boundary. Mirrors `tile_at` in
- *  `content/src/packed.rs`. Returns the u12 def_id (0 = empty slot). */
-function tileAt(packed: readonly bigint[], idx: number): number {
-  const startBit = ZONE_TILE_BITS * idx;
-  const u64Idx = Math.floor(startBit / 64);
-  const bitOffset = startBit % 64;
-  if (bitOffset + ZONE_TILE_BITS <= 64) {
-    return Number((packed[u64Idx] >> BigInt(bitOffset)) & 0xFFFn);
-  }
-  const lowBits = 64 - bitOffset;
-  const highBits = ZONE_TILE_BITS - lowBits;
-  const lowMask = (1n << BigInt(lowBits)) - 1n;
-  const highMask = (1n << BigInt(highBits)) - 1n;
-  const low = (packed[u64Idx] >> BigInt(bitOffset)) & lowMask;
-  const high = packed[u64Idx + 1] & highMask;
-  return Number((high << BigInt(lowBits)) | low);
+/** Maximum stock value per slot — 2 bits = `0x3`. Mirrors
+ *  `ZONE_TILE_STOCK_MAX` in `content/src/packed.rs`. */
+export const ZONE_TILE_STOCK_MAX = 0x3;
+
+/** Decoded tile slot: def_id plus the two row-mutable stock counters.
+ *  Stock semantics live in [docs/TILE_ASPECTS.md] — each slot is a
+ *  u2 counter for the aspect declared at the same index of the tile
+ *  def's `stock` block. */
+export interface TileSlot {
+  defId: number;
+  stock0: number;
+  stock1: number;
 }
 
-/** Collect the 12 u64 tile-data fields on a `Zone` row into a flat
+/** Read tile `idx` (0..64) from the zone's 16-u64 packed tile array.
+ *  Each u64 holds 4 contiguous u16 tile slots; no slot straddles a
+ *  u64 boundary. Mirrors `tile_full` in `content/src/packed.rs`. */
+function tileAt(packed: readonly bigint[], idx: number): TileSlot {
+  const u64Idx = idx >> 2;
+  const bitOffset = (idx & 0x3) * 16;
+  const slot = Number((packed[u64Idx] >> BigInt(bitOffset)) & 0xFFFFn);
+  return {
+    defId: slot & 0x0FFF,
+    stock0: (slot >> 12) & 0x3,
+    stock1: (slot >> 14) & 0x3,
+  };
+}
+
+/** Collect the 16 u64 tile-data fields on a `Zone` row into a flat
  *  array suitable for [`tileAt`]. */
 function zoneTilesArray(zone: Zone): bigint[] {
   return [
     zone.t0, zone.t1, zone.t2, zone.t3,
     zone.t4, zone.t5, zone.t6, zone.t7,
     zone.t8, zone.t9, zone.t10, zone.t11,
+    zone.t12, zone.t13, zone.t14, zone.t15,
   ];
 }
 
@@ -81,6 +91,12 @@ export interface ZoneTile {
    *  the definition lookup so callers (LayoutWorld) can pass it to
    *  `TextureManager.getHexTexture(def, packed)` without re-packing. */
   packed: number;
+  /** Row-mutable stock counters for the two aspect slots declared by
+   *  the tile def. Both fall in `0..=ZONE_TILE_STOCK_MAX`. Renderers
+   *  use these to vary object instances per remaining stock; matchers
+   *  read them as the row value for `Entity::Aspect`. */
+  stock0: number;
+  stock1: number;
 }
 
 /**
@@ -110,22 +126,29 @@ export function decodeZoneTiles(
   let missCount = 0;
   // 64 tiles, row-major. Row index = tile/8, column index = tile%8.
   for (let i = 0; i < 64; i++) {
-    const definitionId = tileAt(ts, i);
-    if (definitionId === 0) continue;
+    const slot = tileAt(ts, i);
+    if (slot.defId === 0) continue;
     const row = Math.floor(i / 8);
     const col = i % 8;
-    const packed = DefinitionManager.pack(typeId, definitionId);
+    const packed = DefinitionManager.pack(typeId, slot.defId);
     const def = definitions.decode(packed);
     if (!def) {
       debug.warn(["zone"],
         `[decodeZoneTiles] no def for packed=0x${packed.toString(16)}` +
-        ` (typeId=${typeId} definitionId=${definitionId})` +
+        ` (typeId=${typeId} definitionId=${slot.defId})` +
         ` at row=${row} col=${col}`,
       );
       missCount++;
       continue;
     }
-    result.push({ q: zoneQ + col, r: zoneR + row, definition: def, packed });
+    result.push({
+      q: zoneQ + col,
+      r: zoneR + row,
+      definition: def,
+      packed,
+      stock0: slot.stock0,
+      stock1: slot.stock1,
+    });
   }
 
   debug.log(["zone"], `[decodeZoneTiles] → ${result.length} tiles decoded, ${missCount} definition misses`);
@@ -144,7 +167,7 @@ export function decodeZoneTiles(
  * The packing is the inverse of `decodeZoneTiles`'s per-tile loop:
  *
  *   typeId       = (zone.packedDefinition >> 4) & 0xF
- *   definitionId = tileAt(zone.t0..t11, localR * 8 + localQ)   // u12
+ *   definitionId = tileAt(zone.t0..t15, localR * 8 + localQ).defId   // u12
  *   result       = DefinitionManager.pack(typeId, definitionId)
  *
  * Used by `ActionManager.evaluateRoot` to resolve the hex tier for a
@@ -158,16 +181,43 @@ export function getZoneTileDef(
   localQ: number,
   localR: number,
 ): number {
-  if (localQ < 0 || localQ > 7 || localR < 0 || localR > 7) return 0;
+  return getZoneTileSlot(zonesLocal, macroZone, localQ, localR).packed;
+}
+
+/**
+ * Variant of [`getZoneTileDef`] that also returns the tile's two
+ * row-mutable stock counters. Used by the recipe matcher to evaluate
+ * `Entity::Aspect` predicates against the per-tile row value rather
+ * than the def's static aspect map — see `docs/TILE_ASPECTS.md` §
+ * "Recipe matching". `packed === 0` means "no tile here" (same
+ * conditions as `getZoneTileDef`'s `0` return); `stock0` / `stock1`
+ * are `0` in that case but callers should typically pass them as
+ * `null` (no stock signal) to the matcher rather than `(0, 0)`,
+ * which the matcher would interpret as "this tile has depleted
+ * stock" and reject any non-zero `aspect.min` predicate.
+ */
+export function getZoneTileSlot(
+  zonesLocal: ReadonlyMap<number, Zone>,
+  macroZone: number,
+  localQ: number,
+  localR: number,
+): { packed: number; stock0: number; stock1: number } {
+  if (localQ < 0 || localQ > 7 || localR < 0 || localR > 7) {
+    return { packed: 0, stock0: 0, stock1: 0 };
+  }
   for (const zone of zonesLocal.values()) {
     if (zone.macroZone !== macroZone) continue;
     if (zone.surface < 64 /* WORLD_LAYER */) continue;
     const typeId = (zone.packedDefinition >> 4) & 0xF;
-    const definitionId = tileAt(zoneTilesArray(zone), localR * 8 + localQ);
-    if (definitionId === 0) return 0;
-    return DefinitionManager.pack(typeId, definitionId);
+    const slot = tileAt(zoneTilesArray(zone), localR * 8 + localQ);
+    if (slot.defId === 0) return { packed: 0, stock0: 0, stock1: 0 };
+    return {
+      packed: DefinitionManager.pack(typeId, slot.defId),
+      stock0: slot.stock0,
+      stock1: slot.stock1,
+    };
   }
-  return 0;
+  return { packed: 0, stock0: 0, stock1: 0 };
 }
 
 /**

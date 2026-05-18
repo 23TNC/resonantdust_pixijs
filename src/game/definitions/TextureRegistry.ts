@@ -9,6 +9,19 @@ export interface TextureScale {
   max: number;
 }
 
+/** Fractional sprite pivot point. `(0, 0)` = top-left, `(1, 1)` =
+ *  bottom-right, `(0.5, 0.5)` = centre. Values may sit outside
+ *  `[0, 1]` (pivot above / below the sprite's frame).
+ *
+ *  Mirrors `TextureAnchor` in [`content/src/texture_core.rs`]; the
+ *  JSON shape is `{ "anchor": { "x": <n>, "y": <n> } }` per
+ *  texture entry. Omitting `anchor` in JSON defaults to
+ *  `(0.5, 0.75)` (preserves the pre-existing hard-coded value). */
+export interface TextureAnchor {
+  x: number;
+  y: number;
+}
+
 export interface TextureDefinition {
   id: number;
   cardType: number;
@@ -20,6 +33,10 @@ export interface TextureDefinition {
   /** Native pixel size of the source asset. */
   size: number;
   scale: TextureScale;
+  /** Sprite pivot point — the renderer applies this on every sync,
+   *  so a texture's anchor takes effect even when a pooled sprite
+   *  is reused with a different anchor than its previous tenant. */
+  anchor: TextureAnchor;
 }
 
 export class TextureRegistry {

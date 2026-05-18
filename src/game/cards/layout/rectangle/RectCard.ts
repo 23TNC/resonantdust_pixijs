@@ -1,6 +1,6 @@
 import { Container, Graphics, ParticleContainer, RenderTexture, Sprite, Text } from "pixi.js";
 import type { GameContext } from "../../../../GameContext";
-import type { DefinitionManager } from "../../../definitions/DefinitionManager";
+import type { CardDefinition, DefinitionManager } from "../../../definitions/DefinitionManager";
 import type { Card as CardRow, Soul } from "../../../../server/spacetime/bindings/types";
 import type { LocalCard } from "../../../../server/data/DataManager";
 import { ParticleManager, type ParticleHandle } from "../../../../assets/ParticleManager";
@@ -23,6 +23,12 @@ import { RectCardVisual } from "./RectVisual";
 import { unpackMacroZone } from "../../../../server/data/packing";
 
 const DEATH_SPEED = 0.04;
+
+/** Card-art square sized to this fraction of the card body's shorter
+ *  dimension. <1 keeps a margin so the art doesn't touch the title
+ *  bar or card edges. Matches the value previously baked into
+ *  `RectCardVisual.applySprite` before the art layer moved here. */
+const ART_BODY_FRACTION = 0.85;
 
 /** How far to shift the title-bar color toward black/white for the
  *  action-debounce progress fill. The fill picks brighter when the
@@ -206,6 +212,14 @@ export class LayoutRectCard extends LayoutCard {
 
   private readonly visual       = new Container();
   private readonly rectVisual   = new RectCardVisual();
+  /** Per-instance card art sprite. Texture is resolved on demand
+   *  from `CardTextureManager.getCardArt(name)` so the atlas-packed
+   *  texture is shared across every card referencing the same art
+   *  filename (e.g. all "axe" cards share one `128_requisite_8`
+   *  texture; the 16 human portraits each get one texture regardless
+   *  of how many soul cards exist). Sized to a fraction of the card
+   *  body in `layout()`; hidden when the def declares no sprite. */
+  private readonly artSprite    = new Sprite();
   private readonly progressBar  = new Graphics();
   private readonly stateOverlay = new Graphics();
   /** Magnetic-anchor indicator — a tiny 🧲 in the corner of the card,
@@ -245,6 +259,13 @@ export class LayoutRectCard extends LayoutCard {
   private readonly resourceMeter = new Graphics();
   private unsubResourceMeter: (() => void) | null = null;
   private currentPackedDefinition: number | null = null;
+  /** Last-seen `row.flags`. Cached so `layout()` can derive the soul
+   *  portrait sprite (top-nibble `portrait_id`) without re-fetching
+   *  the row, and so we can invalidate on the rare flag change that
+   *  actually affects rendering (portrait shouldn't change after
+   *  spawn, but tracking flags keeps `applyData` honest in case
+   *  future features add render-relevant fields). */
+  private currentFlags = 0;
   private titlePosition: RectCardTitlePosition = "top";
   private dying = false;
   private deathProgress = 0;
@@ -257,11 +278,28 @@ export class LayoutRectCard extends LayoutCard {
    *  LayoutHexCard's overlay — lazily created when a rect card lands
    *  on a world tile (STACKED_ON_HEX with no parent), refreshed when
    *  the tile changes or when an object texture pack finishes loading. */
+  /** Own RenderTexture for the in-front-objects overlay. Each card
+   *  bakes its own — chain rects pull `(q, r, offset)` from their
+   *  parent and bake into their own RT (no sub-Texture sharing,
+   *  which caused alignment + scene-tree-cycle problems).
+   *
+   *  Public so stacked children can read parent state and derive
+   *  their own (q, r, offset) without going through `cardsLocal`. */
   private overlayTexture: RenderTexture | null = null;
   private overlaySprite: Sprite | null = null;
-  private overlayQ: number | null = null;
-  private overlayR: number | null = null;
+  overlayQ: number | null = null;
+  overlayR: number | null = null;
+  overlayOffsetX = 0;
+  overlayOffsetY = 0;
+  /** Displacement of our centre from our parent's centre, in world
+   *  pixels (parent's frame == card frame here since stacking doesn't
+   *  scale). Set in applyData based on stack direction. Combined with
+   *  the parent's `(overlayOffsetX, overlayOffsetY)` to derive our
+   *  own offset when the parent pushes via `inheritObjectOverlay`. */
+  private chainDeltaX = 0;
+  private chainDeltaY = 0;
   private unsubObjectLoad: (() => void) | null = null;
+  private unsubTileChange: (() => void) | null = null;
 
   constructor(cardId: number, ctx: GameContext) {
     super(cardId, ctx);
@@ -279,15 +317,28 @@ export class LayoutRectCard extends LayoutCard {
     //     this.invalidate();
     //   }
     // });
-    // rectVisual owns body fill + title bar fill + outline.
-    // progressBar paints over the title bar to show the
-    // ActionManager debounce countdown — between rectVisual (so it
-    // covers the title fill) and nameText (so the name stays
-    // readable). cardOutline and nameText are re-parented above the
-    // progress bars so the outline isn't overlapped at the title-bar
-    // edges. stateOverlay draws hover/pending indicators above
-    // everything.
+    // Z-order (back to front):
+    //   1. rectVisual  — owns the body fill (re-parented children
+    //                    below are pulled out into `visual`)
+    //   2. artSprite   — per-instance card art / portrait
+    //   3. titleBar    — title-bar fill, re-parented out of rectVisual
+    //   4. progressBar — debounce countdown, paints over the title fill
+    //   5. nameText    — title label, above progressBar so it stays
+    //                    readable while a bar is filling
+    //   6. cardOutline — card border, above everything readable so a
+    //                    progress bar doesn't notch its title-bar edge
+    //   7. stateOverlay — hover / pending decoration
+    //
+    // `refreshObjectOverlay` later splices the in-front-objects
+    // sprite between (2) and (3) by re-adding (3..6) on top of it —
+    // keeps the body / art behind the overlay (so trees occlude them
+    // as intended) while the title fill, label, and outline stay
+    // readable through the 75%-alpha overlay.
     this.visual.addChild(this.rectVisual);
+    this.artSprite.anchor.set(0.5, 0.5);
+    this.artSprite.visible = false;
+    this.visual.addChild(this.artSprite);
+    this.visual.addChild(this.rectVisual.titleBar);
     this.visual.addChild(this.progressBar);
     this.visual.addChild(this.rectVisual.nameText);
     this.visual.addChild(this.rectVisual.cardOutline);
@@ -334,6 +385,13 @@ export class LayoutRectCard extends LayoutCard {
         this.refreshObjectOverlay(this.overlayQ, this.overlayR);
       }
     });
+    // Re-bake when world tile data lands or updates so the overlay
+    // tracks new trees / terrain changes underneath.
+    this.unsubTileChange = ctx.onTilesChanged?.(() => {
+      if (this.overlayQ !== null && this.overlayR !== null) {
+        this.refreshObjectOverlay(this.overlayQ, this.overlayR, this.overlayOffsetX, this.overlayOffsetY);
+      }
+    }) ?? null;
   }
 
   setTitlePosition(position: RectCardTitlePosition): void {
@@ -345,6 +403,10 @@ export class LayoutRectCard extends LayoutCard {
   applyData(row: CardRow): void {
     if (row.packedDefinition !== this.currentPackedDefinition) {
       this.currentPackedDefinition = row.packedDefinition;
+      this.invalidate();
+    }
+    if (row.flags !== this.currentFlags) {
+      this.currentFlags = row.flags;
       this.invalidate();
     }
 
@@ -407,20 +469,43 @@ export class LayoutRectCard extends LayoutCard {
       // magnetic-pulled cards land at. HexCard re-parents the stack
       // hosts to render in front of the hex visual; here we just
       // need the correct centering offset.
-      this.clearObjectOverlay();
       const parentIsHex = parentCard?.gameCard instanceof GameHexCard;
+      // Record this card's chain-delta — the displacement of our
+      // centre from the parent's centre in world pixels. Parent's
+      // push (inheritObjectOverlay) adds this to the parent's offset
+      // to derive our own overlay offset, so our snapshot aligns
+      // with the trees at our actual world position.
       if (parentIsHex) {
         this.setTitlePosition("top");
         this.setTarget(
           (LayoutHexCard.WIDTH - RECT_CARD_WIDTH) / 2,
           (LayoutHexCard.HEIGHT - RECT_CARD_HEIGHT) / 2,
         );
+        this.chainDeltaX = 0;
+        this.chainDeltaY = 0;
       } else if (getStackDirection(row.microZone) === STACK_DIRECTION_UP) {
         this.setTitlePosition("top");
         this.setTarget(0, -RECT_CARD_TITLE_HEIGHT);
+        this.chainDeltaX = 0;
+        this.chainDeltaY = RECT_CARD_TITLE_HEIGHT;
       } else {
         this.setTitlePosition("bottom");
         this.setTarget(0, +RECT_CARD_TITLE_HEIGHT);
+        this.chainDeltaX = 0;
+        this.chainDeltaY = -RECT_CARD_TITLE_HEIGHT;
+      }
+      // Pull parent's current overlay state so we have something to
+      // show before the next time the parent re-bakes.
+      const parentLayout = parentCard?.layoutCard;
+      if (parentLayout instanceof LayoutHexCard || parentLayout instanceof LayoutRectCard) {
+        this.inheritObjectOverlay(
+          parentLayout.overlayQ,
+          parentLayout.overlayR,
+          parentLayout.overlayOffsetX,
+          parentLayout.overlayOffsetY,
+        );
+      } else {
+        this.clearObjectOverlay();
       }
     } else if (stacked === STACKED_ON_HEX) {
       if (row.microLocation === 0) {
@@ -450,7 +535,22 @@ export class LayoutRectCard extends LayoutCard {
           (LayoutHexCard.WIDTH  - RECT_CARD_WIDTH)  / 2,
           (LayoutHexCard.HEIGHT - RECT_CARD_HEIGHT) / 2,
         );
-        this.clearObjectOverlay();
+        // Mounted centred on a hex parent — chain delta is zero, our
+        // centre coincides with the parent's. Pull parent's current
+        // overlay state; parent's subsequent re-bakes push to us.
+        this.chainDeltaX = 0;
+        this.chainDeltaY = 0;
+        const parentLayout = (this.ctx.cards?.get(parentId) ?? null)?.layoutCard;
+        if (parentLayout instanceof LayoutHexCard || parentLayout instanceof LayoutRectCard) {
+          this.inheritObjectOverlay(
+            parentLayout.overlayQ,
+            parentLayout.overlayR,
+            parentLayout.overlayOffsetX,
+            parentLayout.overlayOffsetY,
+          );
+        } else {
+          this.clearObjectOverlay();
+        }
       }
     }
   }
@@ -472,6 +572,7 @@ export class LayoutRectCard extends LayoutCard {
       : undefined;
 
     this.rectVisual.draw(def, this.titlePosition, label);
+    this.applyCardArt(def);
 
     // Magnetic indicator: top-right of the card *body*, just below the
     // title bar when title is on top, or just below the top edge when
@@ -628,7 +729,6 @@ export class LayoutRectCard extends LayoutCard {
         this.ctx.cards?.spliceCard(this.cardId);
       }
     }
-    this.visual.alpha = this.state.dragging ? 0.7 : 1;
 
     let effX = this.targetX;
     let effY = this.targetY;
@@ -640,6 +740,31 @@ export class LayoutRectCard extends LayoutCard {
       }
     }
     const moving = this.tweenTo(effX, effY);
+
+    // While the card's visual position is changing (drag or tween),
+    // refresh the in-front-objects overlay when the underlying world
+    // hex changes. Only re-bakes when (q, r) actually shifts. Gated
+    // on `overlayQ !== null` so it only runs for cards that were
+    // already on a world surface — inventory cards stay clear until
+    // they land, at which point applyData refreshes. Uses the card's
+    // *global* position because during drag the card is re-parented
+    // to the global drag overlay, so its local effX/effY is no
+    // longer in the world-card-surface frame — global coords work in
+    // both states.
+    if (
+      this.overlayQ !== null &&
+      this.ctx.worldHexAt &&
+      (this.state.dragging || moving)
+    ) {
+      const gp = this.container.getGlobalPosition();
+      const hex = this.ctx.worldHexAt(gp.x + RECT_CARD_WIDTH / 2, gp.y + RECT_CARD_HEIGHT / 2);
+      // Re-bake every frame while moving so the offset stays
+      // up-to-date — the tile snapshot slides with the card's drift
+      // relative to the tile centre rather than only snapping on
+      // tile-boundary crossings.
+      this.refreshObjectOverlay(hex.q, hex.r, hex.offsetX, hex.offsetY);
+    }
+
     // Re-run next frame while any progress is mid-fill so the bars
     // animate smoothly rather than only updating on data changes.
     const showingProgress = specs.some((s) => s.fraction < 1);
@@ -655,6 +780,52 @@ export class LayoutRectCard extends LayoutCard {
    *
    *  Cost per call: 8 bit-shifts + up to 40 rect ops total. No walk
    *  over `cardsLocal`; per-frame invalidation is cheap. */
+  /** Resolve and apply the card-art sprite for this card. Source of
+   *  the art name:
+   *  - Soul cards (`def.cardType === cardTypeId("soul")`) derive the
+   *    name from the row's `portrait_id` nibble (`Card.flags` bits
+   *    28..=31, set at spawn by `character_creation::create_character`)
+   *    and the soul def's `key`: `256_<key>_<portraitId + 1>`. Pack
+   *    files at `public/textures/cards/soul/<key>/256_<key>_pack/`
+   *    are 1-indexed, hence the `+ 1`.
+   *  - Every other card uses `def.sprite` directly (the static
+   *    per-definition sprite filename from the card's JSON).
+   *
+   *  The texture is fetched via `cardTextures.getCardArt`, which
+   *  atlas-packs once per filename and caches across all cards
+   *  sharing the same art — so the cache grows as `O(distinct sprite
+   *  files)`, independent of card-instance count. */
+  private applyCardArt(def: CardDefinition | null): void {
+    let artName: string | null = null;
+    if (def !== null) {
+      if (def.cardType === this.ctx.definitions.cardTypeId("soul")) {
+        const portraitId = this.ctx.definitions.cardFlagFieldValue(this.currentFlags, "portrait_id") ?? 0;
+        artName = `256_${def.key}_${portraitId + 1}`;
+      } else if (def.sprite) {
+        artName = def.sprite;
+      }
+    }
+    if (!artName) {
+      this.artSprite.visible = false;
+      return;
+    }
+    const tex = this.ctx.cardTextures.getCardArt(artName);
+    if (!tex) {
+      this.artSprite.visible = false;
+      return;
+    }
+    this.artSprite.texture = tex;
+    const bodyHeight = RECT_CARD_HEIGHT - RECT_CARD_TITLE_HEIGHT;
+    const bodyCenterY = this.titlePosition === "top"
+      ? RECT_CARD_TITLE_HEIGHT + bodyHeight / 2
+      : bodyHeight / 2;
+    const target = ART_BODY_FRACTION * Math.min(RECT_CARD_WIDTH, bodyHeight);
+    const scale = target / Math.max(tex.width, tex.height);
+    this.artSprite.scale.set(scale);
+    this.artSprite.position.set(RECT_CARD_WIDTH / 2, bodyCenterY);
+    this.artSprite.visible = true;
+  }
+
   private drawSoulResourceMeter(soul: Soul): void {
     const colors = getClusterColors(this.ctx.definitions);
     // Body origin in card-local pixels. For souls we expect `top`
@@ -719,10 +890,12 @@ export class LayoutRectCard extends LayoutCard {
     this.deathParticleHandle = pm.createEmitter(pc, "ascend", { startColor: primary });
   }
 
-  /** Re-bake the in-front-objects snapshot for the world tile this
-   *  card sits on. Lazily creates the RT + Sprite the first time it
-   *  fires. */
-  private refreshObjectOverlay(q: number, r: number): void {
+  /** Re-bake the in-front-objects snapshot into our own RenderTexture.
+   *  `(q, r)` is the world tile underneath the card; `(offsetX,
+   *  offsetY)` is the displacement of the tile centre from the card
+   *  centre, so a chained rect sitting above its parent passes a
+   *  positive offsetY to slide the snapshot down. */
+  refreshObjectOverlay(q: number, r: number, offsetX = 0, offsetY = 0): void {
     const overlay = this.ctx.worldOverlay;
     if (!overlay) return;
     if (!this.overlayTexture) {
@@ -735,17 +908,79 @@ export class LayoutRectCard extends LayoutCard {
     if (!this.overlaySprite) {
       this.overlaySprite = new Sprite(this.overlayTexture);
       this.overlaySprite.alpha = 0.75;
-      this.visual.addChild(this.overlaySprite);
     }
+    // Re-add every refresh — addChild on an existing child moves it
+    // to the end of `visual.children`. The title-bar fill stays at
+    // its constructor position (below the overlay) so the overlay
+    // tints it the same way it tints the body / art — only the
+    // *label*, progress bars, and outline pop above. Net z: body,
+    // art, titleBar, overlay, progressBar, nameText, cardOutline,
+    // stateOverlay (re-added last so hover / pending feedback isn't
+    // buried by the freshly-added overlay).
+    this.visual.addChild(this.overlaySprite);
+    this.visual.addChild(this.progressBar);
+    this.visual.addChild(this.rectVisual.nameText);
+    this.visual.addChild(this.rectVisual.cardOutline);
+    this.visual.addChild(this.stateOverlay);
     this.overlayQ = q;
     this.overlayR = r;
-    this.overlaySprite.visible = overlay(q, r, this.overlayTexture, RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
+    this.overlayOffsetX = offsetX;
+    this.overlayOffsetY = offsetY;
+    this.overlaySprite.visible = overlay(q, r, this.overlayTexture, RECT_CARD_WIDTH, RECT_CARD_HEIGHT, offsetX, offsetY);
+    this.pushObjectOverlayToStacked();
+  }
+
+  /** Parent-pushed overlay state. We add our own static `chainDelta`
+   *  (set in applyData based on stack direction) to the parent's
+   *  offset, then bake into our own RT. */
+  override inheritObjectOverlay(
+    parentQ: number | null,
+    parentR: number | null,
+    parentOffsetX: number,
+    parentOffsetY: number,
+  ): void {
+    if (parentQ === null || parentR === null) {
+      this.clearObjectOverlay();
+      return;
+    }
+    this.refreshObjectOverlay(
+      parentQ,
+      parentR,
+      parentOffsetX + this.chainDeltaX,
+      parentOffsetY + this.chainDeltaY,
+    );
+  }
+
+  /** Cascade our overlay state to any rect children stacked on us.
+   *  Mirrors what LayoutHexCard does — each chain link inherits and
+   *  re-pushes, so a rect on a rect on a hex on a world tile ends up
+   *  correctly aligned without any per-frame invalidation. */
+  private pushObjectOverlayToStacked(): void {
+    const q = this.overlayQ;
+    const r = this.overlayR;
+    const ox = this.overlayOffsetX;
+    const oy = this.overlayOffsetY;
+    for (const child of this.stackTopHost.children) {
+      if (child instanceof LayoutCard) child.inheritObjectOverlay(q, r, ox, oy);
+    }
+    for (const child of this.stackBottomHost.children) {
+      if (child instanceof LayoutCard) child.inheritObjectOverlay(q, r, ox, oy);
+    }
   }
 
   private clearObjectOverlay(): void {
     this.overlayQ = null;
     this.overlayR = null;
+    this.overlayOffsetX = 0;
+    this.overlayOffsetY = 0;
     if (this.overlaySprite) this.overlaySprite.visible = false;
+    // Also tell our own stacked children to clear.
+    for (const child of this.stackTopHost.children) {
+      if (child instanceof LayoutCard) child.inheritObjectOverlay(null, null, 0, 0);
+    }
+    for (const child of this.stackBottomHost.children) {
+      if (child instanceof LayoutCard) child.inheritObjectOverlay(null, null, 0, 0);
+    }
   }
 
   override destroy(): void {
@@ -757,6 +992,8 @@ export class LayoutRectCard extends LayoutCard {
     this.unsubResourceMeter = null;
     this.unsubObjectLoad?.();
     this.unsubObjectLoad = null;
+    this.unsubTileChange?.();
+    this.unsubTileChange = null;
     if (this.overlaySprite) {
       this.overlaySprite.destroy();
       this.overlaySprite = null;

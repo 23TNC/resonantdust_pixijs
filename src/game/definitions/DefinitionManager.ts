@@ -32,7 +32,22 @@ export interface AspectInfo {
   name: string;
   description: string;
   icon: string;
+  /** Display color packed as `0xRRGGBB`. Sub-aspects inherit their
+   *  parent's color when their JSON entry omits the field, so all
+   *  members of a family render with the same hue out of the box.
+   *  Pass directly to PIXI: `gfx.fill({ color: info.color })`. */
+  color: number;
+  /** Top-level family — the root-ancestor's name. `berry.group === "food"`
+   *  even though `berry`'s direct parent is `food`; the chain is collapsed
+   *  to the top so renderers can group by family without walking. */
   group: string;
+  /** Direct parent aspect id, or `null` for top-level entries. Forms the
+   *  single-inheritance tree the recipe matcher walks for `Entity::Aspect`
+   *  widening (a card carrying `corpus++` satisfies `{aspect: corpus}`).
+   *  Renderers use this to distinguish sub-aspects of the same parent
+   *  (e.g. `corpus+` vs `corpus--`) — the parent supplies the icon and
+   *  family colour, the leaf-name suffix supplies the polarity badge. */
+  parent: number | null;
 }
 
 export interface StarterPackItem {
@@ -50,6 +65,19 @@ export interface StarterPack {
   contents: readonly StarterPackItem[];
 }
 
+/** One row-mutable aspect slot on a `CardDefinition`. Mirrors
+ *  `StockSlot` from the content crate. Order in the def's `stock`
+ *  array maps to the per-tile u2 slots `stock0` / `stock1`. */
+export interface StockSlot {
+  /** Aspect id this slot tracks. Resolve to a name via
+   *  `DefinitionManager.aspectInfo`. */
+  aspectId: number;
+  /** Cap on the slot's value — `1..=3` (u2 storage). */
+  max: number;
+  /** Initial value worldgen / spawn paths seed the slot with. */
+  default: number;
+}
+
 export interface CardDefinition {
   cardType: number;
   /** 1-based id within the type's bucket. u12 (1..=4095) since the
@@ -62,9 +90,15 @@ export interface CardDefinition {
    *  NOT carried on the definition itself — clients resolve them via
    *  the locales registry; the bare key is the dev-side fallback. */
   key: string;
-  /** Style array. Indices 0-2 are CSS hex colors `[primary, secondary, outline]`.
-   *  Optional indices 3-4 are sprite filenames (`""` = none): 3 = bg sprite, 4 = fg sprite. */
+  /** Style array. Exactly 3 entries: CSS hex colors `[primary,
+   *  secondary, outline]`. Sprite filenames used to live at indices
+   *  3-4; they now live on the top-level [`sprite`] field. */
   style: readonly string[];
+  /** Optional sprite filename rendered centred on the card body
+   *  (rect cards) or as the foreground overlay (hex cards). Resolved
+   *  at runtime against `public/textures/cards/objects/<filename>`.
+   *  `null`/`undefined` means "no sprite." */
+  sprite?: string | null;
   /** `(aspectId, value)` pairs. */
   aspects: ReadonlyArray<readonly [number, number]>;
   /** Bit-mask of flags carried by this definition, built from the JSON
@@ -83,6 +117,16 @@ export interface CardDefinition {
    *  `installRow.validAtTime + lifecycleDurationMs`. `null`/`undefined`
    *  for non-magnetic cards. */
   lifecycleDurationMs?: number | null;
+  /** Row-mutable aspect slots declared by this def. Each slot's value
+   *  lives on the tile row (`Zone.t0..t15` per-tile u2), not on the
+   *  def. Empty for defs without row-mutable aspects (i.e. most non-
+   *  tile defs). Renderers use these to vary object placement per
+   *  remaining stock; the recipe matcher reads row values for
+   *  `Entity::Aspect` predicates against the tile.
+   *
+   *  See [docs/TILE_ASPECTS.md] for the row-mutable / static aspect
+   *  split. */
+  stock: readonly StockSlot[];
 }
 
 /** Compact view of a recipe returned by `findRecipeByKey`. Matches
@@ -251,6 +295,12 @@ export class DefinitionManager {
    *  window for actor sliding) or `null` if no recipe matched. */
   matchStackRecipe(
     hexDef: number,
+    /** Per-tile stock counters for the hex tile this chain sits on,
+     *  or `null` when the hex came from a Card row (no row-mutable
+     *  stock — falls back to the def's static `aspects`). Two u2
+     *  values matching the tile bit layout
+     *  `[def_id:u12 | stock0:u2 | stock1:u2]`. */
+    hexStocks: { stock0: number; stock1: number } | null,
     rootDef: number,
     slotDefs: readonly number[],
     direction: "up" | "down",
@@ -266,8 +316,14 @@ export class DefinitionManager {
     const actorAbove = new Uint16Array(hasCandidates?.actorAbove ?? []);
     const rootBelow = new Uint16Array(hasCandidates?.rootBelow ?? []);
     const actorBelow = new Uint16Array(hasCandidates?.actorBelow ?? []);
+    const stock0 = hexStocks?.stock0 ?? 0;
+    const stock1 = hexStocks?.stock1 ?? 0;
+    const hasStocks = hexStocks === null ? 0 : 1;
     const raw = wasmMatchStackRecipe(
       hexDef,
+      stock0,
+      stock1,
+      hasStocks,
       rootDef,
       new Uint16Array(slotDefs),
       dirCode,

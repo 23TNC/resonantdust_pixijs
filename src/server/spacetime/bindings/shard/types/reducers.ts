@@ -17,6 +17,7 @@ import MoveSoulReducer from "../move_soul_reducer";
 import PickupMiniZoneReducer from "../pickup_mini_zone_reducer";
 import ProposeActionReducer from "../propose_action_reducer";
 import SetLastLoginReducer from "../set_last_login_reducer";
+import UnequipCardReducer from "../unequip_card_reducer";
 
 export type AddCardParams = __Infer<typeof AddCardReducer>;
 export type BootstrapParams = __Infer<typeof BootstrapReducer>;
@@ -29,4 +30,5 @@ export type MoveSoulParams = __Infer<typeof MoveSoulReducer>;
 export type PickupMiniZoneParams = __Infer<typeof PickupMiniZoneReducer>;
 export type ProposeActionParams = __Infer<typeof ProposeActionReducer>;
 export type SetLastLoginParams = __Infer<typeof SetLastLoginReducer>;
+export type UnequipCardParams = __Infer<typeof UnequipCardReducer>;
 

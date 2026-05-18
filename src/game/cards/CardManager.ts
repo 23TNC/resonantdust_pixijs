@@ -70,11 +70,30 @@ export class CardManager {
     // and cards already correctly parented are no-ops.
     this.repairParenting();
     this.unsubscribe = ctx.data.subscribeLocalCard((change) => {
-      if (change.kind === "added") this.spawn(change.key);
-      else if (change.kind === "removed") this.destroy(change.key);
-      // "updated" — same id, position/flag bits changed. Cards subscribe
-      // to their own key for data changes; CardManager only cares about
-      // spawn/destroy transitions.
+      if (change.kind === "added") {
+        // Defensive: an "added" event whose initial row is already
+        // `dead === 2` would spawn-then-immediately-despawn. Skip the
+        // spawn entirely so we don't churn the scene tree.
+        if (change.row.dead === 2) return;
+        this.spawn(change.key);
+      } else if (change.kind === "removed") {
+        this.destroy(change.key);
+      } else if (change.kind === "updated") {
+        // Transition into `dead === 2` means the death animation has
+        // finished and splice has run — the card is logically gone.
+        // Despawn it now so the world-surface hit-test layer no
+        // longer sees it; the row stays in `cardsLocal` until the
+        // server reaps, but without a `Card` mirror nothing tries to
+        // render or hit-test it. Lets fresh drops on the same tile
+        // resolve to the empty world tile underneath instead of
+        // routing through the dead card's reject path.
+        if (change.newRow.dead === 2 && change.oldRow.dead !== 2) {
+          this.destroy(change.key);
+        }
+        // Other "updated" cases — position / flag bits changed.
+        // Cards subscribe to their own key for data changes;
+        // CardManager only cares about spawn/despawn transitions.
+      }
     });
   }
 

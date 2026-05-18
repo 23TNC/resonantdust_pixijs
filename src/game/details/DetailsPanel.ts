@@ -2,7 +2,6 @@ import { Graphics, Text } from "pixi.js";
 import { LayoutNode } from "../layout/LayoutNode";
 import type { GameContext } from "../../GameContext";
 import type { CardDefinition } from "../definitions/DefinitionManager";
-import type { AspectInfo } from "../definitions/DefinitionManager";
 import { NOTO_EMOJI_FAMILY } from "../../assets/fonts";
 import localeRaw from "../../content/locales/cards/en.json";
 
@@ -11,13 +10,10 @@ type LocaleEntry = { label?: string; description?: { simple?: string } };
 
 function buildLocaleMap(): Map<string, LocaleEntry> {
   const map = new Map<string, LocaleEntry>();
-  for (const sub of Object.values(localeRaw as Record<string, unknown>)) {
-    if (typeof sub !== "object" || !sub) continue;
-    for (const cards of Object.values(sub as Record<string, unknown>)) {
-      if (typeof cards !== "object" || !cards) continue;
-      for (const [key, entry] of Object.entries(cards as Record<string, unknown>)) {
-        if (typeof entry === "object" && entry) map.set(key, entry as LocaleEntry);
-      }
+  for (const cards of Object.values(localeRaw as Record<string, unknown>)) {
+    if (typeof cards !== "object" || !cards) continue;
+    for (const [key, entry] of Object.entries(cards as Record<string, unknown>)) {
+      if (typeof entry === "object" && entry) map.set(key, entry as LocaleEntry);
     }
   }
   return map;
@@ -25,33 +21,22 @@ function buildLocaleMap(): Map<string, LocaleEntry> {
 
 const LOCALE = buildLocaleMap();
 
-// ── Aspect color tables (visual-only, not in aspects.json) ───────────────────
-const CATEGORY_COLOR: Record<string, number> = {
-  resources:  0x8B6014,
-  elements:   0x1E6B9E,
-  alignment:  0x7722AA,
-  faculties:  0x227788,
-  dimensions: 0x4455AA,
-  activities: 0xAA7722,
-  states:     0x556677,
-};
-
-const ELEMENT_OVERRIDE: Record<number, number> = {
-  6:  0x556B2F, // earth
-  7:  0x1E6B9E, // water
-  8:  0xCC3311, // fire
-  9:  0x33AAAA, // wind
-  10: 0xCCAA22, // light
-  11: 0x553377, // dark
-};
-
-function aspectColor(id: number, group: string): number {
-  if (id in ELEMENT_OVERRIDE) return ELEMENT_OVERRIDE[id];
-  return CATEGORY_COLOR[group] ?? 0x556677;
-}
+/// Neutral grey fallback when an aspect has no color (shouldn't
+/// happen — the registry enforces a color on every aspect — but kept
+/// as a defensive value so a stale aspectInfo lookup doesn't render
+/// black).
+const FALLBACK_PIP_COLOR = 0x556677;
 
 // ── Per-pip display data ───────────────────────────────────────────────────────
-interface PipData { aspectId: number; value: number; icon: string; group: string }
+interface PipData {
+  aspectId: number;
+  value: number;
+  icon: string;
+  /** Background fill colour from `AspectInfo.color`. Sub-aspects
+   *  inherit their parent's colour via the registry, so an entire
+   *  family renders with one hue without per-leaf wiring here. */
+  color: number;
+}
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 const WIDTH           = 320;
@@ -115,7 +100,11 @@ class ToggleButton extends LayoutNode {
 }
 
 // ── DetailsPanel ──────────────────────────────────────────────────────────────
-interface Pip { gfx: Graphics; iconText: Text; valueText: Text }
+interface Pip {
+  gfx: Graphics;
+  iconText: Text;
+  valueText: Text;
+}
 
 /**
  * Details panel. Sits to the left of the inventory and shows information
@@ -250,12 +239,12 @@ export class DetailsPanel extends LayoutNode {
     this.description = locEntry?.description?.simple ?? "";
 
     this.pipData = (this.def?.aspects ?? []).map(([aspectId, value]) => {
-      const info: AspectInfo | null = ctx.definitions.aspectInfo(aspectId);
+      const info = ctx.definitions.aspectInfo(aspectId);
       return {
         aspectId,
         value,
         icon:  info?.icon  ?? "?",
-        group: info?.group ?? "states",
+        color: info?.color ?? FALLBACK_PIP_COLOR,
       };
     });
 
@@ -313,10 +302,9 @@ export class DetailsPanel extends LayoutNode {
         valueText.visible = false;
         continue;
       }
-      const { aspectId, value, icon, group } = this.pipData[i];
-      const x     = PADDING + i * PIP_SLOT;
-      const y     = PIPS_Y;
-      const color = aspectColor(aspectId, group);
+      const { value, icon, color } = this.pipData[i];
+      const x = PADDING + i * PIP_SLOT;
+      const y = PIPS_Y;
 
       gfx.clear();
       gfx.rect(x, y, PIP_SIZE, PIP_SIZE).fill({ color });

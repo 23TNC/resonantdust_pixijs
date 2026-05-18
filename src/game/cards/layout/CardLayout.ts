@@ -201,6 +201,21 @@ export abstract class LayoutCard extends LayoutNode {
     this.parent?.removeChild(this);
   }
 
+  /** Called by a parent card to share its in-front-objects overlay
+   *  state with this child. The child uses the parent's `(q, r,
+   *  offsetX, offsetY)` plus its own static `chainDelta` (set in
+   *  applyData when stacked) to derive its own overlay state and bake
+   *  its own RT. Default no-op for cards that don't display an
+   *  overlay. */
+  inheritObjectOverlay(
+    _parentQ: number | null,
+    _parentR: number | null,
+    _parentOffsetX: number,
+    _parentOffsetY: number,
+  ): void {
+    // Default: ignore.
+  }
+
   /**
    * Update the tween target. First call also snaps `display` to `target`,
    * so freshly-spawned cards render in place rather than flying from (0,0).

@@ -1,6 +1,26 @@
 /** Packing helpers for SpacetimeDB row keys, zone IDs, and card-row
  *  bit-packed fields.
  *
+ *  **Source of truth:** [`content/src/packed.rs`](../../../../content/src/packed.rs).
+ *  The same definitions are re-exported into the shard and chat
+ *  modules via `pub use resonantdust_content::packed::*;`, and the
+ *  individual helpers (`packMacroZone`, `unpackMicroZone`,
+ *  `isStackLayout`, `worldLayer`, etc.) are exposed through the
+ *  wasm pkg (`content/pkg/resonantdust_content.js`) for cold-path
+ *  callers and tests that want the canonical implementation.
+ *
+ *  The native TS mirrors below exist for **hot-path performance** —
+ *  these functions are called per zone decode / card sync, and the
+ *  wasm-crossing overhead adds up. If you change any bit layout
+ *  here, change the matching helper in
+ *  [`content/src/packed.rs`](../../../../content/src/packed.rs) in
+ *  the same patch. There is no compile-time drift check; the
+ *  discipline is "same file, same PR."
+ *
+ *  Client-only helpers (e.g. `packZoneId` / `unpackZoneId`) don't
+ *  have server-side equivalents — those stay TS-only and live below
+ *  alongside the mirrored ones for locality.
+ *
  *  Encoding schemes here all match the server's wire format:
  *
  *  1. **Valid-at u64 row keys.** Every server table uses a u64 primary key

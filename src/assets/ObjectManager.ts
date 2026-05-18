@@ -25,6 +25,14 @@ export interface ObjectSpriteRequest {
    *  Container has `sortableChildren = true`, so PixiJS handles the
    *  ordering automatically on render. */
   sortKey: number;
+  /** Fractional pivot point — `(0.5, 0.75)` mimics the legacy
+   *  hard-coded default (centre-horizontally, three-quarters down
+   *  the sprite, so a tree-shaped asset's trunk lands on the world
+   *  hex while the canopy rises above it). Applied on every sync so
+   *  pooled-sprite reuse always reflects the *current* request's
+   *  anchor instead of whatever the previous tenant set. */
+  anchorX: number;
+  anchorY: number;
 }
 
 interface ManagedState {
@@ -116,6 +124,10 @@ export class ObjectManager {
       if (!tex) continue;
       const sp = this.acquire(s);
       sp.texture = tex;
+      // Apply anchor here (not just at pool acquisition) so a pooled
+      // sprite re-used by a request with a different anchor doesn't
+      // inherit its previous tenant's pivot point.
+      sp.anchor.set(req.anchorX, req.anchorY);
       sp.position.set(req.x, req.y);
       sp.scale.set(req.scale);
       sp.zIndex = req.sortKey;
@@ -136,10 +148,7 @@ export class ObjectManager {
 
   private acquire(s: ManagedState): Sprite {
     let sp = s.pool.pop();
-    if (!sp) {
-      sp = new Sprite();
-      sp.anchor.set(0.5, 0.75);
-    }
+    if (!sp) sp = new Sprite();
     sp.visible = true;
     return sp;
   }

@@ -64,6 +64,35 @@ export interface GameContext {
    *  hex cards on world surfaces to overlay nearby trees / rocks at
    *  50% alpha and imply depth without scene-tree reshuffling. */
   worldOverlay:
-    | ((q: number, r: number, target: RenderTexture, width: number, height: number) => boolean)
+    | ((
+        q: number,
+        r: number,
+        target: RenderTexture,
+        width: number,
+        height: number,
+        offsetX?: number,
+        offsetY?: number,
+      ) => boolean)
     | null;
+  /** Scene-scoped: set by LayoutWorld on construction, cleared on
+   *  destroy. Maps a global pixel coord (Pixi stage frame) to the
+   *  axial hex `(q, r)` underneath it. Cards pass their own
+   *  `container.getGlobalPosition()` (plus a half-size offset to land
+   *  on the centre) — works whether the card is parented to the
+   *  world-card surface or to the drag overlay, since both resolve to
+   *  global coords. Cards use this per frame while dragging or
+   *  tweening to detect tile-boundary crossings and refresh their
+   *  overlay. */
+  worldHexAt:
+    | ((
+        globalX: number,
+        globalY: number,
+      ) => { q: number; r: number; offsetX: number; offsetY: number })
+    | null;
+  /** Scene-scoped: set by LayoutWorld on construction, cleared on
+   *  destroy. Subscribe to be notified whenever the world's tile
+   *  cache updates — cards use this to re-bake their in-front-objects
+   *  overlay when nearby tiles arrive / change. Returns an
+   *  unsubscribe function. */
+  onTilesChanged: ((callback: () => void) => () => void) | null;
 }

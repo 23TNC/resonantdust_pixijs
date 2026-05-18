@@ -1,4 +1,4 @@
-import { Container, RenderTexture, type Renderer, type Texture } from "pixi.js";
+import { Assets, Container, RenderTexture, type Renderer, type Texture } from "pixi.js";
 import type { TextureManager } from "./TextureManager";
 import { RectCardVisual } from "../../game/cards/layout/rectangle/RectVisual";
 import { HexCardVisual } from "../../game/cards/layout/hexagon/HexVisual";
@@ -9,6 +9,7 @@ import {
 } from "../../game/cards/layout/rectangle/RectCard";
 import { WORLD_HEX_RADIUS } from "../../game/world/hexSize";
 import type { CardDefinition } from "../../game/definitions/DefinitionManager";
+import { cardSpriteUrlFor } from "../objectUrls";
 
 /**
  * Hex bake radius. Set to the largest hex display radius (world hex
@@ -42,6 +43,13 @@ export class CardTextureManager {
 
   private readonly rectCache = new Map<number, Texture>();
   private readonly hexCache  = new Map<number, Texture>();
+  /** Card-art atlas cache. Keyed by the sprite basename passed to
+   *  [`getCardArt`]. One entry per *sprite filename*, independent of
+   *  which definitions reference it — sixteen soul portraits share
+   *  the cache space of sixteen textures regardless of how many soul
+   *  cards exist. Pairs with the per-def `hexCache` / `rectCache`
+   *  bakes: the background is keyed per def, the art per filename. */
+  private readonly artCache = new Map<string, Texture>();
 
   private readonly rectVisual = new RectCardVisual();
   private readonly hexVisual  = new HexCardVisual(HEX_BAKE_RADIUS);
@@ -67,7 +75,14 @@ export class CardTextureManager {
 
   /** Packed atlas texture for a hex card definition. Bakes on first
    *  request and caches. A `null` definition produces a fallback-styled
-   *  hex (handled by HexCardVisual) — used for empty world tiles. */
+   *  hex (handled by HexCardVisual) — used for empty world tiles.
+   *
+   *  The bake includes only the hex *background* (fill + outline); per-
+   *  definition art is fetched separately via [`getCardArt`] and
+   *  layered on top by the caller (`LayoutHexCard`). That split keeps
+   *  the cache size linear when a single def can carry many art
+   *  variants (e.g. soul cards with 16 portraits — see
+   *  `content/cards/flags.json` → `cards.portrait_id`). */
   getHex(definition: CardDefinition | null): Texture {
     const key = hexKey(definition);
     let tex = this.hexCache.get(key);
@@ -78,11 +93,36 @@ export class CardTextureManager {
     return tex;
   }
 
+  /** Atlas-packed texture for a card-art sprite, addressed by the
+   *  basename of its PNG (with or without `.png`, e.g.
+   *  `"128_requisite_8"`). Resolves the basename to a bundled URL via
+   *  [`cardSpriteUrlFor`], packs the source texture into the shared
+   *  atlas on first request, and caches the result forever.
+   *
+   *  Returns `null` until the underlying PNG has been loaded into
+   *  `Assets`. `main.ts` preloads every card-sprite URL at boot, so
+   *  in practice callers see a hit immediately after init — the
+   *  `null` branch only matters for assets added at runtime or for
+   *  the (rare) frame between an unknown name landing and the asset
+   *  registry warming. */
+  getCardArt(name: string): Texture | null {
+    const cached = this.artCache.get(name);
+    if (cached) return cached;
+    const url = cardSpriteUrlFor(name);
+    if (!url) return null;
+    const src = Assets.get<Texture>(url);
+    if (!src) return null;
+    const packed = this.textures.pack(src);
+    this.artCache.set(name, packed);
+    return packed;
+  }
+
   destroy(): void {
     this.rectVisual.destroy();
     this.hexVisual.destroy();
     this.rectCache.clear();
     this.hexCache.clear();
+    this.artCache.clear();
   }
 
   private bakeRect(def: CardDefinition | null, pos: RectCardTitlePosition): Texture {

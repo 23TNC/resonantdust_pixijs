@@ -12,7 +12,7 @@ import {
   STACKED_SLOT,
 } from "../cards/cardData";
 import { WORLD_LAYER } from "../../server/data/packing";
-import { getZoneTileDef } from "../world/worldCoords";
+import { getZoneTileSlot } from "../world/worldCoords";
 
 /** Defensive cap on the phase loop. Each iteration that finds a match
  *  adds at least one card to the in-pass held set, which is bounded by
@@ -161,6 +161,13 @@ export class ActionManager {
 
     this.unsubStackChange = ctx.cards.subscribeAllStackChanges((rootId) => {
       this.evaluateRoot(rootId);
+      // When the soul's own chain changes (equipment), recipes anchored
+      // at OTHER chains owned by the same soul may transition between
+      // unmatched and matched (their has-predicates depend on the
+      // soul's stack via `topStackDefs`). Fan out to those chains so a
+      // newly-equipped axe causes corpus-on-tree to start chopping
+      // without needing a separate user action.
+      this.cascadeFromSoulChange(rootId);
     });
 
     // Cards leaving cardsLocal (server delete or scope teardown) need to
@@ -260,15 +267,27 @@ export class ActionManager {
     //     that path will need its own handling.
     let hexParentId = 0;
     let hexDef = 0;
+    // Stock counters for the hex tile, when the chain sits on a
+    // synthetic-tile hex. The matcher uses them to evaluate
+    // `Entity::Aspect` predicates against row-mutable values (forest
+    // pine, mountain stone, etc.) rather than the def's static
+    // aspects — see [docs/TILE_ASPECTS.md] § "Recipe matching".
+    // `null` when the chain has no tile-hex tier (inventory chains)
+    // or when the hex came from a Card row (no row stocks).
+    let hexStocks: { stock0: number; stock1: number } | null = null;
     if (isVirtualWorldHexRoot) {
       const localQ = (rootRow.microZone >> 5) & 0x7;
       const localR = (rootRow.microZone >> 2) & 0x7;
-      hexDef = getZoneTileDef(
+      const slot = getZoneTileSlot(
         this.ctx.data.zonesLocal,
         rootRow.macroZone,
         localQ,
         localR,
       );
+      hexDef = slot.packed;
+      if (hexDef !== 0) {
+        hexStocks = { stock0: slot.stock0, stock1: slot.stock1 };
+      }
     }
     const rootDef = rootRow.packedDefinition;
 
@@ -295,7 +314,7 @@ export class ActionManager {
         if (this.tryMatch({
           subChainCards: top.firstSubChain,
           fullChain: topChain,
-          rootCard: looseRoot, rootDef, hexDef, hexParentId,
+          rootCard: looseRoot, rootDef, hexDef, hexStocks, hexParentId,
           looseRootId, direction: "up", rootless: false,
           inPassHeld, wanted,
         })) continue phaseLoop;
@@ -304,7 +323,7 @@ export class ActionManager {
         if (this.tryMatch({
           subChainCards: bot.firstSubChain,
           fullChain: botChain,
-          rootCard: looseRoot, rootDef, hexDef, hexParentId,
+          rootCard: looseRoot, rootDef, hexDef, hexStocks, hexParentId,
           looseRootId, direction: "down", rootless: false,
           inPassHeld, wanted,
         })) continue phaseLoop;
@@ -327,7 +346,7 @@ export class ActionManager {
         if (this.tryMatch({
           subChainCards: topFirst,
           fullChain: topChain,
-          rootCard: looseRoot, rootDef, hexDef, hexParentId,
+          rootCard: looseRoot, rootDef, hexDef, hexStocks, hexParentId,
           looseRootId, direction: "up", rootless: true,
           inPassHeld, wanted,
         })) continue phaseLoop;
@@ -335,7 +354,7 @@ export class ActionManager {
         if (this.tryMatch({
           subChainCards: botFirst,
           fullChain: botChain,
-          rootCard: looseRoot, rootDef, hexDef, hexParentId,
+          rootCard: looseRoot, rootDef, hexDef, hexStocks, hexParentId,
           looseRootId, direction: "down", rootless: true,
           inPassHeld, wanted,
         })) continue phaseLoop;
@@ -353,7 +372,7 @@ export class ActionManager {
           if (this.tryMatch({
             subChainCards: topSub,
             fullChain: topChain,
-            rootCard: looseRoot, rootDef, hexDef, hexParentId,
+            rootCard: looseRoot, rootDef, hexDef, hexStocks, hexParentId,
             looseRootId, direction: "up", rootless: false,
             inPassHeld, wanted,
           })) continue phaseLoop;
@@ -363,7 +382,7 @@ export class ActionManager {
           if (this.tryMatch({
             subChainCards: botSub,
             fullChain: botChain,
-            rootCard: looseRoot, rootDef, hexDef, hexParentId,
+            rootCard: looseRoot, rootDef, hexDef, hexStocks, hexParentId,
             looseRootId, direction: "down", rootless: false,
             inPassHeld, wanted,
           })) continue phaseLoop;
@@ -419,6 +438,7 @@ export class ActionManager {
     rootCard: Card;
     rootDef: number;
     hexDef: number;
+    hexStocks: { stock0: number; stock1: number } | null;
     hexParentId: number;
     looseRootId: number;
     direction: StackDirection;
@@ -427,7 +447,7 @@ export class ActionManager {
     wanted: Map<string, QueuedAction>;
   }): boolean {
     const {
-      subChainCards, fullChain, rootCard, rootDef, hexDef, hexParentId,
+      subChainCards, fullChain, rootCard, rootDef, hexDef, hexStocks, hexParentId,
       looseRootId, direction, rootless, inPassHeld, wanted,
     } = args;
 
@@ -459,6 +479,7 @@ export class ActionManager {
     const below = this.topStackDefs(soulId, STACK_DIRECTION_DOWN);
     const match = this.ctx.definitions.matchStackRecipe(
       hexDef,
+      hexStocks,
       matchRoot,
       slotDefs,
       direction,
@@ -759,6 +780,38 @@ export class ActionManager {
       cur = row.ownerId;
     }
     return 0;
+  }
+
+  /** When a stack-change event fires for a chain rooted at a soul, every
+   *  other chain owned by that soul also needs re-evaluation — recipe
+   *  has-predicates feed off `topStackDefs(soulId, …)`, so an equip /
+   *  unequip on the soul transitions those chains' matchability without
+   *  any structural change on the chains themselves. Iterate
+   *  `cardsLocal` and re-evaluate every other eligible loose root
+   *  (state-0 LOOSE or state-3 virtual world hex root) whose owning
+   *  soul resolves to `rootId`.
+   *
+   *  No-op when `rootId` isn't a soul. The soul walking itself on the
+   *  world also fires this path; the fan-out is harmless — chains that
+   *  don't match cheap-out in `evaluateRoot`'s phase loop. */
+  private cascadeFromSoulChange(rootId: number): void {
+    const FLAG_OWNED_BY_PLAYER = 1 << 20;
+    const rootRow = this.ctx.data.cardsLocal.get(rootId);
+    if (!rootRow) return;
+    if ((rootRow.flags & FLAG_OWNED_BY_PLAYER) === 0) return;
+
+    for (const row of this.ctx.data.cardsLocal.values()) {
+      if (row.cardId === rootId) continue;
+      const state = getStackedState(row.microZone);
+      const isLoose = state === STACKED_LOOSE;
+      const isVirtualWorldHexRoot =
+        state === STACKED_ON_HEX &&
+        row.microLocation === 0 &&
+        row.surface >= WORLD_LAYER;
+      if (!isLoose && !isVirtualWorldHexRoot) continue;
+      if (this.owningSoulCardId(row.cardId) !== rootId) continue;
+      this.evaluateRoot(row.cardId);
+    }
   }
 
   /** Packed defs of cards currently stacked on `soulId` in the given
