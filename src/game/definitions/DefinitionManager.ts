@@ -11,20 +11,31 @@
 
 import init, {
   aspectInfo as wasmAspectInfo,
+  aspectIdByName as wasmAspectIdByName,
   cardLabel as wasmCardLabel,
   decodeDefinition as wasmDecode,
   findPackedByKey as wasmFindPackedByKey,
-  findRecipeByKey as wasmFindRecipeByKey,
   isHexType as wasmIsHexType,
   cardFlagBit as wasmCardFlagBit,
   cardFlagFieldValue as wasmCardFlagFieldValue,
   cardTypeId as wasmCardTypeId,
-  matchMagneticRecipe as wasmMatchMagneticRecipe,
-  matchStackRecipe as wasmMatchStackRecipe,
+  recipeById as wasmRecipeById,
+  recipeByKey as wasmRecipeByKey,
+  recipesAll as wasmRecipesAll,
   starterPacksForSoul as wasmStarterPacksForSoul,
+  starterBlueprintsForSoul as wasmStarterBlueprintsForSoul,
+  blueprintById as wasmBlueprintById,
+  blueprintByKey as wasmBlueprintByKey,
+  allBlueprints as wasmAllBlueprints,
   traitValue as wasmTraitValue,
 } from "../../content/pkg/resonantdust_content";
-import type { StackMatch } from "../actions/ActionManager";
+import {
+  findRecipeMatch as findRecipeMatchInternal,
+  type CardRow as MatcherCardRow,
+  type MatchResult,
+  type Recipe,
+  type RecipeEntry,
+} from "../actions/recipeMatcher";
 
 /** Shape returned by `wasm_api::aspect_info`. Matches the Rust `Aspect` struct. */
 export interface AspectInfo {
@@ -63,6 +74,29 @@ export interface StarterPack {
   soul: string;
   packId: string;
   contents: readonly StarterPackItem[];
+}
+
+/** A blueprint catalog entry. Mirrors `Blueprint` from the content
+ *  crate. Two card references: `blueprint*` is the card the UI draws
+ *  when the blueprint is discovered (wrench panel, character-create
+ *  preview); `card*` is the output card produced when the blueprint
+ *  is built in-world (may be folded into a different schema later). */
+export interface Blueprint {
+  /** Stable u16 id from `blueprints/id.json`. */
+  id: number;
+  /** Blueprint key from the source JSON, e.g. `"nd_furnace"`. */
+  key: string;
+  /** Blueprint-card key from the JSON body's `blueprint` field. */
+  blueprintKey: string;
+  /** `packedDefinition` for `blueprintKey` — feed to
+   *  `decodeDefinition` / `cardLabel` for the discovered-blueprint
+   *  card visual. */
+  blueprintPackedDefinition: number;
+  /** Output-card key from the JSON body's `card` field. */
+  cardKey: string;
+  /** `packedDefinition` for `cardKey` — the card produced by
+   *  building this blueprint. */
+  cardPackedDefinition: number;
 }
 
 /** One row-mutable aspect slot on a `CardDefinition`. Mirrors
@@ -127,31 +161,6 @@ export interface CardDefinition {
    *  See [docs/TILE_ASPECTS.md] for the row-mutable / static aspect
    *  split. */
   stock: readonly StockSlot[];
-}
-
-/** Compact view of a recipe returned by `findRecipeByKey`. Matches
- *  the `RecipeBrief` shape on the wasm side. */
-export interface RecipeBrief {
-  /** Packed recipe id — pass to `proposeAction` as `recipeId`. */
-  recipeIndex: number;
-  /** `"stack" | "magnetic" | "on_create"`. */
-  recipeType: "stack" | "magnetic" | "on_create";
-  /** `0 = up, 1 = down`. Meaningful for `stack` and `magnetic`;
-   *  always `0` for `on_create`. */
-  direction: number;
-  slotCount: number;
-  hasRoot: boolean;
-  hasHex: boolean;
-}
-
-/** Shape returned by `matchMagneticRecipe` — same as `StackMatch` on
- *  the stack-matcher side, just for magnetic recipes. */
-export interface MagneticMatch {
-  recipeIndex: number;
-  slotStart: number;
-  slotCount: number;
-  hasRoot: boolean;
-  hasHex: boolean;
 }
 
 let initialized = false;
@@ -246,6 +255,27 @@ export class DefinitionManager {
     return wasmCardFlagFieldValue(flags, name);
   }
 
+  /** Merged "is slot held?" — server's `slot_hold` OR the client-only
+   *  `predict_slot_hold` that `ActionManager` sets between proposeAction
+   *  dispatch and the round-trip response. Consumers asking "should
+   *  I treat this card as committed?" (death-animation deferral,
+   *  in-flight skip, lifecycle held-set seed, etc.) use this so the
+   *  prediction window is invisible at the read site. */
+  isSlotHeld(flags: number): boolean {
+    return (
+      this.hasCardFlag(flags, "slot_hold") ||
+      this.hasCardFlag(flags, "predict_slot_hold")
+    );
+  }
+
+  /** Merged "is position held?" — `position_hold_count > 0` OR the
+   *  client-only `predict_position_hold`. Counterpart to
+   *  `isSlotHeld`; same lifecycle on the prediction bit. */
+  isPositionHeld(flags: number): boolean {
+    const count = this.cardFlagFieldValue(flags, "position_hold_count") ?? 0;
+    return count > 0 || this.hasCardFlag(flags, "predict_position_hold");
+  }
+
   /** Look up a `card_type` id by name (e.g. `"mini_zone"`, `"soul"`).
    *  Returns `undefined` for unknown names. Source of truth is
    *  `content/cards/types.json`. Used to branch on card type
@@ -275,114 +305,103 @@ export class DefinitionManager {
     return def !== null && def.cardType === typeId;
   }
 
-  /** Find the best-matching `Stack(direction)` recipe for a chain.
-   *  `hexDef` is the packed definition of the hex card the chain root
-   *  is attached to (`0` if not stacked on hex). `rootDef` is the
-   *  loose root's packed definition. `slotDefs` are the packed
-   *  definitions of cards stacked in `direction` ("up" or "down") from
-   *  the root, in chain order.
-   *
-   *  `hasCandidates.{root,actor}{Above,Below}` are the packed defs of
-   *  cards currently on each role's soul stack in each direction —
-   *  feeds the `has` / `reagents.has` / `has_below` predicate filter.
-   *  An empty array for a pool means "nothing on that soul stack in
-   *  that direction": recipes whose has-predicates require a card
-   *  there will be filtered out. Pass `{}` (all pools empty) to
-   *  disable the predicate filter for callers that don't care (e.g.
-   *  recipe matching against synthetic-hex-only chains).
-   *
-   *  Returns a `StackMatch` describing the match (including the slot
-   *  window for actor sliding) or `null` if no recipe matched. */
-  matchStackRecipe(
-    hexDef: number,
-    /** Per-tile stock counters for the hex tile this chain sits on,
-     *  or `null` when the hex came from a Card row (no row-mutable
-     *  stock — falls back to the def's static `aspects`). Two u2
-     *  values matching the tile bit layout
-     *  `[def_id:u12 | stock0:u2 | stock1:u2]`. */
-    hexStocks: { stock0: number; stock1: number } | null,
-    rootDef: number,
-    slotDefs: readonly number[],
-    direction: "up" | "down",
-    hasCandidates?: {
-      rootAbove?: readonly number[];
-      actorAbove?: readonly number[];
-      rootBelow?: readonly number[];
-      actorBelow?: readonly number[];
-    },
-  ): StackMatch | null {
-    const dirCode = direction === "up" ? 0 : 1;
-    const rootAbove = new Uint16Array(hasCandidates?.rootAbove ?? []);
-    const actorAbove = new Uint16Array(hasCandidates?.actorAbove ?? []);
-    const rootBelow = new Uint16Array(hasCandidates?.rootBelow ?? []);
-    const actorBelow = new Uint16Array(hasCandidates?.actorBelow ?? []);
-    const stock0 = hexStocks?.stock0 ?? 0;
-    const stock1 = hexStocks?.stock1 ?? 0;
-    const hasStocks = hexStocks === null ? 0 : 1;
-    const raw = wasmMatchStackRecipe(
-      hexDef,
-      stock0,
-      stock1,
-      hasStocks,
-      rootDef,
-      new Uint16Array(slotDefs),
-      dirCode,
-      rootAbove,
-      actorAbove,
-      rootBelow,
-      actorBelow,
-    ) as unknown;
-    return raw === null ? null : (raw as StackMatch);
+  // ---------- Tape-form recipe API -----
+
+  /** Cached recipe catalog — lazy-loaded on first access via
+   *  `recipesAll()`. The wasm registry is build-once-at-init, so
+   *  invalidation isn't a concern: one fetch per process. */
+  private cachedRecipes: RecipeEntry[] | null = null;
+
+  /** Look up a recipe by its stable u16 id (the value `proposeAction`
+   *  takes as `recipeId`). Returns the full Recipe IR
+   *  (`{ id, input, output, iterators, anchors }`) or `null` for an
+   *  unregistered id. */
+  recipeById(id: number): Recipe | null {
+    const raw = wasmRecipeById(id);
+    return raw === null ? null : (raw as Recipe);
   }
 
-  /** Look up a recipe by its tree-key (e.g. `"despair_success"`).
-   *  Returns a compact `RecipeBrief` (packed id, type, direction,
-   *  slot count) or `null` if no recipe exists with that key.
-   *
-   *  Used by `LifecycleResolutionManager` to resolve a magnetic card
-   *  def's `lifecycleRecipeKey` into the data needed to drive a
-   *  `proposeAction` call. */
-  findRecipeByKey(key: string): RecipeBrief | null {
-    const raw = wasmFindRecipeByKey(key);
-    return raw === null ? null : (raw as RecipeBrief);
+  /** Look up a recipe by its source-key (e.g. `"cut_tree"`).
+   *  Returns the full Recipe IR or `null` if no recipe is registered
+   *  under that key. */
+  recipeByKey(key: string): Recipe | null {
+    const raw = wasmRecipeByKey(key);
+    return raw === null ? null : (raw as Recipe);
   }
 
-  /** Try a single-shot match against the magnetic recipe declared by
-   *  `rootDef`'s magnetic key. `slotDefs` must list packed
-   *  definitions in the recipe's declared slot order. Returns a
-   *  `MagneticMatch` on hit or `null` if predicates fail / the root
-   *  isn't magnetic / direction mismatch.
+  /** Every registered recipe in priority-tiered order (highest
+   *  priority first — see `AnchorSet::priority_key`). Cached on
+   *  first call. */
+  recipesAll(): RecipeEntry[] {
+    if (this.cachedRecipes === null) {
+      this.cachedRecipes = wasmRecipesAll() as RecipeEntry[];
+    }
+    return this.cachedRecipes;
+  }
+
+  /** Try to match the player's chain configuration against the
+   *  recipe catalog. Returns the highest-priority recipe whose
+   *  `input` predicates are satisfied, plus the per-iterator
+   *  bindings for `proposeAction`. `null` when no recipe matches.
    *
-   *  Use this to validate a candidate `(root, slots)` combination
-   *  before submitting a `proposeAction` — failures here would also
-   *  be rejected server-side, but client-side pre-check avoids the
-   *  reducer call and surfaces a friendlier error path. */
-  matchMagneticRecipe(
-    rootDef: number,
-    slotDefs: readonly number[],
-    direction: "up" | "down",
-    hasCandidates?: {
-      rootAbove?: readonly number[];
-      actorAbove?: readonly number[];
-      rootBelow?: readonly number[];
-      actorBelow?: readonly number[];
-    },
-  ): MagneticMatch | null {
-    const dirCode = direction === "up" ? 0 : 1;
-    const rootAbove = new Uint16Array(hasCandidates?.rootAbove ?? []);
-    const actorAbove = new Uint16Array(hasCandidates?.actorAbove ?? []);
-    const rootBelow = new Uint16Array(hasCandidates?.rootBelow ?? []);
-    const actorBelow = new Uint16Array(hasCandidates?.actorBelow ?? []);
-    const raw = wasmMatchMagneticRecipe(
-      rootDef,
-      new Uint16Array(slotDefs),
-      dirCode,
-      rootAbove,
-      actorAbove,
-      rootBelow,
-      actorBelow,
-    ) as unknown;
-    return raw === null ? null : (raw as MagneticMatch);
+   *  The caller supplies a card lookup closure (typically wired to
+   *  `data.cardsLocal.get(...)`) so the matcher can resolve
+   *  `.owner` / `.parent` traversals in path expressions. */
+  findRecipeMatch(input: {
+    root: number;
+    branches: number[][];
+    cardLookup(id: number): MatcherCardRow | null;
+    /** Synthetic tile under the root, when applicable. Wire `null`
+     *  for inventory chains; pass `{ packedDef, stock0, stock1 }`
+     *  when the root sits on a world-surface tile with no card
+     *  backing it. The matcher uses this to evaluate `slot.0.0.*`
+     *  predicates against tile data instead of a card. */
+    syntheticTile?: {
+      packedDef: number;
+      stock0: number;
+      stock1: number;
+    } | null;
+    /** Walk a card's chain in the given direction. Used by the
+     *  matcher to resolve nested iterators (equipment-stack
+     *  references like `slot.1.0.owner.slot.1.0`). Typically wired
+     *  to `cards.buildChain(parentId, direction).map(c => c.cardId)`. */
+    branchWalker?(parentId: number, direction: number): readonly number[];
+  }): MatchResult | null {
+    return findRecipeMatchInternal(
+      {
+        root: input.root,
+        branches: input.branches,
+        cardLookup: input.cardLookup,
+        cardDefinitionLookup: (packedDef: number) => {
+          const def = this.decode(packedDef);
+          return def === null
+            ? null
+            : { key: def.key, aspects: def.aspects, stock: def.stock };
+        },
+        aspectIdByName: (name: string) => {
+          const id = wasmAspectIdByName(name);
+          return id === undefined ? null : id;
+        },
+        aspectParent: (id: number) => {
+          const info = wasmAspectInfo(id);
+          return info === null
+            ? null
+            : (info as { parent: number | null }).parent;
+        },
+        syntheticTile: input.syntheticTile ?? null,
+        branchWalker:
+          input.branchWalker ?? (() => [] as readonly number[]),
+      },
+      this.recipesAll(),
+    );
+  }
+
+  /** Look up an aspect's numeric id by its declared name. Returns
+   *  `null` for unknown names. Mirrors
+   *  `wasm_api::aspect_id_by_name`. */
+  aspectIdByName(name: string): number | null {
+    const id = wasmAspectIdByName(name);
+    return id === undefined ? null : id;
   }
 
   /** All starter packs registered for the given soul card key
@@ -392,6 +411,36 @@ export class DefinitionManager {
   starterPacksForSoul(soul: string): StarterPack[] {
     const raw = wasmStarterPacksForSoul(soul) as unknown;
     return raw as StarterPack[];
+  }
+
+  /** Stable blueprint ids granted to a player creating a character of
+   *  the given soul (sourced from the soul's `"blueprints"` array in
+   *  `starter_packs/data/*.json`). Resolve each id to a `Blueprint`
+   *  via `blueprintById`. Empty array when the soul declares none. */
+  starterBlueprintsForSoul(soul: string): number[] {
+    const raw = wasmStarterBlueprintsForSoul(soul) as unknown;
+    return Array.from(raw as ArrayLike<number>);
+  }
+
+  /** Look up a blueprint by its stable u16 id. `null` for unknown
+   *  ids and for `BLUEPRINT_NONE` (id 0). */
+  blueprintById(id: number): Blueprint | null {
+    const raw = wasmBlueprintById(id) as unknown;
+    return raw === null || raw === undefined ? null : (raw as Blueprint);
+  }
+
+  /** Look up a blueprint by its source-key (e.g. `"nd_furnace"`).
+   *  `null` if no blueprint with that key is registered. */
+  blueprintByKey(key: string): Blueprint | null {
+    const raw = wasmBlueprintByKey(key) as unknown;
+    return raw === null || raw === undefined ? null : (raw as Blueprint);
+  }
+
+  /** Every registered blueprint in stable-id order. Used by the
+   *  wrench panel to enumerate the catalog for display. */
+  allBlueprints(): Blueprint[] {
+    const raw = wasmAllBlueprints() as unknown;
+    return raw as Blueprint[];
   }
 
   /** Static unpack of a `packedDefinition` u16. Bit layout matches

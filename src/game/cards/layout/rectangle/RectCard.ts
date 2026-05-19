@@ -20,7 +20,8 @@ import { WORLD_HEX_RADIUS } from "../../../world/hexSize";
 import { GameCard } from "../../game/CardGame";
 import { LayoutCard } from "../CardLayout";
 import { RectCardVisual } from "./RectVisual";
-import { unpackMacroZone } from "../../../../server/data/packing";
+import { unpackMacroZone, WORLD_LAYER } from "../../../../server/data/packing";
+import { debug } from "../../../../debug";
 
 const DEATH_SPEED = 0.04;
 
@@ -300,6 +301,7 @@ export class LayoutRectCard extends LayoutCard {
   private chainDeltaY = 0;
   private unsubObjectLoad: (() => void) | null = null;
   private unsubTileChange: (() => void) | null = null;
+  private unsubArtLoad: (() => void) | null = null;
 
   constructor(cardId: number, ctx: GameContext) {
     super(cardId, ctx);
@@ -392,6 +394,20 @@ export class LayoutRectCard extends LayoutCard {
         this.refreshObjectOverlay(this.overlayQ, this.overlayR, this.overlayOffsetX, this.overlayOffsetY);
       }
     }) ?? null;
+
+    // Re-apply card art whenever a sprite finishes lazy-loading. A
+    // card whose def references a sprite outside `corePreloadUrls`
+    // gets `null` from `getCardArt` on the first frame and hides the
+    // art layer; the load completes asynchronously and fires
+    // `onArtLoad`, at which point we re-resolve. The listener is a
+    // broadcast (no per-name filter) — re-running `applyCardArt`
+    // hits the cache for sprites we've already resolved, and the
+    // per-card cost is one Map lookup. Marks the layout dirty so the
+    // next layout pass picks up the new texture (`layout()` calls
+    // `applyCardArt(def)` itself).
+    this.unsubArtLoad = ctx.cardTextures.onArtLoad(() => {
+      this.invalidate();
+    });
   }
 
   setTitlePosition(position: RectCardTitlePosition): void {
@@ -422,7 +438,23 @@ export class LayoutRectCard extends LayoutCard {
     // that transition; `this.dying` guards re-entry, and once we write back
     // `dead: 2` (in the layout completion branch) the mirror preserves the
     // 2 across further pushes so we don't replay.
-    if ((row as LocalCard).dead === 1 && !this.dying) {
+    //
+    // Deferral on `slot_hold`: if the dead row ALSO carries slot_hold,
+    // a concurrent recipe is still holding this card. Forward-prop
+    // layered slot_hold onto the death row from a later chain_stitch
+    // (e.g. a task claimed a fleeting card whose lifecycle had
+    // pre-scheduled its death). The holding recipe's
+    // `action_completion` will eventually write a new row clearing
+    // slot_hold, mirrored back to the client — applyData re-runs and
+    // the condition becomes true. Until then we sit in "pending
+    // death" visually alive, so the player sees the card live
+    // through the recipe rather than dying mid-task.
+    // `isSlotHeld` unions `slot_hold` with the client-only
+    // `predict_slot_hold` set by `ActionManager` during the propose
+    // round-trip — covers the window where the server's slot_hold
+    // hasn't arrived yet but we've already committed to a recipe.
+    const slotHeld = this.ctx.definitions.isSlotHeld(row.flags);
+    if ((row as LocalCard).dead === 1 && !this.dying && !slotHeld) {
       this.dying = true;
       this.deathProgress = 0;
       this.visual.mask = this.deathMask;
@@ -434,9 +466,28 @@ export class LayoutRectCard extends LayoutCard {
 
     if (stacked === STACKED_LOOSE) {
       this.setTitlePosition("top");
-      const { x, y } = decodeLooseXY(row.microLocation);
-      this.setTarget(x, y);
-      this.clearObjectOverlay();
+      if (row.surface >= WORLD_LAYER) {
+        // LOOSE on a world surface — the hex address lives in
+        // `macroZone` (chunk q/r) + `microZone` (local q/r bit
+        // fields, bits 2..=7 since state=Free zeros the low 2 bits).
+        // `microLocation` is unused here (it's 0). Position the
+        // card's centre on the hex centre (subtract half-w/h to
+        // place the top-left corner) so the soul / loose world card
+        // visually sits on its tile rather than top-left-anchored.
+        const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
+        const q = zoneQ + ((row.microZone >> 5) & 0x7);
+        const r = zoneR + ((row.microZone >> 2) & 0x7);
+        const x = WORLD_HEX_RADIUS * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r);
+        const y = WORLD_HEX_RADIUS * (3 / 2 * r);
+        this.setTarget(x - RECT_CARD_WIDTH / 2, y - RECT_CARD_HEIGHT / 2);
+        if (q !== this.overlayQ || r !== this.overlayR) {
+          this.refreshObjectOverlay(q, r);
+        }
+      } else {
+        const { x, y } = decodeLooseXY(row.microLocation);
+        this.setTarget(x, y);
+        this.clearObjectOverlay();
+      }
     } else if (stacked === STACKED_ON_ROOT || stacked === STACKED_SLOT) {
       // Both modes draw at the same offset from the parent — Pixi
       // parent-child does the heavy lifting via `Card.stackParentOf`,
@@ -698,9 +749,11 @@ export class LayoutRectCard extends LayoutCard {
         this.visual.mask = null;
         this.deathMask.clear();
         this.deathParticleHandle?.stop();
+        debug.log(["splice"], `[splice] death-anim hit progress>=1 card=${this.cardId}`, 0);
       }
 
       if (this.deathProgress >= 4) {
+        debug.log(["splice"], `[splice] death-anim complete card=${this.cardId} progress=${this.deathProgress.toFixed(2)} — about to splice`, 0);
         this.dying = false;
         this.unsubDying?.();
         this.unsubDying = null;
@@ -713,20 +766,35 @@ export class LayoutRectCard extends LayoutCard {
           this.deathParticleContainer = null;
         }
 
-        // Mark the local row as "animation complete" BEFORE splice runs.
-        // Splice's chain-walking via `stackParentOf` filters out
-        // `dead === 2` cards so this dying row doesn't show up as a
-        // sibling candidate for any survivor's parent lookup. Writing
-        // dead=2 first also means the splice doesn't have to detach
-        // the dying card to a loose 0,0 position — keeping it in
-        // place avoids InventoryGame.tryPush kicking it across the
-        // board before the server reaps. The mirror preserves
-        // `dead: 2` even when the server row still carries
-        // FLAG_ACTION_DEAD, so we don't replay this branch on the
-        // next push.
-        const cur = this.ctx.data.cardsLocal.get(this.cardId);
-        if (cur) this.ctx.data.setLocalCard(this.cardId, { ...cur, dead: 2 });
+        // Order matters: splice FIRST, then mark dead=2.
+        //
+        // `CardManager.subscribeLocalCard` listens for the
+        // dead===1→dead===2 transition and immediately destroys the
+        // Card composite (removes from `cards` map, tears down PIXI
+        // containers). If we wrote dead=2 first, that destroy would
+        // synchronously fire before our spliceCard call returned,
+        // and `spliceCard`'s `this.cards.get(cardId)` lookup would
+        // return undefined → silent early-out, no chain repair.
+        //
+        // Splice itself doesn't need dead=2 to be set on the dying
+        // card's row: it operates on the dying card's known position
+        // fields (microZone / microLocation) and re-parents children
+        // via fresh local-row writes. The downstream filter in
+        // `Card.stackParentOf` that skips `dead === 2` siblings
+        // applies to survivors looking *back* at the dying row —
+        // that filter does need dead=2 eventually, but only on the
+        // NEXT chain walk, which happens after we write dead=2 below.
         this.ctx.cards?.spliceCard(this.cardId);
+        const cur = this.ctx.data.cardsLocal.get(this.cardId);
+        if (cur) {
+          // setLocalCard fires listeners synchronously — the dead===1→2
+          // transition triggers CardManager.destroy → layoutCard.destroy,
+          // which nulls our PIXI container.position. Bail before tweenTo
+          // tries to write through it.
+          this.ctx.data.setLocalCard(this.cardId, { ...cur, dead: 2 });
+          return false;
+        }
+        debug.log(["splice"], `[splice] WARN card=${this.cardId} no local row, cannot set dead=2`, 0);
       }
     }
 
@@ -994,6 +1062,8 @@ export class LayoutRectCard extends LayoutCard {
     this.unsubObjectLoad = null;
     this.unsubTileChange?.();
     this.unsubTileChange = null;
+    this.unsubArtLoad?.();
+    this.unsubArtLoad = null;
     if (this.overlaySprite) {
       this.overlaySprite.destroy();
       this.overlaySprite = null;

@@ -5,7 +5,7 @@ import { TextureManager } from "./assets/textures/TextureManager";
 import { CardTextureManager } from "./assets/textures/CardTextureManager";
 import { ObjectTextureManager } from "./assets/textures/ObjectTextureManager";
 import { ObjectManager } from "./assets/ObjectManager";
-import { allCardSpriteUrls } from "./assets/objectUrls";
+import { corePreloadUrls } from "./assets/objectUrls";
 import { initTextures } from "./game/definitions/TextureRegistry";
 import { loadFonts } from "./assets/fonts";
 import { DefinitionManager, initDefinitions } from "./game/definitions/DefinitionManager";
@@ -76,16 +76,17 @@ async function main(): Promise<Runtime> {
   // canvas-based Text caches a fallback-font rasterisation and never
   // re-renders.
   //
-  // The card-sprite pre-warm just runs `Assets.load` against every
-  // PNG under `public/textures/cards/`; that way `applySprite`'s
-  // `Assets.get(url)` calls resolve synchronously and a freshly drawn
-  // rect / hex card shows its sprite on the first frame instead of
-  // popping in after an async load. Bundle impact is bounded by the
-  // glob in `objectUrls.ts` (cards-only).
+  // The card-sprite pre-warm runs `Assets.load` against the
+  // first-frame-visible slice of card sprites (everything outside
+  // `/textures/cards/tiles/`); the lazy slice (tile art) loads on
+  // first reference via `CardTextureManager.getCardArt`, which
+  // dedupes in-flight loads and fires `onArtLoad` so cards that
+  // hit the null branch can re-resolve. See [`corePreloadUrls`]
+  // for the policy.
   await Promise.all([
     initDefinitions(),
     loadFonts(),
-    Assets.load([...allCardSpriteUrls()]),
+    Assets.load([...corePreloadUrls()]),
   ]);
 
   // TextureRegistry reads its data from the wasm content crate, so it

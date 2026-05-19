@@ -14,6 +14,7 @@ export type {
   Player,
   PlayerProfile,
   Soul,
+  SoulPrivate,
   TilePoint,
   Zone,
 } from "./shard/types";

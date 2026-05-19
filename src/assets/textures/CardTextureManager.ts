@@ -1,4 +1,4 @@
-import { Assets, Container, RenderTexture, type Renderer, type Texture } from "pixi.js";
+import { Assets, Container, Graphics, Rectangle, RenderTexture, Texture, type Renderer } from "pixi.js";
 import type { TextureManager } from "./TextureManager";
 import { RectCardVisual } from "../../game/cards/layout/rectangle/RectVisual";
 import { HexCardVisual } from "../../game/cards/layout/hexagon/HexVisual";
@@ -18,6 +18,15 @@ import { cardSpriteUrlFor } from "../objectUrls";
  * scale down from this, which stays crisp.
  */
 const HEX_BAKE_RADIUS = WORLD_HEX_RADIUS;
+
+/**
+ * Transparent border baked around every card texture before atlas
+ * packing. Reserves space between adjacent atlas slots so neighbouring
+ * card pixels can't bleed into ours under bilinear sampling. The
+ * returned Texture's frame still reports the un-padded content size,
+ * so callers are unaffected.
+ */
+const BAKE_PADDING = 2;
 
 /**
  * Bakes and caches card textures into a shared TextureManager atlas.
@@ -43,6 +52,11 @@ export class CardTextureManager {
 
   private readonly rectCache = new Map<number, Texture>();
   private readonly hexCache  = new Map<number, Texture>();
+  /** Single-entry cache for the blank-rect texture — a rect card body
+   *  with outline but no title bar and no label. Used by callers
+   *  (today: `WrenchPanel`) that want the rect-card silhouette as a
+   *  placeholder for slots without a resolved card definition. */
+  private blankRectCache: Texture | null = null;
   /** Card-art atlas cache. Keyed by the sprite basename passed to
    *  [`getCardArt`]. One entry per *sprite filename*, independent of
    *  which definitions reference it — sixteen soul portraits share
@@ -50,6 +64,18 @@ export class CardTextureManager {
    *  cards exist. Pairs with the per-def `hexCache` / `rectCache`
    *  bakes: the background is keyed per def, the art per filename. */
   private readonly artCache = new Map<string, Texture>();
+  /** Sprite basenames currently in the middle of an async
+   *  `Assets.load` call. Deduplicates concurrent `getCardArt` requests
+   *  for the same name so we don't trigger the same network fetch N
+   *  times when many cards spawn at once referencing a not-yet-loaded
+   *  sprite. Cleared once the load resolves and the result is packed
+   *  into [`artCache`]. */
+  private readonly artLoading = new Set<string>();
+  /** Subscribers to `onArtLoad`. Fired once per sprite as soon as its
+   *  texture lands in [`artCache`], so cards that hit the `null`
+   *  branch on first request can re-sync without polling. Mirror of
+   *  `ObjectTextureManager.onLoad`. */
+  private readonly artLoadListeners = new Set<() => void>();
 
   private readonly rectVisual = new RectCardVisual();
   private readonly hexVisual  = new HexCardVisual(HEX_BAKE_RADIUS);
@@ -62,12 +88,24 @@ export class CardTextureManager {
   /** Packed atlas texture for a rect card definition + title position.
    *  Bakes on first request; top/bottom are cached separately. A
    *  `null` definition produces a fallback-styled card (handled by
-   *  RectCardVisual). */
-  getRect(definition: CardDefinition | null, titlePosition: RectCardTitlePosition): Texture {
+   *  RectCardVisual).
+   *
+   *  `label` is the display string baked into the title bar. Pass the
+   *  locale-resolved string here (e.g. via
+   *  `DefinitionManager.label(packed)`); when omitted, `RectCardVisual`
+   *  falls back to `def.key`, which is the dev-side identifier and
+   *  rarely the right thing to render. The label does not participate
+   *  in the cache key — first bake for a given `(def, pos)` wins —
+   *  so callers shouldn't mix label values for the same def. */
+  getRect(
+    definition: CardDefinition | null,
+    titlePosition: RectCardTitlePosition,
+    label?: string,
+  ): Texture {
     const key = rectKey(definition, titlePosition);
     let tex = this.rectCache.get(key);
     if (!tex) {
-      tex = this.bakeRect(definition, titlePosition);
+      tex = this.bakeRect(definition, titlePosition, label);
       this.rectCache.set(key, tex);
     }
     return tex;
@@ -93,28 +131,89 @@ export class CardTextureManager {
     return tex;
   }
 
+  /** Atlas-packed texture for a rect-card-shaped placeholder — body
+   *  fill + outline, no title bar, no label. Baked once on first call
+   *  and cached. Caller-visible dimensions are `RECT_CARD_WIDTH ×
+   *  RECT_CARD_HEIGHT` so it drops into the same Sprite slot as the
+   *  per-def `getRect` textures.
+   *
+   *  Used by `WrenchPanel` to render blueprint slots whose bit is
+   *  clear in the local soul's `blueprints_0` — unlocked slots swap
+   *  to a per-def texture from `getRect(def, "top")` instead, which
+   *  bakes the title bar + label. The visual contrast (presence vs
+   *  absence of a title) is the "discovered?" cue. */
+  getRectBlank(): Texture {
+    if (this.blankRectCache !== null) return this.blankRectCache;
+    // Body + outline only. Colors match the `FALLBACK_STYLE` background
+    // in `RectVisual` so a blank slot reads as a darker `?`-less
+    // variant of the fallback card.
+    const visual = new Graphics();
+    visual
+      .rect(0, 0, RECT_CARD_WIDTH, RECT_CARD_HEIGHT)
+      .fill({ color: 0x2a3340 });
+    visual
+      .rect(0, 0, RECT_CARD_WIDTH, RECT_CARD_HEIGHT)
+      .stroke({ color: 0x4a5566, width: 2 });
+    this.blankRectCache = this.renderAndPack(visual, RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
+    visual.destroy();
+    return this.blankRectCache;
+  }
+
   /** Atlas-packed texture for a card-art sprite, addressed by the
    *  basename of its PNG (with or without `.png`, e.g.
    *  `"128_requisite_8"`). Resolves the basename to a bundled URL via
    *  [`cardSpriteUrlFor`], packs the source texture into the shared
    *  atlas on first request, and caches the result forever.
    *
-   *  Returns `null` until the underlying PNG has been loaded into
-   *  `Assets`. `main.ts` preloads every card-sprite URL at boot, so
-   *  in practice callers see a hit immediately after init — the
-   *  `null` branch only matters for assets added at runtime or for
-   *  the (rare) frame between an unknown name landing and the asset
-   *  registry warming. */
+   *  Returns `null` when the PNG hasn't been loaded into `Assets`
+   *  yet. Two cases hit that branch:
+   *  - **Preloaded sprites** ([`corePreloadUrls`]): only `null` for
+   *    the rare frame between an unknown name landing and the
+   *    asset registry warming.
+   *  - **Lazy-loaded sprites** (everything outside the preload set,
+   *    e.g. tile art): `null` for as long as the PNG is in flight.
+   *    First miss triggers `Assets.load(url)`; the load is deduped
+   *    via [`artLoading`] so N concurrent callers share one fetch.
+   *    On resolution the texture is packed and cached, and every
+   *    [`onArtLoad`] subscriber fires so cards that skipped a frame
+   *    can re-render. */
   getCardArt(name: string): Texture | null {
     const cached = this.artCache.get(name);
     if (cached) return cached;
     const url = cardSpriteUrlFor(name);
     if (!url) return null;
     const src = Assets.get<Texture>(url);
-    if (!src) return null;
-    const packed = this.textures.pack(src);
-    this.artCache.set(name, packed);
-    return packed;
+    if (src) {
+      const packed = this.textures.pack(src);
+      this.artCache.set(name, packed);
+      return packed;
+    }
+    if (!this.artLoading.has(name)) {
+      this.artLoading.add(name);
+      void this.loadCardArt(name, url);
+    }
+    return null;
+  }
+
+  /** Subscribe to card-art load completions. Fires once per sprite
+   *  the moment its texture lands in [`artCache`] (whether triggered
+   *  by lazy `getCardArt` or by a future eager-load API), so cards
+   *  that hit the `null` branch on a previous `applyCardArt` call
+   *  can re-resolve without polling. Mirror of
+   *  `ObjectTextureManager.onLoad`. Returns an unsubscribe fn. */
+  onArtLoad(callback: () => void): () => void {
+    this.artLoadListeners.add(callback);
+    return () => this.artLoadListeners.delete(callback);
+  }
+
+  private async loadCardArt(name: string, url: string): Promise<void> {
+    try {
+      const tex = await Assets.load<Texture>(url);
+      this.artCache.set(name, this.textures.pack(tex));
+    } finally {
+      this.artLoading.delete(name);
+      for (const cb of [...this.artLoadListeners]) cb();
+    }
   }
 
   destroy(): void {
@@ -122,11 +221,18 @@ export class CardTextureManager {
     this.hexVisual.destroy();
     this.rectCache.clear();
     this.hexCache.clear();
+    this.blankRectCache = null;
     this.artCache.clear();
+    this.artLoading.clear();
+    this.artLoadListeners.clear();
   }
 
-  private bakeRect(def: CardDefinition | null, pos: RectCardTitlePosition): Texture {
-    this.rectVisual.draw(def, pos);
+  private bakeRect(
+    def: CardDefinition | null,
+    pos: RectCardTitlePosition,
+    label?: string,
+  ): Texture {
+    this.rectVisual.draw(def, pos, label);
     return this.renderAndPack(this.rectVisual, RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
   }
 
@@ -138,15 +244,29 @@ export class CardTextureManager {
   }
 
   /** Render a card visual into a temp RenderTexture sized to its
-   *  bounding box, hand it to TextureManager for atlas placement,
-   *  then destroy the temp. The returned Texture points into the
-   *  atlas — the temp source is no longer referenced. */
+   *  bounding box plus a transparent BAKE_PADDING border, hand it to
+   *  TextureManager for atlas placement, then destroy the temp. The
+   *  returned Texture's frame is narrowed back to the inner (w × h)
+   *  content area — the padded border stays reserved in the atlas so
+   *  adjacent slots can't bleed in, but callers see the original size. */
   private renderAndPack(container: Container, w: number, h: number): Texture {
-    const rt = RenderTexture.create({ width: w, height: h });
+    const paddedW = w + BAKE_PADDING * 2;
+    const paddedH = h + BAKE_PADDING * 2;
+    const rt = RenderTexture.create({ width: paddedW, height: paddedH });
+    container.position.set(BAKE_PADDING, BAKE_PADDING);
     this.renderer.render({ container, target: rt, clear: true });
-    const packed = this.textures.pack(rt);
+    container.position.set(0, 0);
+    const padded = this.textures.pack(rt);
     rt.destroy(true);
-    return packed;
+    return new Texture({
+      source: padded.source,
+      frame: new Rectangle(
+        padded.frame.x + BAKE_PADDING,
+        padded.frame.y + BAKE_PADDING,
+        w,
+        h,
+      ),
+    });
   }
 }
 

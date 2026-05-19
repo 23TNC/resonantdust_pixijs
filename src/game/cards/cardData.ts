@@ -46,17 +46,33 @@ const STACKED_STATE_MASK = 0b11;
 
 export const STACKED_LOOSE = 0;
 /** Parent-pointer slot mode. `microLocation` is the immediate parent's
- *  card_id (which can itself be `Slot`, `OnRoot`, `Free`, or `OnHex`),
- *  not the chain root. `microZone` carries only `direction` — position
- *  from root is implicit via the parent-pointer walk. Server-only
- *  writes (`propose_action`); the client never writes Slot rows. */
+ *  card_id (which can itself be `Slot`, `OnRoot`, or `Free`), not the
+ *  chain root. `microZone` carries only `direction` — position from
+ *  root is implicit via the parent-pointer walk. Server-only writes
+ *  (`propose_action`); the client never writes Slot rows. */
 export const STACKED_SLOT = 1;
 export const STACKED_ON_ROOT = 2;
+/** **Retired** in the unified card model — value 3 is reserved.
+ *  Hex cards are no longer special; they sit as `STACKED_LOOSE` at
+ *  world positions like any other card. Code paths that still read
+ *  state 3 are vestigial — they won't see any rows with this value
+ *  from a server using the new packing. */
 export const STACKED_ON_HEX = 3;
 
-/** Direction bit values for the stack layout. */
-export const STACK_DIRECTION_UP = 0;
-export const STACK_DIRECTION_DOWN = 1;
+/** Direction values for the stack layout (2 bits — values 0, 1, 2
+ *  are valid; value 3 reserved).
+ *
+ *  - `STACK_DIRECTION_HEX` (0) — the tile branch (visually beneath
+ *    root; what was "hex" in the legacy model).
+ *  - `STACK_DIRECTION_UP` (1) — top stack (was direction 0).
+ *  - `STACK_DIRECTION_DOWN` (2) — bottom stack (was direction 1).
+ *
+ *  Three branches off root. The packing layout under
+ *  `STACKED_ON_ROOT` / `STACKED_SLOT` is
+ *  `[position:4 | direction:2 | state:2]`. */
+export const STACK_DIRECTION_HEX = 0;
+export const STACK_DIRECTION_UP = 1;
+export const STACK_DIRECTION_DOWN = 2;
 
 export interface LooseXY {
   x: number;
@@ -96,17 +112,18 @@ export function encodeLooseXY(x: number, y: number): number {
 }
 
 /** Read the chain `position` field from a `microZone` byte under the
- *  stack layout. Caller must already know the byte is stack-layout —
- *  reading a legacy-layout byte through here returns garbage. */
+ *  stack layout (`[position:4 | direction:2 | state:2]`). Returns
+ *  0-15. Caller must already know the byte is stack-layout — reading
+ *  a legacy-layout byte through here returns garbage. */
 export function getStackPosition(microZone: number): number {
-  return (microZone >> 3) & 0x1f;
+  return (microZone >> 4) & 0xf;
 }
 
-/** Read the chain `direction` bit from a `microZone` byte under the
- *  stack layout. Returns `STACK_DIRECTION_UP` (0) or
- *  `STACK_DIRECTION_DOWN` (1). Caller must already know the byte is
- *  stack-layout. */
+/** Read the chain `direction` field from a `microZone` byte under
+ *  the stack layout. Returns 0-3; values 0/1/2 are
+ *  `STACK_DIRECTION_HEX` / `STACK_DIRECTION_UP` / `STACK_DIRECTION_DOWN`.
+ *  Value 3 is reserved. */
 export function getStackDirection(microZone: number): number {
-  return (microZone >> 2) & 0x1;
+  return (microZone >> 2) & 0x3;
 }
 

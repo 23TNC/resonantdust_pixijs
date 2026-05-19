@@ -6,6 +6,7 @@ import type { GameContext } from "../../GameContext";
 import { debug } from "../../debug";
 import { canPickUpCard } from "../permissions";
 import { DragGhost } from "./DragGhost";
+import { BlueprintSlot } from "../toolbar/BlueprintSlot";
 import {
   applySourceGate,
   executeDrop,
@@ -46,6 +47,17 @@ type DragState =
       sourceCardId: number;
       /** Cursor → card top-left at drag start. Used to position the
        *  ghost so the grab point under the cursor stays consistent. */
+      offsetX: number;
+      offsetY: number;
+    }
+  | {
+      kind: "blueprint";
+      ghost: DragGhost;
+      /** Stable blueprint id from `content/blueprints/id.json` — the
+       *  payload we'll eventually send to the "create blueprint
+       *  instance" reducer. Today this just appears in the debug log
+       *  so we can see the drop resolved correctly. */
+      blueprintId: number;
       offsetX: number;
       offsetY: number;
     };
@@ -90,6 +102,8 @@ export class DragManager {
       if (this.state.kind === "card") {
         this.state.card.setDragging(false);
       } else {
+        // Ghost-style variants ("ghost" for souls, "blueprint" for
+        // wrench-panel drags) all carry a `DragGhost` to dispose.
         this.state.ghost.destroy();
       }
       this.state = null;
@@ -100,6 +114,38 @@ export class DragManager {
 
   private handleDragStart(data: PointerEventData): void {
     if (this.state) return;
+
+    // Wrench-panel drag: the hit target is a `BlueprintSlot` (not a
+    // real `LayoutCard` — the slot has no row in `cardsLocal`).
+    // Spawn a ghost from the blueprint's resolved card def and skip
+    // the rest of the card-drag pipeline; the drop handler logs the
+    // requested tile rather than firing a position-write.
+    if (data.hit instanceof BlueprintSlot) {
+      if (data.hit.cardPackedDefinition === 0 || data.hit.blueprintId === 0) {
+        // Locked slot — bounds should already be collapsed, but
+        // belt-and-suspenders in case the layout race ever puts us
+        // here with stale state.
+        return;
+      }
+      const slotGlobal = data.hit.container.getGlobalPosition();
+      const offsetX = data.x - slotGlobal.x;
+      const offsetY = data.y - slotGlobal.y;
+      const ghost = new DragGhost(
+        this.ctx,
+        data.hit.cardPackedDefinition,
+        offsetX,
+        offsetY,
+      );
+      this.state = {
+        kind: "blueprint",
+        ghost,
+        blueprintId: data.hit.blueprintId,
+        offsetX,
+        offsetY,
+      };
+      return;
+    }
+
     if (!(data.hit instanceof LayoutCard)) return;
 
     const card = this.ctx.cards?.get(data.hit.cardId);
@@ -156,6 +202,10 @@ export class DragManager {
 
     if (state.kind === "ghost") {
       this.handleGhostDrop(state.sourceCardId, state.ghost, up);
+      return;
+    }
+    if (state.kind === "blueprint") {
+      this.handleBlueprintDrop(state.blueprintId, state.ghost, up);
       return;
     }
 
@@ -260,6 +310,34 @@ export class DragManager {
     });
   }
 
+  /** Blueprint-drag drop resolution. Destroys the ghost regardless
+   *  of outcome and, when the drop lands on a world tile, logs the
+   *  blueprint id + target tile coords. The actual "create
+   *  blueprint instance at tile" reducer is a follow-up — this
+   *  handler exists so we can verify the drag pipeline end-to-end
+   *  before wiring server behavior. */
+  private handleBlueprintDrop(
+    blueprintId: number,
+    ghost: DragGhost,
+    up: PointerEventData,
+  ): void {
+    ghost.destroy();
+    const worldDrop = this.resolveGhostWorldDrop(up);
+    if (!worldDrop) {
+      debug.log(
+        ["drag"],
+        `[drag] blueprint drop id=${blueprintId} outside world view — ignored`,
+        2,
+      );
+      return;
+    }
+    debug.log(
+      ["drag"],
+      `[drag] would create blueprint id=${blueprintId} at world tile (${worldDrop.q}, ${worldDrop.r})`,
+      2,
+    );
+  }
+
   /** World-view drop resolution for ghost drags. Same shape as the
    *  rect/hex resolver's world-view check, but kept here because the
    *  ghost path doesn't share the rest of the resolver pipeline — it
@@ -290,8 +368,7 @@ export class DragManager {
    *  `count > 0`. */
   private pickupBlocked(flags: number): boolean {
     const def = this.ctx.definitions;
-    const heldCount = def.cardFlagFieldValue(flags, "position_hold_count") ?? 0;
-    return heldCount > 0
+    return def.isPositionHeld(flags)
         || def.hasCardFlag(flags, "position_locked")
         // Dead cards still appear in `cardsLocal` until GC retention
         // sweeps them; the player should not be able to pick one up.

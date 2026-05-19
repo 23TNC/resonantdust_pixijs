@@ -90,6 +90,12 @@ export const Soul = __t.object("Soul", {
 });
 export type Soul = __Infer<typeof Soul>;
 
+export const SoulPrivate = __t.object("SoulPrivate", {
+  cardId: __t.u32(),
+  blueprints0: __t.u64(),
+});
+export type SoulPrivate = __Infer<typeof SoulPrivate>;
+
 export const TilePoint = __t.object("TilePoint", {
   surface: __t.u8(),
   macroZone: __t.u32(),

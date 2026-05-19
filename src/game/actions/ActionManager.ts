@@ -1,151 +1,106 @@
 import { debug } from "../../debug";
 import type { GameContext } from "../../GameContext";
-import type { Card } from "../cards/Card";
+import { getStackedState, STACKED_LOOSE, STACKED_ON_HEX } from "../cards/cardData";
 import {
-  getStackDirection,
-  getStackedState,
   STACK_DIRECTION_DOWN,
+  STACK_DIRECTION_HEX,
   STACK_DIRECTION_UP,
-  STACKED_LOOSE,
-  STACKED_ON_HEX,
-  STACKED_ON_ROOT,
-  STACKED_SLOT,
 } from "../cards/cardData";
 import { WORLD_LAYER } from "../../server/data/packing";
 import { getZoneTileSlot } from "../world/worldCoords";
-
-/** Defensive cap on the phase loop. Each iteration that finds a match
- *  adds at least one card to the in-pass held set, which is bounded by
- *  the total chain length — so a correct matcher terminates well before
- *  this limit. The cap exists only to bound a buggy matcher returning
- *  the same match repeatedly. */
-const MATCH_LOOP_CAP = 64;
+import type { MatchResult } from "./recipeMatcher";
 
 /** Default fire-after-match delay. Matches stay queued for this long
- *  before being submitted to the server, giving the player a window to
- *  break the chain (drag a card off, etc.) and abort. */
+ *  before being submitted to the server, giving the player a window
+ *  to break the chain (drag a card off, etc.) and abort. */
 const DEFAULT_DELAY_MS = 5000;
 
-/** Maximum allowed `rootDist + consumed.length` for a rooted match.
- *  State-2 (`OnRoot`) rows pack `position` into a u5 (0..31); any
- *  rooted recipe whose actor + slot window would reach past chain
- *  index 31 must be rejected client-side, since the server's
- *  `pack_stack_micro_zone(position & 0x1f, ...)` would silently
- *  truncate and corrupt chain layout. Same constraint that
- *  `DragManager` enforces at drop-time, restated for the matcher. */
-const MAX_PIN_DEPTH = 31;
-
-export type StackDirection = "up" | "down";
-
-/** Detailed result of a successful `matchStackRecipe` call. The slot
- *  window `[slotStart, slotStart + slotCount)` is the slice of
- *  `[root, ...slotDefs]` that fills the recipe's slot list — needed to
- *  assemble the `propose_action` reducer args, since the actor may
- *  slide along the chain when the recipe has no `root` constraint.
- *  Defined here (next to its sole consumer) and imported by
- *  `DefinitionManager` for its return-type annotation. */
-export interface StackMatch {
-  recipeIndex: number;
-  slotStart: number;
-  slotCount: number;
-  hasRoot: boolean;
-  hasHex: boolean;
-}
-
 export interface ActionManagerOptions {
-  /** Milliseconds to wait after a match is queued before submitting it
-   *  via `proposeAction`. If the queue entry is updated during the wait
-   *  the timer is reset; if it's dropped the timer is cancelled. */
+  /** Milliseconds to wait after a match is queued before submitting
+   *  it via `proposeAction`. If the queue entry is updated during
+   *  the wait the timer is reset; if it's dropped the timer is
+   *  cancelled. */
   delayMs?: number;
 }
 
-/** A recipe match the client has detected on a chain segment.
+/** A recipe match the client has detected on a chain.
  *
- *  Queue keys are `${looseRootId}:${direction}:${recipeIndex}:${actorId}`.
- *  Multiple entries per (root, direction) are normal — every recipe
- *  that fits somewhere in a chain fires independently. The per-entry
- *  identity is "this recipe at this actor card"; a chain mutation that
- *  preserves both keeps the entry, otherwise it's replaced.
+ *  Queue keys are `${looseRootId}:${recipeId}`. Under the unified
+ *  card model each chain root has **at most one match at a time** —
+ *  the matcher takes the chain configuration as a unit and returns
+ *  the single highest-priority recipe that fires, if any. So each
+ *  loose root maps to at most one queue entry.
  */
 export interface QueuedAction {
-  /** Loose root of the chain this match lives in. Always passed as the
-   *  recipe's root tier when `hasRoot` is true. */
+  /** Loose root of the chain this match lives in. The chain root
+   *  the recipe operates on. */
   looseRootId: number;
-  /** Direction of the chain (`up` = top stack, `down` = bottom stack). */
-  direction: StackDirection;
   /** Stable packed recipe id (`u16`). */
-  recipeIndex: number;
-  /** Actor card id — the first card of the matched slot window. The
-   *  recipe's `slots[0]` binds here. UI ties the per-card debounce
-   *  progress bar to this card. */
-  actorId: number;
-  /** Card ids of the matched slot window in chain order, from actor
-   *  outward. Passed directly as `slots` to `propose_action`. For
-   *  rootless matches whose window started at the root tier slot, R
-   *  appears at `chain[0]` here. */
-  chain: readonly number[];
-  /** Actor's chain distance from `looseRootId`. `0` if the actor is
-   *  the loose root itself (rootless match consuming R); otherwise
-   *  the actor's index in the full direction chain plus 1. Server
-   *  reads this as the actor's `position` on `OnRoot` rows when
-   *  `hasRoot` is true; ignored when `hasRoot` is false. */
-  rootDist: number;
-  /** `card_id` of the hex card the loose root is stacked on, or `0`
-   *  if R isn't on a hex. Forwarded to `propose_action.hex` only when
-   *  `hasHex` is true. */
-  hexParentId: number;
-  /** Whether the matched recipe constrains a `root` tier. */
-  hasRoot: boolean;
-  /** Whether the matched recipe constrains a `hex` tier. */
-  hasHex: boolean;
+  recipeId: number;
+  /** Per-iterator card_id bindings, ready to pass to
+   *  `proposeAction` directly. `bindings[i]` is the cards for
+   *  `recipe.iterators[i]` in offset order. */
+  bindings: number[][];
+  /** Root's world / inventory address at queue time. Snapshotted so
+   *  the action submits with the location the player saw at
+   *  match-time, even if the root row mutates during the debounce
+   *  window (server will reject in Stage 2 cross-check if it
+   *  doesn't agree). */
+  surface: number;
+  macroZone: number;
+  microZone: number;
   /** True between `proposeAction` dispatch and its round-trip
    *  resolution. While submitted, `evaluateRoot` and the
    *  cluster-pruning paths leave the entry alone — the user has
    *  committed to the action and the client may not cancel or
-   *  upgrade it. The `.then` / `.catch` handlers clean up. */
+   *  upgrade it. */
   submitted: boolean;
   /** `performance.now()` value at the moment the fire-after-match
-   *  timer was last (re)started. UI uses this with `delayMs` to draw
-   *  the per-card debounce-progress indicator. `0` while the entry
-   *  hasn't been scheduled (i.e. just constructed). */
+   *  timer was last (re)started. UI uses this with `delayMs` to
+   *  draw the per-card debounce-progress indicator. `0` while the
+   *  entry hasn't been scheduled (i.e. just constructed). */
   scheduledAt: number;
+  /** Debounce duration for this specific entry, in milliseconds.
+   *  Usually the manager's `DEFAULT_DELAY_MS`, but recipes with a
+   *  single input statement use `0` — those have no
+   *  cancel-affordance (the only "chain" is root itself, which the
+   *  player can't intrinsically alter during a debounce window), so
+   *  the debounce just adds latency without giving the player any
+   *  real choice. Lifecycle / on-create style recipes (`fleeting`,
+   *  `corpus-`, `despair_failure`, etc.) all fall into this bucket. */
+  delayMs: number;
+  /** Card the UI anchors the debounce progress bar to. Resolved at
+   *  queue time using the priority cascade:
+   *
+   *    slot.1.0 (first card of top stack)
+   *      → slot.2.0 (first card of bottom stack)
+   *      → root
+   *
+   *  Snapshotted in the queue entry so a mid-debounce chain mutation
+   *  (which would also drop the entry) doesn't leave the bar
+   *  flicker-relocating. `progressFor(cardId)` returns the fraction
+   *  iff `cardId === progressAnchor`. */
+  progressAnchor: number;
 }
 
 /**
  * Scene-scoped recipe pre-filter and submission queue.
  *
- * Listens to stack-change events from `CardManager`. For each affected
- * loose root R, runs a multi-phase, restart-on-match evaluation that
- * yields every recipe match against R's chains — in both directions,
- * across sub-chains split by `slot_hold` blocks, with per-evaluation
- * in-pass holds that prevent the same card being consumed by two
- * matches in one pass.
+ * Listens to stack-change events from `CardManager`. For each
+ * affected loose root R, gathers `(root, branches[0..2])` and asks
+ * `DefinitionManager.findRecipeMatch` whether the assembly fires a
+ * recipe. If it does, queues a `QueuedAction`; after `delayMs`
+ * elapses without the entry being mutated, submits via
+ * `ctx.reducers.proposeAction`.
  *
- * R is the recipe's root tier for every match attempt; there is no
- * "sub-root" concept. Recipes that don't constrain root match via the
- * Phase 2 rootless retry, where R is prepended into the slot list.
- *
- * Chain construction goes through `CardManager.buildChain(R, dir)`
- * which threads state-1 (Slot) cards into the visual chain order
- * alongside state-2 (OnRoot) cards. Sub-chains are runs of contiguous
- * unheld cards within those chains, partitioned by
- * `CardManager.splitChainByHeld`.
- *
- * Phase ordering (top before bottom at each tier; restart on every match):
- *   1. Rooted firsts.   `match(hex, R.def, firstSubChain.defs, dir)`
- *   2. Rootless firsts. `match(hex, 0, [R, ...firstSubChain].defs, dir)` — only if R is unheld.
- *   3. Rooted subsequents (interleaved by sub-chain index across directions).
- *
- * After `delayMs` elapses without the entry being mutated, the action
- * is submitted via `ctx.reducers.proposeAction`. Hex / root args are
- * gated by `hasHex` / `hasRoot` so the server-side flag rules in
- * `actions.rs::propose_action` apply correctly.
+ * One queue entry per loose root maximum — the new matcher returns
+ * at most one match per configuration. Replacing the legacy
+ * multi-phase sliding-window walker.
  */
 export class ActionManager {
-  private readonly queue = new Map<string, QueuedAction>();
-  private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly queue = new Map<number, QueuedAction>();
+  private readonly timers = new Map<number, ReturnType<typeof setTimeout>>();
   private readonly delayMs: number;
-  private readonly slotHoldMask: number;
   private readonly unsubStackChange: () => void;
   private readonly unsubData: () => void;
 
@@ -157,33 +112,84 @@ export class ActionManager {
       throw new Error("[ActionManager] ctx.cards is null — CardManager must exist");
     }
     this.delayMs = options.delayMs ?? DEFAULT_DELAY_MS;
-    this.slotHoldMask = ctx.definitions.cardFlagMask("slot_hold");
 
     this.unsubStackChange = ctx.cards.subscribeAllStackChanges((rootId) => {
-      this.evaluateRoot(rootId);
-      // When the soul's own chain changes (equipment), recipes anchored
-      // at OTHER chains owned by the same soul may transition between
-      // unmatched and matched (their has-predicates depend on the
-      // soul's stack via `topStackDefs`). Fan out to those chains so a
-      // newly-equipped axe causes corpus-on-tree to start chopping
-      // without needing a separate user action.
-      this.cascadeFromSoulChange(rootId);
+      // Re-evaluate the reported root (catches new matches arising
+      // from the change) AND every existing queued action's root.
+      //
+      // The reported `rootId` is `fireStackChange`'s `rootOf` walk
+      // from the mutated card, which doesn't always coincide with
+      // an existing queue's key — e.g. a queue was made when card X
+      // was a loose root, then X moved to a state-3 child of hex Y,
+      // and now a chain mutation under X reports `rootOf(X) = Y`.
+      // Without re-evaluating queued roots, X's stale queue can't
+      // be invalidated.
+      //
+      // Re-evaluation is the unifying primitive: each queue's
+      // validity is a function of the current chain rooted at its
+      // `looseRootId`. Whenever anything in the chain graph
+      // mutates, every queue re-derives its validity from current
+      // state. No edge cases to chase — chain re-rooting, state
+      // transitions, child pulls, all collapse into the same loop.
+      this.recheckAllQueued(rootId);
     });
 
-    // Cards leaving cardsLocal (server delete or scope teardown) need to
-    // drop their queue entries — stack-change events only fire for live
-    // chain transitions, not for outright removals.
     this.unsubData = ctx.data.subscribeLocalCard((change) => {
       if (change.kind === "removed") {
         this.dropForCard(change.key);
+        return;
       }
+      // `added` events fire for cards arriving fresh from the server
+      // (recipe outputs, character_creation spawns, etc). They aren't
+      // attached to any chain yet — `subscribeAllStackChanges` only
+      // fires when a card moves into/out of an existing chain, so a
+      // brand-new loose card never reaches `evaluateRoot` without
+      // this hook. Examples broken without it: corpus- spawned by
+      // `corpus_b.1` doesn't start its self-destruct lifecycle;
+      // freshly-magnetic cards don't begin their inner recipe pull.
+      if (change.kind === "added") {
+        const state = getStackedState(change.row.microZone);
+        const isRoot = state === STACKED_LOOSE || state === STACKED_ON_HEX;
+        if (isRoot && change.row.dead !== 2) {
+          this.evaluateRoot(change.key);
+        }
+        return;
+      }
+      // `updated` covers every other row mutation: dead-bit flips
+      // (`dead === 1` after server marks the card destroyed),
+      // server-forced position writes (FLAG_FORCE_POSITION from
+      // another action's chain_stitch), slot_hold acquisition by
+      // a concurrent recipe, magnetic-flag flips, ownership changes,
+      // packed_definition shifts, etc. Any of these can invalidate
+      // an outstanding queue.
+      //
+      // Rather than enumerate which fields matter, funnel through
+      // the same `recheckAllQueued` primitive used for stack
+      // changes — the matcher is a pure function of state, so
+      // re-deriving every queue's validity from current state is
+      // the unifying answer. Same brute-force / small-N tradeoff
+      // documented at the stack-change site above.
+      //
+      // The most important specific case this closes is the
+      // "card died, queue still firing" gap: today, `mirrorCard`
+      // writes `dead = 1` on the local row via an `updated` event;
+      // `subscribeAllStackChanges` doesn't fire for flag-only
+      // changes; the queue lingers until debounce expiry and
+      // `proposeAction` hits the server's `card N is dead`
+      // rejection. With this hook, the death triggers
+      // `recheckAllQueued` → `evaluateRoot` → death gate drops
+      // the queue immediately.
+      this.recheckAllQueued(change.key);
     });
 
-    // Initial scan: every loose root currently in cardsLocal gets a fresh
-    // evaluation. Stacked (non-root) cards are reached transitively via
-    // their root; no need to enumerate them here.
+    // Initial scan: every unchained root currently in cardsLocal gets
+    // a fresh evaluation. Stacked (non-root) cards are reached
+    // transitively via their root. Loose AND on-hex are both root
+    // shapes; the latter remains until Phase 10.4's drag-drop
+    // migration retires state-3 client-side.
     for (const row of ctx.data.cardsLocal.values()) {
-      if (getStackedState(row.microZone) === STACKED_LOOSE) {
+      const state = getStackedState(row.microZone);
+      if (state === STACKED_LOOSE || state === STACKED_ON_HEX) {
         this.evaluateRoot(row.cardId);
       }
     }
@@ -202,80 +208,139 @@ export class ActionManager {
     return this.queue.values();
   }
 
-  /** Number of queued actions across all roots, directions, and recipes. */
+  /** Number of queued actions across all roots. */
   pendingCount(): number {
     return this.queue.size;
   }
 
-  /** Per-card debounce progress in `[0, 1]`, or `null` if `cardId` isn't
-   *  the actor of any pending (non-submitted) queued action. The actor
-   *  is `chain[0]` of the matched slot window; only it shows the
-   *  progress bar so the visual indicator is unambiguous about which
-   *  card "owns" the action. */
+  /** Per-card debounce progress in `[0, 1]`, or `null` if `cardId`
+   *  isn't the progress-anchor of any pending (non-submitted) queued
+   *  action. See `QueuedAction.progressAnchor` for the anchor-pick
+   *  cascade (`slot.1.0 → slot.2.0 → root`). */
   progressFor(cardId: number): number | null {
     for (const entry of this.queue.values()) {
       if (entry.submitted) continue;
-      if (entry.actorId !== cardId) continue;
+      if (entry.progressAnchor !== cardId) continue;
+      // Zero-debounce entries (single-input recipes) never visibly
+      // sit in the queue — they fire on the next macrotask. Don't
+      // render a bar that would just flicker to full-and-gone.
+      if (entry.delayMs <= 0) return null;
       const elapsed = performance.now() - entry.scheduledAt;
-      return Math.max(0, Math.min(1, elapsed / this.delayMs));
+      return Math.max(0, Math.min(1, elapsed / entry.delayMs));
     }
     return null;
   }
 
-  /** Re-evaluate every recipe match anchored at the loose root R. See
-   *  the class docstring for the phase ordering. */
+  /** Re-evaluate the loose root R. Gather its three branches off
+   *  root (tile / top / bottom), ask the matcher, queue if hit. */
   private evaluateRoot(looseRootId: number): void {
     const cards = this.ctx.cards;
     if (!cards) return;
 
-    const looseRoot = cards.get(looseRootId);
     const rootRow = this.ctx.data.cardsLocal.get(looseRootId);
-    if (!looseRoot || !rootRow) {
-      this.dropClusterNonSubmitted(looseRootId, "loose root gone");
+    if (!rootRow) {
+      this.dropForCard(looseRootId);
       return;
     }
 
-    // A "root" for matching is either:
-    //   - state-0 LOOSE — the standard inventory case, or
-    //   - state-3 ON_HEX with `microLocation == 0` on a world surface —
-    //     a card dropped on a world tile that has no hex Card row of its
-    //     own. The state-3 card itself becomes the matcher's root tier;
-    //     hex tier comes from the zone's tile data at the card's local
-    //     (q, r). `CardManager.rootOf` returns `cardId` for this case
-    //     (microLocation=0 has no parent to hop to), so it's already
-    //     surfacing here as the "loose root" from fireStackChange's
-    //     perspective.
+    // Dead-root gate. `mirrorCard` writes `dead = 1` when the server
+    // sets FLAG_ACTION_DEAD on the row, and `dead = 2` once the
+    // client's death animation completes. Either way, the card is
+    // logically gone — the server's `validate_bindings` would reject
+    // any propose against it. Drop any existing queue and don't
+    // attempt to match a new one (predicates would still pass against
+    // the still-readable def/aspects/flags, but the propose would
+    // just bounce).
+    if ((rootRow.dead ?? 0) > 0) {
+      const existing = this.queue.get(looseRootId);
+      if (existing && !existing.submitted) {
+        this.dropForRoot(looseRootId, "root is dead");
+      }
+      return;
+    }
+
+    // Root must be unchained — chain-stitched cards aren't roots,
+    // and we don't match against in-progress chains. `STACKED_LOOSE`
+    // is the canonical case. `STACKED_ON_HEX` (state 3) is also
+    // accepted because Phase 10.4 hasn't migrated world-tile drops
+    // yet — dropping a card on a world tile still writes state-3
+    // locally; the card is conceptually loose on the tile and should
+    // be evaluated for tile-anchored recipes like `cut_tree`. Match-
+    // side, the synthetic-tile lookup below treats the tile under
+    // the card as branch-0 of the chain.
+    //
+    // Use `dropForRoot` (not `dropForCard`) — the card still EXISTS
+    // (just stack-chained somewhere), it isn't removed. `dropForCard`
+    // would additionally walk every other queue's bindings and drop
+    // any queue that mentions this card, which is wrong: a recipe
+    // like `cut_tree` legitimately references an equipped axe via
+    // `share.slot.1.0.owner.slot.1.0.def_id: axe`. When the axe
+    // shows up as a `triggeredRootId` in `recheckAllQueued` (e.g.
+    // because `applyPredictedHolds` just stamped `predict_position_hold`
+    // on it), `evaluateRoot(axe)` lands here — and pre-fix would
+    // nuke every cut_tree queue that depends on the axe.
     const rootState = getStackedState(rootRow.microZone);
-    const isVirtualWorldHexRoot =
-      rootState === STACKED_ON_HEX &&
-      rootRow.microLocation === 0 &&
-      rootRow.surface >= WORLD_LAYER;
-    if (rootState !== STACKED_LOOSE && !isVirtualWorldHexRoot) {
-      this.dropClusterNonSubmitted(looseRootId, "root not loose or virtual world hex");
+    if (rootState !== STACKED_LOOSE && rootState !== STACKED_ON_HEX) {
+      this.dropForRoot(looseRootId, "no longer a loose root");
       return;
     }
 
-    // Hex tier resolution:
-    //   - Virtual world hex root: read the tile's def from the zones
-    //     table at the rect's (macro_zone, localQ, localR).
-    //     `hexParentId` stays 0 because there is no Card row — server-
-    //     side `propose_action` will see `hex=0` and consult its own
-    //     zone table for the hex def at action-fire time (or skip the
-    //     hex constraint when the matched recipe doesn't require one).
-    //   - Otherwise: no hex tier. Inventory chains never have a hex
-    //     parent; if/when world hex Cards become roots themselves,
-    //     that path will need its own handling.
-    let hexParentId = 0;
-    let hexDef = 0;
-    // Stock counters for the hex tile, when the chain sits on a
-    // synthetic-tile hex. The matcher uses them to evaluate
-    // `Entity::Aspect` predicates against row-mutable values (forest
-    // pine, mountain stone, etc.) rather than the def's static
-    // aspects — see [docs/TILE_ASPECTS.md] § "Recipe matching".
-    // `null` when the chain has no tile-hex tier (inventory chains)
-    // or when the hex came from a Card row (no row stocks).
-    let hexStocks: { stock0: number; stock1: number } | null = null;
-    if (isVirtualWorldHexRoot) {
+    // Skip in-flight cards: if the server has stamped FLAG_SLOT_HOLD
+    // on the root, an action is already running against this chain.
+    // Re-evaluating here would propose a duplicate (the chain_stitch
+    // server push fires `onDataChange` → `fireStackChange` for the
+    // root, but the original `proposeAction` promise has already
+    // resolved and cleared our queue entry by then — so without this
+    // gate we'd re-match, re-queue, and re-submit, getting bounced
+    // by the server's `card N is already claimed by another in-flight
+    // action` check). The gate clears naturally when the recipe
+    // completes (`action_completion::apply` releases `slot_hold`).
+    if (this.ctx.definitions.isSlotHeld(rootRow.flags)) {
+      return;
+    }
+
+    // Skip magnetic cards: a card carrying `FLAG_LIFECYCLE_PENDING`
+    // (registry name `magnetic`) is owned by
+    // `LifecycleResolutionManager`, not this manager. Its lifecycle
+    // recipe (success/failure path) fires through the
+    // try-resolve-success / try-resolve-failure flow when the
+    // magnetic pull completes, NOT via generic recipe matching here.
+    // Without this gate:
+    //   - A freshly-spawned strike card (magnetic flag set) would
+    //     match `strike_failure` (root.def_id: strike) and we'd
+    //     submit it immediately, before the magnetic pull even
+    //     starts.
+    //   - When strike's magnetic pull stitches three corpuses into
+    //     its chain, the chain {strike, corpus×3} would also match
+    //     non-strike recipes like `corpus_b.1`, queueing a
+    //     duplicate the server rejects.
+    // Both collapse into "magnetic-card chains are off-limits to
+    // ActionManager until the magnetic flag clears."
+    if (this.ctx.definitions.hasCardFlag(rootRow.flags, "magnetic")) {
+      const existing = this.queue.get(looseRootId);
+      if (existing && !existing.submitted) {
+        this.dropForRoot(looseRootId, "root is magnetic — owned by LifecycleResolutionManager");
+      }
+      return;
+    }
+
+    // Gather branches 0/1/2 by walking the chain in each direction.
+    const branchHex = cards
+      .buildChain(looseRootId, STACK_DIRECTION_HEX)
+      .map((c) => c.cardId);
+    const branchUp = cards
+      .buildChain(looseRootId, STACK_DIRECTION_UP)
+      .map((c) => c.cardId);
+    const branchDown = cards
+      .buildChain(looseRootId, STACK_DIRECTION_DOWN)
+      .map((c) => c.cardId);
+
+    // Synthetic-tile binding: when root sits on a world surface
+    // and branch 0 has no card, resolve the tile from
+    // `zonesLocal` so recipes referencing `slot.0.0.aspect.X.min`
+    // can match against the underlying tile.
+    let syntheticTile: { packedDef: number; stock0: number; stock1: number } | null = null;
+    if (rootRow.surface >= WORLD_LAYER && branchHex.length === 0) {
       const localQ = (rootRow.microZone >> 5) & 0x7;
       const localR = (rootRow.microZone >> 2) & 0x7;
       const slot = getZoneTileSlot(
@@ -284,461 +349,291 @@ export class ActionManager {
         localQ,
         localR,
       );
-      hexDef = slot.packed;
-      if (hexDef !== 0) {
-        hexStocks = { stock0: slot.stock0, stock1: slot.stock1 };
+      if (slot.packed !== 0) {
+        syntheticTile = {
+          packedDef: slot.packed,
+          stock0: slot.stock0,
+          stock1: slot.stock1,
+        };
       }
     }
-    const rootDef = rootRow.packedDefinition;
 
-    // Chains built once per evaluation. The held set grows as in-pass
-    // matches consume cards; sub-chain splitting is re-derived on each
-    // iteration of the phase loop.
-    const topChain = cards.buildChain(looseRootId, STACK_DIRECTION_UP);
-    const botChain = cards.buildChain(looseRootId, STACK_DIRECTION_DOWN);
-
-    const inPassHeld = new Set<number>();
-    const isHeld = (c: Card): boolean => {
-      if (inPassHeld.has(c.cardId)) return true;
-      return this.serverHeld(c.cardId);
-    };
-
-    const wanted = new Map<string, QueuedAction>();
-
-    phaseLoop: for (let safety = 0; safety < MATCH_LOOP_CAP; safety++) {
-      const top = cards.splitChainByHeld(topChain, isHeld);
-      const bot = cards.splitChainByHeld(botChain, isHeld);
-
-      // Phase 1 — rooted firsts (top before bottom).
-      if (top.firstSubChain && top.firstSubChain.length > 0) {
-        if (this.tryMatch({
-          subChainCards: top.firstSubChain,
-          fullChain: topChain,
-          rootCard: looseRoot, rootDef, hexDef, hexStocks, hexParentId,
-          looseRootId, direction: "up", rootless: false,
-          inPassHeld, wanted,
-        })) continue phaseLoop;
-      }
-      if (bot.firstSubChain && bot.firstSubChain.length > 0) {
-        if (this.tryMatch({
-          subChainCards: bot.firstSubChain,
-          fullChain: botChain,
-          rootCard: looseRoot, rootDef, hexDef, hexStocks, hexParentId,
-          looseRootId, direction: "down", rootless: false,
-          inPassHeld, wanted,
-        })) continue phaseLoop;
-      }
-
-      // Phase 2 — rootless firsts. Skipped when R is held (a prior
-      // match already consumed R as a slot, so it can't appear again).
-      //
-      // Fires even when the corresponding `firstSubChain` is null or
-      // empty: in that case `subChainCards = []` and tryMatch will
-      // prepend the rootCard to produce `slotCards = [R]`. This lets
-      // recipes whose slot list is satisfied by R alone (e.g. a
-      // recipe with `hex: [rock], slots: [corpus]` against a corpus
-      // dropped on an empty rock world tile — the corpus is itself
-      // the virtual world hex root, no chain members above or
-      // below) match correctly. Without this, evaluation would skip
-      // every phase and the recipe would never fire.
-      if (!isHeld(looseRoot)) {
-        const topFirst = top.firstSubChain ?? [];
-        if (this.tryMatch({
-          subChainCards: topFirst,
-          fullChain: topChain,
-          rootCard: looseRoot, rootDef, hexDef, hexStocks, hexParentId,
-          looseRootId, direction: "up", rootless: true,
-          inPassHeld, wanted,
-        })) continue phaseLoop;
-        const botFirst = bot.firstSubChain ?? [];
-        if (this.tryMatch({
-          subChainCards: botFirst,
-          fullChain: botChain,
-          rootCard: looseRoot, rootDef, hexDef, hexStocks, hexParentId,
-          looseRootId, direction: "down", rootless: true,
-          inPassHeld, wanted,
-        })) continue phaseLoop;
-      }
-
-      // Phase 3+ — rooted subsequents, interleaved by sub-chain index
-      // across directions.
-      const maxSubsequent = Math.max(
-        top.subsequentSubChains.length,
-        bot.subsequentSubChains.length,
-      );
-      for (let i = 0; i < maxSubsequent; i++) {
-        const topSub = top.subsequentSubChains[i];
-        if (topSub && topSub.length > 0) {
-          if (this.tryMatch({
-            subChainCards: topSub,
-            fullChain: topChain,
-            rootCard: looseRoot, rootDef, hexDef, hexStocks, hexParentId,
-            looseRootId, direction: "up", rootless: false,
-            inPassHeld, wanted,
-          })) continue phaseLoop;
-        }
-        const botSub = bot.subsequentSubChains[i];
-        if (botSub && botSub.length > 0) {
-          if (this.tryMatch({
-            subChainCards: botSub,
-            fullChain: botChain,
-            rootCard: looseRoot, rootDef, hexDef, hexStocks, hexParentId,
-            looseRootId, direction: "down", rootless: false,
-            inPassHeld, wanted,
-          })) continue phaseLoop;
-        }
-      }
-
-      // No phase produced a match this iteration — fixed point reached.
-      break;
-    }
-
-    // Reconcile: drop cluster entries that are no longer wanted (and
-    // not submitted), then add / update wanted entries.
-    const toDelete: string[] = [];
-    for (const [key, entry] of this.queue) {
-      if (entry.looseRootId !== looseRootId) continue;
-      if (entry.submitted) continue;
-      if (!wanted.has(key)) toDelete.push(key);
-    }
-    for (const key of toDelete) {
-      this.queue.delete(key);
-      this.cancelTimer(key);
-      debug.log(
-        ["actions"],
-        `[ActionManager] queue drop: ${key} (no longer matches)`,
-        2,
-      );
-    }
-
-    for (const [key, action] of wanted) {
-      const existing = this.queue.get(key);
-      if (existing && existing.submitted) continue;
-      const changed = !existing || queueActionDiffers(existing, action);
-      if (changed) {
-        this.queue.set(key, action);
-        this.scheduleTimer(key);
-        debug.log(
-          ["actions"],
-          `[ActionManager] queue ${existing ? "update" : "add"}: root=${action.looseRootId} dir=${action.direction} recipe=${action.recipeIndex} actor=${action.actorId} chain=[${action.chain.join(",")}] rootDist=${action.rootDist}${action.hexParentId ? ` hex=${action.hexParentId}` : ""}`,
-          2,
-        );
-      }
-    }
-  }
-
-  /** Run one matcher call against `subChainCards` (with R prepended if
-   *  `rootless`), then map the result back to consumed cards, the
-   *  actor, and the actor's chain distance from R. On a hit, mutate
-   *  `inPassHeld` (adds consumed cards) and `wanted` (records the
-   *  match) and return `true`. On no match, return `false`. */
-  private tryMatch(args: {
-    subChainCards: Card[];
-    fullChain: Card[];
-    rootCard: Card;
-    rootDef: number;
-    hexDef: number;
-    hexStocks: { stock0: number; stock1: number } | null;
-    hexParentId: number;
-    looseRootId: number;
-    direction: StackDirection;
-    rootless: boolean;
-    inPassHeld: Set<number>;
-    wanted: Map<string, QueuedAction>;
-  }): boolean {
-    const {
-      subChainCards, fullChain, rootCard, rootDef, hexDef, hexStocks, hexParentId,
-      looseRootId, direction, rootless, inPassHeld, wanted,
-    } = args;
-
-    const slotCards = rootless ? [rootCard, ...subChainCards] : subChainCards;
-    if (slotCards.length === 0) return false;
-
-    const slotDefs = slotCards.map((c) =>
-      this.ctx.data.cardsLocal.get(c.cardId)?.packedDefinition ?? 0,
-    );
-
-    const matchRoot = rootless ? 0 : rootDef;
-    // Build has-predicate candidate pools. Root and actor owners can
-    // differ in principle (combat-style recipes where root is the
-    // target), but at this point in the matcher we don't yet know
-    // which chain slot will be the actor — `slotStart` falls out of
-    // the matcher itself. For v1 we approximate by reading the
-    // *root card's* owner soul stack and feeding it to both root and
-    // actor pools (same convention `on_create::trigger` uses where
-    // root == actor). This over-permits in the rare cross-owner
-    // case; `propose_action::resolve_has` is the authoritative
-    // server-side check that catches it.
-    //
-    // Resolution: walk `ownerId` up to the soul (the row carrying
-    // `FLAG_OWNED_BY_PLAYER`). Under the post-flag-20 card-owner
-    // model, `card.ownerId` is a card_id (the container), so a
-    // direct lookup by player_id is no longer correct.
-    const soulId = this.owningSoulCardId(rootCard.cardId);
-    const above = this.topStackDefs(soulId, STACK_DIRECTION_UP);
-    const below = this.topStackDefs(soulId, STACK_DIRECTION_DOWN);
-    const match = this.ctx.definitions.matchStackRecipe(
-      hexDef,
-      hexStocks,
-      matchRoot,
-      slotDefs,
-      direction,
-      {
-        rootAbove: above,
-        actorAbove: above,
-        rootBelow: below,
-        actorBelow: below,
+    const cardsLocal = this.ctx.data.cardsLocal;
+    const match = this.ctx.definitions.findRecipeMatch({
+      root: looseRootId,
+      branches: [branchHex, branchUp, branchDown],
+      cardLookup: (id: number) => {
+        const row = cardsLocal.get(id);
+        if (!row) return null;
+        // Treat dead cards as absent. Their def/aspects/flags are
+        // still readable, but a recipe binding a dead card would be
+        // server-rejected at validate_bindings. Returning null here
+        // makes the matcher's predicate eval (`def_id`, `aspect.X`)
+        // fail naturally for paths that resolve to a dead card —
+        // queues referencing the dead card drop on the next recheck.
+        if ((row.dead ?? 0) > 0) return null;
+        return {
+          cardId: row.cardId,
+          packedDefinition: row.packedDefinition,
+          ownerId: row.ownerId,
+          microLocation: row.microLocation,
+        };
       },
-    );
-    if (match === null) return false;
-
-    // Map the matcher's slot window back to consumed cards.
-    //
-    // Internal chain seen by matcher = [root_card_or_None, ...slot_cards]:
-    //   index 0 = root tier (R for rooted attempts; None for rootless).
-    //   index i ≥ 1 = slot_cards[i - 1].
-    //
-    // For rooted attempts the matcher CAN match a rootless recipe
-    // (recipe.root is None) starting at index 0, in which case R is
-    // consumed at the head of the window. For rootless attempts
-    // chain[0] is None, so any window touching index 0 fails the
-    // Some-check; slotStart ≥ 1 always there.
-    const winStart = match.slotStart;
-    const winEnd = winStart + match.slotCount;
-    const consumed: Card[] = [];
-    for (let i = winStart; i < winEnd; i++) {
-      if (i === 0) {
-        if (rootless) {
-          // Defensive: rootless attempt shouldn't reach index 0.
-          return false;
-        }
-        consumed.push(rootCard);
-      } else {
-        const idx = i - 1;
-        if (idx < 0 || idx >= slotCards.length) return false;
-        consumed.push(slotCards[idx]);
-      }
-    }
-    if (consumed.length === 0) return false;
-
-    const actor = consumed[0];
-    let rootDist: number;
-    if (actor.cardId === looseRootId) {
-      rootDist = 0;
-    } else {
-      const idx = fullChain.indexOf(actor);
-      if (idx < 0) return false; // shouldn't happen — actor must be in the chain
-      rootDist = idx + 1;
-    }
-
-    // Rooted recipes pin the actor at chain distance `rootDist` from R
-    // as a state-2 row, with the recipe's slots above stacking from
-    // there. The state-2 `position` field is u5 — `pack_stack_micro_zone`
-    // will silently truncate `position & 0x1f` if `rootDist` is too
-    // deep, corrupting chain layout. Reject the match when the
-    // chain-tail position the slots would occupy exceeds 31. (We
-    // include all consumed slots in the bound, not just the actor's
-    // index, so the rejection is monotone with chain depth even
-    // though only `slot[0]` carries the position field today —
-    // future server changes that pack additional slots into state-2
-    // would inherit the same constraint.)
-    if (match.hasRoot && rootDist + consumed.length > MAX_PIN_DEPTH) {
-      return false;
-    }
-
-    // Defensive: reject any match whose `consumed` set touches a
-    // server-held or in-pass-held card. `splitChainByHeld` already
-    // filters held cards out of `subChainCards`, but `rootCard`
-    // (looseRoot R) is passed separately and is NOT filtered. For a
-    // rootless recipe matched via a "rooted" attempt the matcher's
-    // window can start at `slotStart = 0`, consuming R at the head —
-    // if R is held (because it's already an actor in an in-flight
-    // recipe like a corpus+corpus mid-action), claiming it again is
-    // a bug. Same guard for `inPassHeld` covers the case where an
-    // earlier match in this same evaluation pass already claimed
-    // the card.
-    for (const c of consumed) {
-      if (inPassHeld.has(c.cardId) || this.serverHeld(c.cardId)) {
-        return false;
-      }
-    }
-
-    for (const c of consumed) {
-      inPassHeld.add(c.cardId);
-    }
-
-    const key = this.queueKey(looseRootId, direction, match.recipeIndex, actor.cardId);
-    wanted.set(key, {
-      looseRootId,
-      direction,
-      recipeIndex: match.recipeIndex,
-      actorId: actor.cardId,
-      chain: consumed.map((c) => c.cardId),
-      rootDist,
-      hexParentId,
-      hasRoot: match.hasRoot,
-      hasHex: match.hasHex,
-      submitted: false,
-      scheduledAt: 0,
+      syntheticTile,
+      branchWalker: (parentId: number, direction: number) => {
+        return cards
+          .buildChain(parentId, direction)
+          .map((c) => c.cardId);
+      },
     });
-    return true;
-  }
 
-  /** Whether `cardId`'s row carries the `slot_hold` flag — i.e. it's a
-   *  slot in an in-flight or accepted recipe and must not participate
-   *  in further matching. False if the row is missing or the flag bit
-   *  is undefined in the registry. */
-  private serverHeld(cardId: number): boolean {
-    if (this.slotHoldMask === 0) return false;
-    const row = this.ctx.data.cardsLocal.get(cardId);
-    if (!row) return false;
-    return (row.flags & this.slotHoldMask) !== 0;
-  }
-
-  /** Drop every non-submitted queue entry belonging to `looseRootId`'s
-   *  cluster. Submitted entries stay — the user has committed to those
-   *  actions and only their `proposeAction` round-trip resolves them. */
-  private dropClusterNonSubmitted(looseRootId: number, why: string): void {
-    const toDelete: string[] = [];
-    for (const [key, entry] of this.queue) {
-      if (entry.looseRootId !== looseRootId) continue;
-      if (entry.submitted) continue;
-      toDelete.push(key);
-    }
-    for (const key of toDelete) {
-      this.queue.delete(key);
-      this.cancelTimer(key);
-      debug.log(["actions"], `[ActionManager] queue drop: ${key} (${why})`, 2);
-    }
-  }
-
-  /** Drop every queue entry that names `cardId` as its loose root or
-   *  carries it in its chain — used when the card itself is removed
-   *  from `cardsLocal`. Submitted entries are dropped too: with the
-   *  card gone there's nothing to clean up against, and the server
-   *  side has already resolved one way or another. */
-  private dropForCard(cardId: number): void {
-    const toDelete: string[] = [];
-    for (const [key, entry] of this.queue) {
-      if (entry.looseRootId === cardId || entry.chain.includes(cardId)) {
-        toDelete.push(key);
+    if (match === null) {
+      // No recipe matches this configuration. Drop any queued
+      // (non-submitted) entry for this root — the chain mutated to
+      // a no-longer-matching state.
+      const existing = this.queue.get(looseRootId);
+      if (existing && !existing.submitted) {
+        this.dropForRoot(looseRootId, "chain no longer matches");
       }
-    }
-    for (const key of toDelete) {
-      this.queue.delete(key);
-      this.cancelTimer(key);
-      debug.log(
-        ["actions"],
-        `[ActionManager] queue drop: ${key} (card ${cardId} removed)`,
-        2,
-      );
-    }
-  }
-
-  /** (Re)start the fire timer for `key`. Always cancels the existing
-   *  timer first — a queue update should restart the countdown rather
-   *  than fire on the original schedule. Also stamps `scheduledAt` on
-   *  the entry so UI (`progressFor`) can show debounce-progress, and
-   *  invalidates the actor's layout so the progress bar starts being
-   *  drawn — the actor's row may not have changed (e.g. when the
-   *  player drops a child onto the actor; only the child's row is
-   *  written), so without this kick its `layout()` would never fire. */
-  private scheduleTimer(key: string): void {
-    this.cancelTimer(key);
-    const entry = this.queue.get(key);
-    if (entry) {
-      entry.scheduledAt = performance.now();
-      this.invalidateActor(entry);
-    }
-    const handle = setTimeout(() => {
-      this.timers.delete(key);
-      this.fireAction(key);
-    }, this.delayMs);
-    this.timers.set(key, handle);
-  }
-
-  private cancelTimer(key: string): void {
-    const handle = this.timers.get(key);
-    if (handle !== undefined) {
-      clearTimeout(handle);
-      this.timers.delete(key);
-    }
-    // Kick the actor's layout so any in-flight progress bar is
-    // erased on the next frame.
-    const entry = this.queue.get(key);
-    if (entry) this.invalidateActor(entry);
-  }
-
-  /** Mark the actor of `entry` as needing a fresh layout pass.
-   *  `progressFor` reads the queue each frame, but `LayoutCard.layout`
-   *  only runs while the node is invalidated — so we kick it whenever
-   *  the queue's progress visibility for this entry changes. */
-  private invalidateActor(entry: QueuedAction): void {
-    this.ctx.cards?.get(entry.actorId)?.layoutCard.invalidate();
-  }
-
-  /** Submit the queued action for `key` via `ctx.reducers.proposeAction`.
-   *  Marks the entry `submitted` before dispatch — that locks
-   *  `evaluateRoot` and cluster-pruning out for the duration of the
-   *  round-trip. The promise handlers then remove the entry on either
-   *  outcome (so a rejected action can be re-tried by the next
-   *  evaluation; an accepted action's cards will arrive carrying
-   *  `slot_hold`, which excludes them from future walks). */
-  private fireAction(key: string): void {
-    const action = this.queue.get(key);
-    if (!action || action.submitted) return;
-
-    const rootRow = this.ctx.data.cardsLocal.get(action.looseRootId);
-    if (!rootRow) {
-      debug.log(
-        ["actions"],
-        `[ActionManager] fire abort: root=${action.looseRootId} dir=${action.direction} (root row gone)`,
-        2,
-      );
-      this.queue.delete(key);
       return;
     }
 
-    const slots = action.chain.slice();
-    const hex = action.hasHex ? action.hexParentId : 0;
-    const root = action.hasRoot ? action.looseRootId : 0;
+    this.queueAction(rootRow, match);
+  }
 
-    const submittedEntry: QueuedAction = { ...action, submitted: true };
-    this.queue.set(key, submittedEntry);
-    // Kick the actor's layout so its progress bar disappears on the
-    // next frame — `progressFor` skips submitted entries.
-    this.invalidateActor(submittedEntry);
+  /** Build / update / replace a queue entry for the matched recipe.
+   *  The debounce timer is (re)started on every entry update;
+   *  if the entry is unchanged (same recipeId + bindings), the
+   *  timer keeps running — only a real change resets it. */
+  private queueAction(
+    rootRow: {
+      cardId: number;
+      surface: number;
+      macroZone: number;
+      microZone: number;
+    },
+    match: MatchResult,
+  ): void {
+    const existing = this.queue.get(rootRow.cardId);
+    if (existing && existing.submitted) {
+      // Submitted entry is committed — leave it alone.
+      return;
+    }
+    // Strip the legacy state-3 (OnHex) bits from `microZone` before
+    // capturing it in the queue (server's `from_u2` panics on state
+    // 3). World-tile drops still write state-3 locally; chain_stitch
+    // reads q/r from bits 2..=7 and writes state=Free.
+    const microZoneForWire = rootRow.microZone & ~0x3;
+    if (
+      existing !== undefined &&
+      existing.recipeId === match.recipeId &&
+      bindingsEqual(existing.bindings, match.bindings)
+    ) {
+      // Recipe + bindings unchanged. Keep the existing timer running
+      // — debouncing the chain build itself is the whole point. BUT
+      // the root card may have moved between queue and now (player
+      // dragged it off the hex it was on, slid it on the inventory
+      // grid, etc.) and the wire format's `surface / macroZone /
+      // microZone` must match the root's CURRENT position so the
+      // server's `chain_stitch` writes it where the player sees it.
+      // Without this re-snapshot the action fires with stale coords
+      // and the root snaps back to where it was at queue time.
+      existing.surface = rootRow.surface;
+      existing.macroZone = rootRow.macroZone;
+      existing.microZone = microZoneForWire;
+      return;
+    }
+
+    // Progress-bar anchor: matcher computed it from the matched
+    // bindings. Promotion-aware — when root was promoted to slot.1.0
+    // (recipes where root is omitted), the matcher returns root here
+    // so the bar lands on the card the recipe semantically calls
+    // slot.1.0, regardless of which card physically holds that role.
+    const progressAnchor = match.progressAnchor !== 0
+      ? match.progressAnchor
+      : rootRow.cardId;
+
+    // Single-input recipes bypass the debounce: they have no
+    // cancel-affordance (no slot chain the player can break) and
+    // are typically on-create / lifecycle triggers (`fleeting`,
+    // `corpus-`, `despair_failure`, `strike_failure`). Sitting on
+    // a 5-second debounce timer just delays inevitable execution.
+    const delayMs =
+      match.recipe.input.length <= 1 ? 0 : this.delayMs;
+
+    const entry: QueuedAction = {
+      looseRootId: rootRow.cardId,
+      recipeId: match.recipeId,
+      bindings: match.bindings,
+      surface: rootRow.surface,
+      macroZone: rootRow.macroZone,
+      microZone: microZoneForWire,
+      submitted: false,
+      scheduledAt: 0,
+      progressAnchor,
+      delayMs,
+    };
+    this.queue.set(rootRow.cardId, entry);
+    this.scheduleTimer(rootRow.cardId);
+    // Force the anchor card's layout to re-run so the bar appears on
+    // the next frame. Stack-change events typically invalidate the
+    // involved cards anyway via their data-subscription, but the
+    // initial-scan path queues without any data mutation — the
+    // anchor card has already been laid out and would otherwise show
+    // no bar until something else touched it.
+    this.ctx.cards?.get(progressAnchor)?.layoutCard.invalidate();
+  }
+
+  /** Drop the queue entry for a specific root. Called when the
+   *  chain mutates to a no-longer-matching configuration, or when
+   *  the root itself leaves cardsLocal. */
+  private dropForRoot(rootId: number, why: string): void {
+    const entry = this.queue.get(rootId);
+    if (entry === undefined || entry.submitted) return;
+    this.cancelTimer(rootId);
+    this.queue.delete(rootId);
+    // Force the anchor card to re-layout so the bar disappears
+    // immediately rather than waiting for the next data tick.
+    this.ctx.cards?.get(entry.progressAnchor)?.layoutCard.invalidate();
+    debug.log(
+      ["actions"],
+      `[ActionManager] dropped root ${rootId}: ${why}`,
+      4,
+    );
+  }
+
+  /** Re-evaluate every queued action's root, plus the reported
+   *  `triggeredRootId` if it isn't already a queue key. This is the
+   *  unified invalidation primitive — see the call site in
+   *  `subscribeAllStackChanges` for why.
+   *
+   *  Submitted entries are left alone (their action is already
+   *  in-flight on the server). */
+  private recheckAllQueued(triggeredRootId: number): void {
+    // Snapshot queue keys before the loop — `evaluateRoot` may
+    // mutate `this.queue` (drop entries when no match, replace
+    // entries when bindings change).
+    const queuedRoots = [...this.queue.keys()];
+    for (const rootId of queuedRoots) {
+      const entry = this.queue.get(rootId);
+      if (entry?.submitted) continue;
+      this.evaluateRoot(rootId);
+    }
+    if (!queuedRoots.includes(triggeredRootId)) {
+      this.evaluateRoot(triggeredRootId);
+    }
+  }
+
+  /** Drop entries that reference `cardId` — typically called when a
+   *  card leaves `cardsLocal` (server delete, subscription
+   *  teardown). Walks both the queue keys and every queued entry's
+   *  bindings; if `cardId` shows up anywhere, the action can no
+   *  longer fire and gets pruned. */
+  private dropForCard(cardId: number): void {
+    // Direct queue key (cardId is a root).
+    this.dropForRoot(cardId, "card removed");
+    // Bound elsewhere.
+    for (const [rootId, entry] of this.queue) {
+      if (entry.submitted) continue;
+      if (entry.progressAnchor === cardId) {
+        this.dropForRoot(rootId, "progress-anchor card removed");
+        continue;
+      }
+      for (const row of entry.bindings) {
+        if (row.includes(cardId)) {
+          this.dropForRoot(rootId, `bound card ${cardId} removed`);
+          break;
+        }
+      }
+    }
+  }
+
+  private scheduleTimer(rootId: number): void {
+    this.cancelTimer(rootId);
+    const entry = this.queue.get(rootId);
+    if (!entry || entry.submitted) return;
+    entry.scheduledAt = performance.now();
+    const handle = setTimeout(() => {
+      this.timers.delete(rootId);
+      this.fireAction(rootId);
+    }, entry.delayMs);
+    this.timers.set(rootId, handle);
+  }
+
+  private cancelTimer(rootId: number): void {
+    const handle = this.timers.get(rootId);
+    if (handle !== undefined) {
+      clearTimeout(handle);
+      this.timers.delete(rootId);
+    }
+  }
+
+  /** Submit the queued action for `rootId` via
+   *  `ctx.reducers.proposeAction`.
+   *
+   *  Re-evaluates the chain one last time at fire-time as a safety
+   *  net. The stack-change subscription should have caught any
+   *  invalidating mutations already, but this final check makes the
+   *  guarantee structural: the action only proposes against current
+   *  state. If the chain no longer matches, `evaluateRoot` drops the
+   *  queue and the subsequent `this.queue.get(rootId)` lookup
+   *  returns undefined — we bail before sending. */
+  private fireAction(rootId: number): void {
+    this.evaluateRoot(rootId);
+    const action = this.queue.get(rootId);
+    if (!action || action.submitted) return;
+    action.submitted = true;
+    // `progressFor` returns null for submitted entries — force the
+    // anchor card to re-layout so the bar clears immediately rather
+    // than freezing at the last drawn fraction.
+    this.ctx.cards?.get(action.progressAnchor)?.layoutCard.invalidate();
 
     debug.log(
       ["actions"],
-      `[ActionManager] attempting action: recipe=${action.recipeIndex} root=${root} hex=${hex} slots=[${slots.join(",")}] rootDist=${action.rootDist} dir=${action.direction} surface=${rootRow.surface} macroZone=${rootRow.macroZone} microZone=0x${rootRow.microZone.toString(16)} microLocation=${rootRow.microLocation}`,
+      `[ActionManager] proposeAction recipe=${action.recipeId} root=${rootId} bindings=${JSON.stringify(action.bindings)}`,
       2,
     );
 
+    // Stamp `predict_slot_hold` / `predict_position_hold` on every card
+    // the recipe will claim, bridging the round-trip window where the
+    // server's `slot_hold` / `position_hold_count` writes haven't yet
+    // arrived. Without this, a card whose lifecycle has it scheduled
+    // to die at T can race the proposeAction round-trip: client marks
+    // it dead, animation starts, the server's slot_hold (which would
+    // have deferred death) arrives after the card has already been
+    // removed from the scene. The predicted bits give the client the
+    // same deferral signal immediately.
+    this.applyPredictedHolds(action);
+
     const cleanup = () => {
-      // Only remove if this exact submitted entry is still present —
-      // a `dropForCard` could have replaced it in the meantime.
-      if (this.queue.get(key) === submittedEntry) {
-        this.queue.delete(key);
+      // Clear the predicted holds before dropping the entry. By the
+      // time the reducer event arrives, the server's authoritative
+      // `slot_hold` / `position_hold_count` writes have already
+      // landed in `cardsLocal` via the subscription (the SDK delivers
+      // row updates before firing the reducer callback), so dropping
+      // the prediction here doesn't leave a gap.
+      this.clearPredictedHolds(action);
+      // Once the round trip resolves, drop the entry so a future
+      // chain mutation can re-evaluate. Check identity in case
+      // a different mutation has already replaced the queue slot.
+      if (this.queue.get(rootId) === action) {
+        this.queue.delete(rootId);
       }
     };
 
     this.ctx.reducers
       .proposeAction({
-        hex,
-        root,
-        slots,
-        surface: rootRow.surface,
-        macroZone: rootRow.macroZone,
-        microZone: rootRow.microZone,
-        microLocation: rootRow.microLocation,
-        recipeId: action.recipeIndex,
-        rootDist: action.rootDist,
+        recipeId: action.recipeId,
+        surface: action.surface,
+        macroZone: action.macroZone,
+        microZone: action.microZone,
+        root: action.looseRootId,
+        bindings: action.bindings,
       })
       .then(() => {
         debug.log(
           ["actions"],
-          `[ActionManager] proposeAction accepted: t=${(Date.now() / 1000).toFixed(3)} recipe=${action.recipeIndex} key=${key}`,
+          `[ActionManager] proposeAction accepted: recipe=${action.recipeId} root=${rootId}`,
           2,
         );
         cleanup();
@@ -746,159 +641,115 @@ export class ActionManager {
       .catch((err: unknown) => {
         debug.log(
           ["actions"],
-          `[ActionManager] proposeAction rejected: recipe=${action.recipeIndex} err=${String(err)}`,
+          `[ActionManager] proposeAction rejected: recipe=${action.recipeId} root=${rootId} err=${String(err)}`,
           2,
         );
         cleanup();
       });
   }
 
-  private queueKey(
-    looseRootId: number,
-    direction: StackDirection,
-    recipeIndex: number,
-    actorId: number,
-  ): string {
-    return `${looseRootId}:${direction}:${recipeIndex}:${actorId}`;
-  }
+  /** Walk the recipe's iterators + root anchor and stamp
+   *  `predict_slot_hold` / `predict_position_hold` on each binding's
+   *  local card row according to the iterator's tokens (the parser's
+   *  per-statement `borrow` / `share` / `claim` / `use` prefixes
+   *  aggregated into `Iterator.slotHold` / `positionHold`). Root gets
+   *  the union of `recipe.rootSlotHold`/`rootPositionHold` and any
+   *  promotion path (root appearing in an iterator's bindings inherits
+   *  that iter's tokens). Mirrors `apply_locks` in
+   *  `spacetime/server/modules/shard/src/actions.rs` so the client
+   *  prediction matches the server's eventual flag writes. */
+  private applyPredictedHolds(action: QueuedAction): void {
+    const recipe = this.ctx.definitions.recipeById(action.recipeId);
+    if (recipe === null) return;
+    const slotMask = this.ctx.definitions.cardFlagMask("predict_slot_hold");
+    const posMask = this.ctx.definitions.cardFlagMask("predict_position_hold");
+    if (slotMask === 0 && posMask === 0) return;
 
-  /** Walk `cardsLocal.ownerId` up from `cardId` until reaching a row
-   *  carrying `FLAG_OWNED_BY_PLAYER` — that row IS the soul, and its
-   *  card_id is returned. Returns `0` if the walk reaches world
-   *  (`ownerId === 0` without the flag), hits a card not present
-   *  locally, or trips the depth cap (defensive against cycles).
-   *  Mirrors server-side `cards::owning_soul`. */
-  private owningSoulCardId(cardId: number): number {
-    const FLAG_OWNED_BY_PLAYER = 1 << 20;
-    const DEPTH_CAP = 32;
-    let cur = cardId;
-    for (let i = 0; i < DEPTH_CAP; i++) {
-      const row = this.ctx.data.cardsLocal.get(cur);
-      if (!row) return 0;
-      if ((row.flags & FLAG_OWNED_BY_PLAYER) !== 0) return cur;
-      if (row.ownerId === 0) return 0;
-      cur = row.ownerId;
+    // Root locks: explicit anchor tokens unioned with promotion paths.
+    let rootSlot = recipe.anchors.root && recipe.rootSlotHold;
+    let rootPos = recipe.anchors.root && recipe.rootPositionHold;
+    const rootId = action.looseRootId;
+    recipe.iterators.forEach((it, i) => {
+      const row = action.bindings[i];
+      if (!row || !row.includes(rootId)) return;
+      if (it.slotHold) rootSlot = true;
+      if (it.positionHold) rootPos = true;
+    });
+    if (rootId !== 0 && (rootSlot || rootPos)) {
+      this.orPredictBits(
+        rootId,
+        (rootSlot ? slotMask : 0) | (rootPos ? posMask : 0),
+      );
     }
-    return 0;
-  }
 
-  /** When a stack-change event fires for a chain rooted at a soul, every
-   *  other chain owned by that soul also needs re-evaluation — recipe
-   *  has-predicates feed off `topStackDefs(soulId, …)`, so an equip /
-   *  unequip on the soul transitions those chains' matchability without
-   *  any structural change on the chains themselves. Iterate
-   *  `cardsLocal` and re-evaluate every other eligible loose root
-   *  (state-0 LOOSE or state-3 virtual world hex root) whose owning
-   *  soul resolves to `rootId`.
-   *
-   *  No-op when `rootId` isn't a soul. The soul walking itself on the
-   *  world also fires this path; the fan-out is harmless — chains that
-   *  don't match cheap-out in `evaluateRoot`'s phase loop. */
-  private cascadeFromSoulChange(rootId: number): void {
-    const FLAG_OWNED_BY_PLAYER = 1 << 20;
-    const rootRow = this.ctx.data.cardsLocal.get(rootId);
-    if (!rootRow) return;
-    if ((rootRow.flags & FLAG_OWNED_BY_PLAYER) === 0) return;
-
-    for (const row of this.ctx.data.cardsLocal.values()) {
-      if (row.cardId === rootId) continue;
-      const state = getStackedState(row.microZone);
-      const isLoose = state === STACKED_LOOSE;
-      const isVirtualWorldHexRoot =
-        state === STACKED_ON_HEX &&
-        row.microLocation === 0 &&
-        row.surface >= WORLD_LAYER;
-      if (!isLoose && !isVirtualWorldHexRoot) continue;
-      if (this.owningSoulCardId(row.cardId) !== rootId) continue;
-      this.evaluateRoot(row.cardId);
-    }
-  }
-
-  /** Packed defs of cards currently stacked on `soulId` in the given
-   *  `direction` (UP = equipment / above, DOWN = action stack /
-   *  below). Used by `tryMatch` to feed `has` / `reagents.has` /
-   *  `has_below` predicate filters into the wasm matcher.
-   *
-   *  Walks the chain BFS-style from the soul outward, accepting both
-   *  state-1 (`Slot`, `microLocation = immediate parent`) and
-   *  state-2 (`OnRoot`, `microLocation = chain root`) rows. Both
-   *  encodings appear in `cardsLocal`:
-   *   - `CardManager.stack` writes state-1 from drag-drop.
-   *   - The server's `equip_card` / `propose_action` writes state-2,
-   *     but `mirrorCard.preservePosition` keeps the local state-1
-   *     shape when `force_position` is clear — so practically the
-   *     local row's state can differ from the server's verbatim.
-   *  A filter on either state alone would miss whichever the server
-   *  wrote. The BFS subsumes both: every child whose
-   *  `microLocation` points into the already-visited chain set is
-   *  picked up.
-   *
-   *  Returns an empty array when `soulId === 0` or no chained cards
-   *  in that direction. The matcher treats an empty pool as "this
-   *  slot has no candidate," filtering any recipe that declares a
-   *  has-predicate for it. */
-  private topStackDefs(soulId: number, direction: number): number[] {
-    if (soulId === 0) return [];
-
-    // Build a `parentId -> children[]` index over chain rows in this
-    // direction. `parentId` is whatever `microLocation` points at,
-    // regardless of whether the row is `Slot` (immediate-predecessor
-    // pointer) or `OnRoot` (chain-root pointer). The BFS below
-    // naturally handles both shapes because:
-    //   - Multiple `OnRoot` siblings under one root all show up as
-    //     children of that root and are visited at the same depth.
-    //   - `Slot` chains form a linked list; each card is a child of
-    //     the prior. The BFS traverses depth-first effectively
-    //     because there's only one child per parent in a pure Slot
-    //     chain.
-    const childrenByParent = new Map<number, { id: number; def: number }[]>();
-    for (const row of this.ctx.data.cardsLocal.values()) {
-      const state = getStackedState(row.microZone);
-      if (state !== STACKED_ON_ROOT && state !== STACKED_SLOT) continue;
-      if (getStackDirection(row.microZone) !== direction) continue;
-      const parentId = row.microLocation;
-      if (parentId === 0) continue;
-      let list = childrenByParent.get(parentId);
-      if (list === undefined) {
-        list = [];
-        childrenByParent.set(parentId, list);
+    recipe.iterators.forEach((it, iterId) => {
+      if (!it.slotHold && !it.positionHold) return;
+      const row = action.bindings[iterId];
+      if (!row) return;
+      const mask =
+        (it.slotHold ? slotMask : 0) | (it.positionHold ? posMask : 0);
+      if (mask === 0) return;
+      for (const cardId of row) {
+        if (cardId === 0 || cardId === rootId) continue;
+        this.orPredictBits(cardId, mask);
       }
-      list.push({ id: row.cardId, def: row.packedDefinition });
-    }
+    });
+  }
 
-    const result: number[] = [];
-    const visited = new Set<number>([soulId]);
-    const queue: number[] = [soulId];
-    while (queue.length > 0) {
-      const cur = queue.shift()!;
-      const kids = childrenByParent.get(cur);
-      if (kids === undefined) continue;
-      for (const kid of kids) {
-        if (visited.has(kid.id)) continue;
-        visited.add(kid.id);
-        result.push(kid.def);
-        queue.push(kid.id);
+  /** Companion to `applyPredictedHolds` — clears the same bits on the
+   *  same set of cards. Walks recipe + bindings + root identically so
+   *  we don't have to snapshot the touched-card set at fire time. */
+  private clearPredictedHolds(action: QueuedAction): void {
+    const recipe = this.ctx.definitions.recipeById(action.recipeId);
+    if (recipe === null) return;
+    const slotMask = this.ctx.definitions.cardFlagMask("predict_slot_hold");
+    const posMask = this.ctx.definitions.cardFlagMask("predict_position_hold");
+    const fullMask = slotMask | posMask;
+    if (fullMask === 0) return;
+
+    const rootId = action.looseRootId;
+    if (rootId !== 0) this.clearPredictBits(rootId, fullMask);
+    for (const row of action.bindings) {
+      for (const cardId of row) {
+        if (cardId === 0 || cardId === rootId) continue;
+        this.clearPredictBits(cardId, fullMask);
       }
     }
-    return result;
+  }
+
+  /** OR `mask` into `cardId`'s local-row flags. Skipped if the row
+   *  isn't in `cardsLocal` (server deletion / subscription gap) or if
+   *  the bits are already set. */
+  private orPredictBits(cardId: number, mask: number): void {
+    const row = this.ctx.data.cardsLocal.get(cardId);
+    if (!row) return;
+    if ((row.flags & mask) === mask) return;
+    this.ctx.data.setLocalCard(cardId, { ...row, flags: row.flags | mask });
+  }
+
+  /** Clear `mask` bits from `cardId`'s local-row flags. Skipped if the
+   *  row isn't present or if the bits are already clear. */
+  private clearPredictBits(cardId: number, mask: number): void {
+    const row = this.ctx.data.cardsLocal.get(cardId);
+    if (!row) return;
+    if ((row.flags & mask) === 0) return;
+    this.ctx.data.setLocalCard(cardId, { ...row, flags: row.flags & ~mask });
   }
 }
 
-function queueActionDiffers(a: QueuedAction, b: QueuedAction): boolean {
-  return (
-    a.recipeIndex !== b.recipeIndex ||
-    a.actorId !== b.actorId ||
-    a.rootDist !== b.rootDist ||
-    a.hasRoot !== b.hasRoot ||
-    a.hasHex !== b.hasHex ||
-    a.hexParentId !== b.hexParentId ||
-    a.looseRootId !== b.looseRootId ||
-    !sameChain(a.chain, b.chain)
-  );
-}
-
-function sameChain(a: readonly number[], b: readonly number[]): boolean {
+/** Bindings array equality — same lengths, same card_ids in same
+ *  positions. Compared cell-by-cell since the typical bindings
+ *  array is small (~3 rows of ~3 cards) and Array.prototype.toString
+ *  would mis-equate `[1,2]` and `[12]`. */
+function bindingsEqual(a: number[][], b: number[][]): boolean {
   if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  for (let i = 0; i < a.length; i++) {
+    const ra = a[i];
+    const rb = b[i];
+    if (ra.length !== rb.length) return false;
+    for (let j = 0; j < ra.length; j++) {
+      if (ra[j] !== rb[j]) return false;
+    }
+  }
   return true;
 }

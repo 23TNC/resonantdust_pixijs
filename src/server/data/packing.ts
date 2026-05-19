@@ -195,11 +195,12 @@ export function unpackMicroZone(microZone: number): {
 }
 
 /** Pack `(position, direction, stackedState)` into a u8 microZone under
- *  the **stack** layout (`[position: u5 | direction: u1 | state: u2]`).
+ *  the **stack** layout (`[position: u4 | direction: u2 | state: u2]`).
  *
  *  `position` is the card's 1-indexed place in its chain from the root
- *  (saturates at 31). `direction` is `0 = up / top` or `1 = down /
- *  bottom`. The "server is forcing this position" signal moved out of
+ *  (saturates at 15). `direction` is the branch number — `0 = hex /
+ *  tile`, `1 = up / top`, `2 = down / bottom`. Value 3 is reserved.
+ *  The "server is forcing this position" signal moved out of
  *  microZone and now lives in `flags` (`force_position` bit 11) — set
  *  / clear that bit on `Card.flags` instead.
  *
@@ -210,9 +211,9 @@ export function packStackMicroZone(
   direction: number,
   stackedState: number,
 ): number {
-  const pos = position & 0x1f;
-  const dir = direction & 0x1;
-  return (pos << 3) | (dir << 2) | (stackedState & 0x3);
+  const pos = position & 0xf;
+  const dir = direction & 0x3;
+  return (pos << 4) | (dir << 2) | (stackedState & 0x3);
 }
 
 /** Inverse of [`packStackMicroZone`]. The caller is responsible for
@@ -225,8 +226,8 @@ export function unpackStackMicroZone(microZone: number): {
   stackedState: number;
 } {
   return {
-    position: (microZone >> 3) & 0x1f,
-    direction: (microZone >> 2) & 0x1,
+    position: (microZone >> 4) & 0xf,
+    direction: (microZone >> 2) & 0x3,
     stackedState: microZone & 0x3,
   };
 }
@@ -244,15 +245,15 @@ export function isStackLayout(stackedState: number, surface: number): boolean {
 
 /** Pack a `microZone` byte for a `STACKED_SLOT` row (parent-pointer
  *  mode). Layout matches the stack layout
- *  (`[position: u5 | direction: u1 | state: u2]`) but with `position
+ *  (`[position: u4 | direction: u2 | state: u2]`) but with `position
  *  = 0` since position from root is implicit (walk parent pointers
- *  via `microLocation`). Direction is stored explicitly so chain
- *  walks and parent-resolves don't have to climb to derive it.
+ *  via `microLocation`). Direction is the 2-bit branch number — same
+ *  semantics as `packStackMicroZone`.
  *
  *  Server-only — the client never writes Slot rows. Provided here
  *  for symmetry with `packStackMicroZone` and so the bit layout has
  *  one canonical implementation. */
 export function packSlotMicroZone(direction: number): number {
-  const dir = direction & 0x1;
+  const dir = direction & 0x3;
   return (dir << 2) | 0x1; // state value 1 = STACKED_SLOT
 }

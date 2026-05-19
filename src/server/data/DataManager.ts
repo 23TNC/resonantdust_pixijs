@@ -1,6 +1,6 @@
 import { debug } from "../../debug";
 import type { CardDefinition, DefinitionManager } from "../../game/definitions/DefinitionManager";
-import type { Card, ChatMessage, Player, Soul, Zone } from "../spacetime/bindings/types";
+import type { Card, ChatMessage, Player, Soul, SoulPrivate, Zone } from "../spacetime/bindings/types";
 import { ChatSubscriptionManager } from "../spacetime/ChatSubscriptionManager";
 import type { ConnectionRegistry } from "../spacetime/ConnectionRegistry";
 import type { ReducerManager } from "../spacetime/ReducerManager";
@@ -17,6 +17,14 @@ import { AppendTable } from "./AppendTable";
 const INVENTORY_LAYER = 1;
 const FLAG_SLOT_HOLD = 1 << 5;
 const FLAG_ACTION_DEAD = 1 << 7;
+// `predict_slot_hold` (bit 21) / `predict_position_hold` (bit 22) —
+// client-only prediction bits set by `ActionManager` between
+// proposeAction dispatch and the round-trip response. `mirrorCard`
+// preserves them across server pushes; consumers see the union via
+// `DefinitionManager.isSlotHeld` / `isPositionHeld`.
+const FLAG_PREDICT_SLOT_HOLD = 1 << 21;
+const FLAG_PREDICT_POSITION_HOLD = 1 << 22;
+const FLAG_PREDICT_MASK = FLAG_PREDICT_SLOT_HOLD | FLAG_PREDICT_POSITION_HOLD;
 // `progress_style` is the u3 field at bits 8..=10 of `Card.flags`. See
 // `content/cards/flags.json`. Set on the actor's completion row by
 // `action_completion`; the client reads it to render a progress bar
@@ -138,6 +146,11 @@ export class DataManager {
   readonly playersLocal = new Map<number, Player>();
   readonly soulsLocal = new Map<number, Soul>();
   readonly zonesLocal = new Map<number, Zone>();
+  /** Per-soul private state, keyed by `card_id`. Flat (no history) —
+   *  mirrors the `soul_privates` server table 1:1 from
+   *  `subscribeSoulPrivate(soulCardId)`. Each client typically holds
+   *  exactly one row (for the active soul). */
+  readonly soulPrivatesLocal = new Map<number, SoulPrivate>();
 
   private readonly unsubMirror: Array<() => void> = [];
 
@@ -199,6 +212,22 @@ export class DataManager {
       onInsert: this.souls.insert,
       onUpdate: this.souls.update,
       onDelete: this.souls.delete,
+    });
+    // `soul_privates` is flat (no validAt history), so we mirror it
+    // directly into `soulPrivatesLocal` instead of routing through a
+    // `ValidAtTable`. The server only inserts/updates one row per
+    // soul card_id; this client typically holds the row for its
+    // active soul (subscribed via `SoulManager`).
+    this.subscriptions.registerTableHandlers("soul_privates", {
+      onInsert: (row) => {
+        this.soulPrivatesLocal.set(row.cardId, row);
+      },
+      onUpdate: (_oldRow, newRow) => {
+        this.soulPrivatesLocal.set(newRow.cardId, newRow);
+      },
+      onDelete: (row) => {
+        this.soulPrivatesLocal.delete(row.cardId);
+      },
     });
     this.subscriptions.registerTableHandlers("zones", {
       onInsert: this.zones.insert,
@@ -605,11 +634,21 @@ export class DataManager {
     let serverForcesStackPosition = false;
     if (!orphanSlot) {
       if (serverState === 0 /* STACKED_LOOSE */) {
-        // Loose inventory cards are entirely client-positioned —
-        // drag-drop, splice transplants, etc. The server never asserts
-        // a meaningful position for them, so always keep the local
-        // overlay's spatial fields over whatever the serverRow carries.
-        preservePosition = true;
+        // Position-ownership for LOOSE cards splits on surface:
+        //
+        //   - INVENTORY (`surface < WORLD_LAYER`): client owns. Drag-
+        //     drop and splice transplants write the position purely
+        //     locally; the server's view (which only knows the
+        //     inventory bucket, not the pixel xy) shouldn't clobber.
+        //   - WORLD (`surface >= WORLD_LAYER`): server owns. World-
+        //     loose cards (souls, dropped items on tiles) carry their
+        //     hex address in `macroZone + microZone`, and the server
+        //     authoritatively writes those — e.g. `move_soul`'s
+        //     per-step writes update the soul's tile. Preserving the
+        //     local row here would silently drop those moves and
+        //     leave the client's view permanently stuck at the
+        //     pre-move position.
+        preservePosition = serverRow.surface < WORLD_LAYER;
       } else if (serverState === 1 /* STACKED_SLOT */) {
         // State-1 chain members carry `microLocation = predecessor`
         // and `microZone = direction`. The client owns the chain
@@ -637,23 +676,36 @@ export class DataManager {
       // when the dying card's animation completes.
     }
 
+    // Preserve client-only prediction bits across server pushes. The
+    // server never writes these (it owns `slot_hold` / `position_hold_count`
+    // directly); they're set by `ActionManager` at proposeAction dispatch
+    // and cleared at the round-trip response. Without this preserve, the
+    // next mirrored server row would clobber the prediction window and
+    // a dead card whose propose hadn't yet returned would lose its
+    // death-deferral signal. The bits stick on the local row until
+    // ActionManager explicitly writes them back to 0 via setLocalCard.
+    const predictBits = prev !== undefined ? prev.flags & FLAG_PREDICT_MASK : 0;
+    const mergedServerRow: Card = predictBits === 0
+      ? serverRow
+      : { ...serverRow, flags: serverRow.flags | predictBits };
+
     const baseRow: Card = orphanSlot
       ? {
-          ...serverRow,
-          macroZone:     serverRow.ownerId,
+          ...mergedServerRow,
+          macroZone:     mergedServerRow.ownerId,
           surface:       INVENTORY_LAYER,
           microLocation: 0, // encodeLooseXY(0, 0) === 0
-          microZone:     serverRow.microZone & ~0x3, // state → STACKED_LOOSE
+          microZone:     mergedServerRow.microZone & ~0x3, // state → STACKED_LOOSE
         }
       : preservePosition && prev !== undefined
       ? {
-          ...serverRow,
+          ...mergedServerRow,
           macroZone:     prev.macroZone,
           microZone:     prev.microZone,
           microLocation: prev.microLocation,
           surface:       prev.surface,
         }
-      : serverRow;
+      : mergedServerRow;
     // Preserve `dead: 2` once the layout has finished its animation —
     // otherwise a subsequent server push with the flag still set would
     // regress us to `1` and replay the animation.

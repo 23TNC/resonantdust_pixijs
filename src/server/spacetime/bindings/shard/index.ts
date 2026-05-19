@@ -53,6 +53,7 @@ import UnequipCardReducer from "./unequip_card_reducer";
 import CardsRow from "./cards_table";
 import PlayerProfilesRow from "./player_profiles_table";
 import PlayersRow from "./players_table";
+import SoulPrivatesRow from "./soul_privates_table";
 import SoulsRow from "./souls_table";
 import ZonesRow from "./zones_table";
 
@@ -108,6 +109,17 @@ const tablesSchema = __schema({
       { name: 'players_valid_at_key', constraint: 'unique', columns: ['validAt'] },
     ],
   }, PlayersRow),
+  soul_privates: __table({
+    name: 'soul_privates',
+    indexes: [
+      { accessor: 'card_id', name: 'soul_privates_card_id_idx_btree', algorithm: 'btree', columns: [
+        'cardId',
+      ] },
+    ],
+    constraints: [
+      { name: 'soul_privates_card_id_key', constraint: 'unique', columns: ['cardId'] },
+    ],
+  }, SoulPrivatesRow),
   souls: __table({
     name: 'souls',
     indexes: [

@@ -1,6 +1,6 @@
 import { MINI_ZONE_LAYER, unpackZoneId, WORLD_LAYER, type ZoneId } from "../data/packing";
 import { DbConnection as ShardDbConnection } from "./bindings/shard";
-import type { Card, Player, Soul, Zone } from "./bindings/types";
+import type { Card, Player, Soul, SoulPrivate, Zone } from "./bindings/types";
 import type { ConnectionManager } from "./ConnectionManager";
 import { SubscriptionBase, type TableHandlers } from "./SubscriptionBase";
 
@@ -11,6 +11,7 @@ type ShardTableRowMap = {
   cards: Card;
   players: Player;
   souls: Soul;
+  soul_privates: SoulPrivate;
   zones: Zone;
 } & Record<string, unknown>;
 
@@ -74,6 +75,19 @@ export class SubscriptionManager extends SubscriptionBase<
     conn.db.souls.onDelete((ctx, row) => {
       this.captureReducerTimestamp(ctx);
       this.fanOut("souls", "onDelete", (h) => h.onDelete?.(row));
+    });
+
+    conn.db.soul_privates.onInsert((ctx, row) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("soul_privates", "onInsert", (h) => h.onInsert?.(row));
+    });
+    conn.db.soul_privates.onUpdate((ctx, oldRow, newRow) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("soul_privates", "onUpdate", (h) => h.onUpdate?.(oldRow, newRow));
+    });
+    conn.db.soul_privates.onDelete((ctx, row) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("soul_privates", "onDelete", (h) => h.onDelete?.(row));
     });
 
     conn.db.zones.onInsert((ctx, row) => {
@@ -177,5 +191,22 @@ export class SubscriptionManager extends SubscriptionBase<
 
   unsubscribeSoul(cardId: number): void {
     this.removeSubscription(`soul:${cardId}`);
+  }
+
+  /** Subscribe to the private per-soul state row for `cardId`. Mirrors
+   *  the `PlayerProfile` pattern — the table is `public`, but each
+   *  client only queries the row for the soul they actively control,
+   *  so progression bits (`blueprints_0`, etc.) don't fan out to
+   *  every other client mirroring this soul via the world-zone
+   *  subscription. */
+  async subscribeSoulPrivate(cardId: number): Promise<void> {
+    return this.installSubscription(`soul_private:${cardId}`, {
+      queries: [`SELECT * FROM soul_privates WHERE card_id = ${cardId}`],
+      scopeKey: `soul_private:${cardId}`,
+    });
+  }
+
+  unsubscribeSoulPrivate(cardId: number): void {
+    this.removeSubscription(`soul_private:${cardId}`);
   }
 }

@@ -106,9 +106,8 @@ export class LayoutHexCard extends LayoutCard {
    *  from `CardTextureManager.getCardArt(name)`, atlas-packed once
    *  per filename. Sits above `hexSprite` (the baked hex
    *  background) so different cards sharing one def can show
-   *  different art without re-baking the hex. Today no hex defs
-   *  declare a sprite; the field is wired through for parity with
-   *  rect cards and as a hook for future hex-card art. */
+   *  different art without re-baking the hex. Hidden when the def
+   *  declares no sprite. */
   private readonly artSprite     = new Sprite();
   private readonly stateOverlay  = new Graphics();
   /** Magnetic-phase progress bar — thin filled strip along the
@@ -155,6 +154,7 @@ export class LayoutHexCard extends LayoutCard {
   overlayOffsetY = 0;
   private unsubObjectLoad: (() => void) | null = null;
   private unsubTileChange: (() => void) | null = null;
+  private unsubArtLoad: (() => void) | null = null;
 
   constructor(cardId: number, ctx: GameContext) {
     super(cardId, ctx);
@@ -227,6 +227,18 @@ export class LayoutHexCard extends LayoutCard {
         this.refreshObjectOverlay(this.overlayQ, this.overlayR, this.overlayOffsetX, this.overlayOffsetY);
       }
     }) ?? null;
+
+    // Re-apply card art whenever a sprite finishes lazy-loading.
+    // `applyCardArt` here is only invoked from `applyData` on a
+    // `packedDefinition` change, so an `invalidate()` would not
+    // re-resolve the art on its own — we have to call it directly
+    // with the current def. Cache-hit fast path for sprites already
+    // resolved; per-card cost is one decode + one Map lookup.
+    this.unsubArtLoad = ctx.cardTextures.onArtLoad(() => {
+      if (this.currentPackedDefinition === null) return;
+      const def = ctx.definitions.decode(this.currentPackedDefinition) ?? null;
+      this.applyCardArt(def);
+    });
   }
 
   applyData(row: CardRow): void {
@@ -259,7 +271,15 @@ export class LayoutHexCard extends LayoutCard {
     // frame. `dead: 2` is written by `layout()` once the wipe + tail
     // finish; the mirror's preserve gate keeps the `2` across
     // further server pushes so we don't replay.
-    if ((row as LocalCard).dead === 1 && !this.dying) {
+    //
+    // Deferral on slot_hold: a dead row carrying slot_hold is an
+    // in-flight death — some concurrent recipe is still holding
+    // this card and forward-prop layered slot_hold onto the death
+    // row. Wait for the holding recipe's completion to write a new
+    // row clearing slot_hold before animating. See the matching
+    // gate in `RectCard.applyData`.
+    const slotHeldHex = this.ctx.definitions.isSlotHeld(row.flags);
+    if ((row as LocalCard).dead === 1 && !this.dying && !slotHeldHex) {
       this.dying = true;
       this.deathProgress = 0;
       this.visual.mask = this.deathMask;
@@ -355,6 +375,17 @@ export class LayoutHexCard extends LayoutCard {
       }
     }
 
+    // Client-side queue-debounce indicator: while `ActionManager` is
+    // counting down to `proposeAction`, paint a second ring at a
+    // slightly inset radius so it nests inside any server-side ring
+    // and stays visible distinctly. Bar fills `ltr` (cw) and clears
+    // when the action submits.
+    const debounce = this.ctx.actions?.progressFor(this.cardId) ?? null;
+    if (debounce !== null) {
+      this.drawHexProgressRing(debounce, /* ccw */ false, cx, cy, HEX_CARD_RADIUS - 5, 0xffffff, 0x222222, 2);
+      if (debounce < 1) showingProgress = true;
+    }
+
     // Rect-style mask-wipe death. `deathProgress` runs `0 → 1` while
     // the bounding-box mask shrinks (top stays, bottom wipes away);
     // continues to `4` to let the ascend-particle tail play out
@@ -386,14 +417,20 @@ export class LayoutHexCard extends LayoutCard {
           this.deathParticleContainer = null;
         }
 
-        // `dead: 2` BEFORE splice — `CardManager.spliceCard` refuses
-        // to splice cards whose `dead !== 2`, so this write is
-        // load-bearing. The mirror's preserve gate keeps the `2`
-        // across further server pushes that still carry
-        // FLAG_ACTION_DEAD, so we don't replay this branch.
-        const cur = this.ctx.data.cardsLocal.get(this.cardId);
-        if (cur) this.ctx.data.setLocalCard(this.cardId, { ...cur, dead: 2 });
+        // Splice FIRST, then mark dead=2 — see the matching comment in
+        // `RectCard.layout` for the full rationale. The `dead: 2` write
+        // synchronously fires `CardManager.destroy`, which removes this
+        // Card from the registry and tears down our PIXI container; if
+        // we wrote `dead: 2` first, `spliceCard`'s `this.cards.get`
+        // lookup would return undefined and skip chain repair, and any
+        // code after this branch (tweenTo) would crash on a nulled
+        // container. Return immediately on the dead=2 path.
         this.ctx.cards?.spliceCard(this.cardId);
+        const cur = this.ctx.data.cardsLocal.get(this.cardId);
+        if (cur) {
+          this.ctx.data.setLocalCard(this.cardId, { ...cur, dead: 2 });
+          return false;
+        }
       }
     }
 
@@ -586,15 +623,17 @@ export class LayoutHexCard extends LayoutCard {
    *  shrinks from the bottom upward, so particles trail the wipe
    *  edge. Uses the card definition's primary style color so the
    *  particles inherit the dying card's palette. */
-  /** Resolve and apply the card-art sprite. Currently hex defs
-   *  never declare `def.sprite` (no shipped hex card uses art on
-   *  top of its baked tile), but the wiring matches LayoutRectCard
-   *  so future hex art lands in the per-filename atlas cache
-   *  alongside rect-card art. Centred on the hex bounding box,
-   *  scaled so the art's longer side spans
-   *  [`HEX_ART_FRACTION`] of the inscribed circle's diameter (the
-   *  short axis of the hex bounding box) — keeps the art inside
-   *  the hex outline without per-card masking. */
+  /** Resolve and apply the card-art sprite for this hex card.
+   *  Reads `def.sprite` (the static per-definition sprite filename
+   *  from the card's JSON) and fetches the texture through
+   *  `cardTextures.getCardArt`, same atlas-packed cache used by
+   *  rect cards — every hex card sharing a sprite filename
+   *  references one texture. No sprite → hide the art layer.
+   *
+   *  Centred on the hex bounding box, scaled so the art's longer
+   *  side spans [`HEX_ART_FRACTION`] of the inscribed circle's
+   *  diameter (the short axis of the hex bounding box) — keeps
+   *  the art inside the hex outline without per-card masking. */
   private applyCardArt(def: CardDefinition | null): void {
     const artName = def?.sprite ?? null;
     if (!artName) {
@@ -640,6 +679,8 @@ export class LayoutHexCard extends LayoutCard {
     this.unsubDying = null;
     this.unsubObjectLoad?.();
     this.unsubObjectLoad = null;
+    this.unsubArtLoad?.();
+    this.unsubArtLoad = null;
     this.unsubTileChange?.();
     this.unsubTileChange = null;
     if (this.overlaySprite) {

@@ -40,6 +40,28 @@ export function allCardSpriteUrls(): readonly string[] {
   return [...URL_BY_BASENAME.values()].sort();
 }
 
+/** Subset of card-sprite URLs to preload synchronously at startup.
+ *  The full catalog is bundled by the glob above so every PNG is
+ *  reachable at runtime; this function picks the slice we want
+ *  available without a network round-trip on first reference.
+ *
+ *  Policy: preload anything that's likely to be visible on the
+ *  first frame after login (requisites in inventory, soul
+ *  portraits in the world) and lazy-load assets that only appear
+ *  when the player interacts with specific content (tile art
+ *  under `/tiles/`). The lazy path in
+ *  `CardTextureManager.getCardArt` triggers `Assets.load` on first
+ *  miss and fires `onArtLoad` so cards that hit the null branch
+ *  re-sync once the texture lands. */
+export function corePreloadUrls(): readonly string[] {
+  const out: string[] = [];
+  for (const url of URL_BY_BASENAME.values()) {
+    if (url.includes("/textures/cards/tiles/")) continue;
+    out.push(url);
+  }
+  return out.sort();
+}
+
 /** Look up the full URL for a card-sprite basename (with or without
  *  the `.png` suffix). Returns `null` if no matching file exists.
  *  Used by the `applySprite` path on rect / hex card visuals to

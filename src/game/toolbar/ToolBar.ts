@@ -13,9 +13,10 @@ const BUTTON_FONT_SIZE = 18;
 const BUTTON_FONT_WEIGHT = "400";
 
 /** Hardcoded button glyphs. Add new entries here; `WIDTH` recomputes
- *  automatically. No click handlers wired yet — wire-up is a follow-up
- *  alongside the title bar's settings gear. */
+ *  automatically. Only the wrench is wired today — the rest are inert
+ *  glyphs until their handlers land. */
 const BUTTON_LABELS = ["💡", "🔧", "☑"] as const;
+const WRENCH_LABEL = "🔧";
 
 /** Top-left tool strip rendered directly under the title bar. Width is
  *  derived from the fixed button list — `GameLayout` reads `ToolBar.WIDTH`
@@ -26,6 +27,10 @@ export class ToolBar extends LayoutNode {
     PADDING * 2 +
     BUTTON_LABELS.length * BUTTON_SLOT +
     Math.max(0, BUTTON_LABELS.length - 1) * BUTTON_SPACING;
+
+  /** Fired on wrench-button click. Owner (`GameLayout`) wires this to
+   *  toggle the wrench panel. */
+  onWrenchClick: (() => void) | null = null;
 
   private readonly bg = new Graphics();
   private readonly buttons: Text[];
@@ -44,6 +49,11 @@ export class ToolBar extends LayoutNode {
         },
       });
       t.anchor.set(0.5, 0.5);
+      if (label === WRENCH_LABEL) {
+        t.eventMode = "static";
+        t.cursor = "pointer";
+        t.on("pointertap", () => this.onWrenchClick?.());
+      }
       this.container.addChild(t);
       return t;
     });

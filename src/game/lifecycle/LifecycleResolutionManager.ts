@@ -190,8 +190,8 @@ export class LifecycleResolutionManager {
 
   private async tryResolveSuccess(card: Card, def: CardDefinition): Promise<void> {
     if (!def.lifecycleRecipeKey) return;
-    const recipe = this.ctx.definitions.findRecipeByKey(def.lifecycleRecipeKey);
-    if (recipe === null) {
+    const expectedRecipe = this.ctx.definitions.recipeByKey(def.lifecycleRecipeKey);
+    if (expectedRecipe === null) {
       debug.log(
         ["magnetic"],
         `[magnetic] success recipe ${def.lifecycleRecipeKey} not registered`,
@@ -199,68 +199,165 @@ export class LifecycleResolutionManager {
       );
       return;
     }
-    if (recipe.recipeType !== "magnetic") {
-      debug.log(
-        ["magnetic"],
-        `[magnetic] recipe ${def.lifecycleRecipeKey} is ${recipe.recipeType}, not magnetic`,
-        3,
-      );
-      return;
-    }
 
-    const direction: "up" | "down" = recipe.direction === 0 ? "up" : "down";
+    // How many cards does the recipe need in each top-level branch?
+    // Walk every input statement, find slot refs on top-level
+    // iterators, and track the max offset per branch — the binding
+    // for that branch needs at least `max_offset + 1` cards.
+    const branchCounts = computeBranchCounts(expectedRecipe);
 
-    // Build inventory candidate pool: cards owned by the local player
-    // that aren't themselves magnetic-flagged (per the matcher's
-    // exclusion rule) and aren't slot-held by another action.
-    const candidates = this.collectInventoryCandidates(card);
-    const match = this.findMatchingSlotCombo(
-      card.packedDefinition,
-      candidates,
-      recipe.slotCount,
-      direction,
-    );
-    if (match === null) {
-      // Inventory doesn't satisfy. Wait for inventory change; the
-      // subscription listener will re-fire this resolution on the
-      // next relevant insert/update. Clear our state so the cooldown
-      // gate in `enumerateAndResolve` doesn't suppress the retry —
-      // the `RETRY_COOLDOWN_MS` window only exists to back off after
-      // a SERVER-side rejection (handled in `submitProposeAction`).
-      // A local no-match should re-evaluate immediately as soon as
-      // any candidate card changes, otherwise a transformation that
-      // produces matching cards within the cooldown window goes
-      // unnoticed until the next unrelated event (e.g., the user
-      // dragging the anchor).
+    // Currently support recipes that need branch 1 only (the
+    // standard magnetic-success shape — `despair_success` /
+    // `strike_success`). Recipes drawing from branch 2 / hex
+    // weren't a magnetic pattern under the legacy model and
+    // aren't a target for this combo iteration today.
+    const count1 = branchCounts.get(1) ?? 0;
+    if (count1 === 0) {
+      // Root-only magnetic recipe — no inventory needed. Try the
+      // matcher with empty branches; if it hits the expected
+      // recipe, submit.
+      const match = this.runMatcher(card, []);
+      if (match !== null && match.recipe.id === def.lifecycleRecipeKey) {
+        await this.submitProposeAction(card, match.recipeId, match.bindings);
+        return;
+      }
       this.states.delete(card.cardId);
       return;
     }
 
-    await this.submitProposeAction(card, recipe.recipeIndex, match);
+    // Build inventory candidate pool.
+    const candidates = this.collectInventoryCandidates(card);
+    if (candidates.length < count1) {
+      this.states.delete(card.cardId);
+      return;
+    }
+
+    // Walk K-combinations of `candidates` (K = count1). For each,
+    // call the matcher with the synthetic chain. First combo whose
+    // matched recipe id equals the expected key wins.
+    let attempts = 0;
+    const found = this.searchCombos(
+      card,
+      candidates,
+      count1,
+      def.lifecycleRecipeKey,
+      [],
+      0,
+      { value: attempts },
+    );
+    if (found !== null) {
+      await this.submitProposeAction(card, found.recipeId, found.bindings);
+      return;
+    }
+    this.states.delete(card.cardId);
+  }
+
+  /** Recursive K-combination search. Builds candidate branch-1
+   *  arrangements and asks the matcher; returns the first match
+   *  whose `recipe.id` equals `expectedKey`, or `null` after
+   *  exhausting attempts up to `MAX_COMBINATION_ATTEMPTS`. */
+  private searchCombos(
+    card: Card,
+    pool: Card[],
+    remaining: number,
+    expectedKey: string,
+    chosen: Card[],
+    startIdx: number,
+    counter: { value: number },
+  ): { recipeId: number; bindings: number[][] } | null {
+    if (counter.value >= MAX_COMBINATION_ATTEMPTS) return null;
+    if (remaining === 0) {
+      counter.value++;
+      const branch1 = chosen.map((c) => c.cardId);
+      const match = this.runMatcher(card, branch1);
+      if (match !== null && match.recipe.id === expectedKey) {
+        return { recipeId: match.recipeId, bindings: match.bindings };
+      }
+      return null;
+    }
+    for (let i = startIdx; i < pool.length; i++) {
+      chosen.push(pool[i]);
+      const result = this.searchCombos(
+        card,
+        pool,
+        remaining - 1,
+        expectedKey,
+        chosen,
+        i + 1,
+        counter,
+      );
+      chosen.pop();
+      if (result !== null) return result;
+      if (counter.value >= MAX_COMBINATION_ATTEMPTS) return null;
+    }
+    return null;
+  }
+
+  /** Run the matcher against a synthetic chain with `card` as root
+   *  and `branch1` filling branch 1. Other branches empty; no
+   *  synthetic tile (magnetic anchors are inventory cards). */
+  private runMatcher(
+    card: Card,
+    branch1: number[],
+  ): { recipe: { id: string }; recipeId: number; bindings: number[][] } | null {
+    const cardsLocal = this.ctx.data.cardsLocal;
+    return this.ctx.definitions.findRecipeMatch({
+      root: card.cardId,
+      branches: [[], branch1, []],
+      cardLookup: (id: number) => {
+        const row = cardsLocal.get(id);
+        if (!row) return null;
+        return {
+          cardId: row.cardId,
+          packedDefinition: row.packedDefinition,
+          ownerId: row.ownerId,
+          microLocation: row.microLocation,
+        };
+      },
+      syntheticTile: null,
+      // Magnetic resolution doesn't have a `CardManager` in its
+      // context — current magnetic recipes (despair_success /
+      // strike_success) use only top-level iterators, so a
+      // branch-walker isn't needed. If a future magnetic recipe
+      // adds nested-iterator predicates (e.g. equipment checks),
+      // thread a real `cards.buildChain` walker through the
+      // `MagneticResolutionContext`.
+      branchWalker: () => [] as readonly number[],
+    });
   }
 
   // ---------- failure path -----------------------------------------
 
   private async tryResolveFailure(card: Card, _def: CardDefinition): Promise<void> {
-    // Failure recipe is a regular `stack_up` / `stack_down` recipe
-    // targeting the magnetic card as root, with no slots (or with
-    // some root-only predicate set). Try both directions; whichever
-    // matches first wins. The matcher returns 0 for "no match."
-    for (const direction of ["up", "down"] as const) {
-      const match = this.ctx.definitions.matchStackRecipe(
-        0,
-        null,
-        card.packedDefinition,
-        [],
-        direction,
-        {},
-      );
-      if (match !== null && match.recipeIndex !== 0) {
-        await this.submitProposeAction(card, match.recipeIndex, {
-          slots: [],
-        });
-        return;
-      }
+    // Failure recipe is a regular tape-form recipe whose `input`
+    // predicates are satisfied by the magnetic card sitting alone as
+    // root (no branches). Under the unified card model there's no
+    // "direction" — the matcher takes the chain configuration as-is
+    // and returns the highest-priority recipe that matches.
+    //
+    // For a root-only configuration we pass empty branches; the
+    // matcher only considers recipes whose `AnchorSet` requires no
+    // top-level branches, leaving root-only recipes like
+    // `despair_failure` / `strike_failure` / `corpus-` as the
+    // candidates.
+    const cardsLocal = this.ctx.data.cardsLocal;
+    const match = this.ctx.definitions.findRecipeMatch({
+      root: card.cardId,
+      branches: [],
+      cardLookup: (id: number) => {
+        const row = cardsLocal.get(id);
+        if (!row) return null;
+        return {
+          cardId: row.cardId,
+          packedDefinition: row.packedDefinition,
+          ownerId: row.ownerId,
+          microLocation: row.microLocation,
+        };
+      },
+    });
+    if (match !== null) {
+      await this.submitProposeAction(card, match.recipeId, match.bindings);
+      return;
     }
     debug.log(
       ["magnetic"],
@@ -274,19 +371,16 @@ export class LifecycleResolutionManager {
   private async submitProposeAction(
     card: Card,
     recipeId: number,
-    match: { slots: number[] },
+    bindings: number[][],
   ): Promise<void> {
     try {
       await this.ctx.reducers.proposeAction({
-        hex: 0,
-        root: card.cardId,
-        slots: match.slots,
+        recipeId,
         surface: card.surface,
         macroZone: card.macroZone,
         microZone: card.microZone,
-        microLocation: card.microLocation,
-        recipeId,
-        rootDist: 0,
+        root: card.cardId,
+        bindings,
       });
       this.states.set(card.cardId, { kind: "resolved" });
     } catch (err) {
@@ -356,87 +450,48 @@ export class LifecycleResolutionManager {
       if (c.macroZone !== magneticCard.macroZone) continue;
       if (c.surface !== magneticCard.surface) continue;
       if (this.ctx.definitions.hasCardFlag(c.flags, "magnetic")) continue;
-      if (this.ctx.definitions.hasCardFlag(c.flags, "slot_hold")) continue;
+      if (this.ctx.definitions.isSlotHeld(c.flags)) continue;
       if (this.ctx.definitions.hasCardFlag(c.flags, "dead")) continue;
       out.push(c);
     }
     return out;
   }
 
-  /** Enumerate ordered K-combinations of `pool` (K = `slotCount`) and
-   *  return the first one whose `matchMagneticRecipe` call succeeds.
-   *  Bounded by `MAX_COMBINATION_ATTEMPTS` to keep client ticks
-   *  predictable. */
-  private findMatchingSlotCombo(
-    rootDef: number,
-    pool: Card[],
-    slotCount: number,
-    direction: "up" | "down",
-  ): { slots: number[] } | null {
-    if (slotCount === 0) {
-      // Zero-slot magnetic recipe — unusual, but the matcher will
-      // accept and we just submit with empty slots.
-      const match = this.ctx.definitions.matchMagneticRecipe(
-        rootDef,
-        [],
-        direction,
-        {},
-      );
-      return match === null ? null : { slots: [] };
-    }
-    let attempts = 0;
-    const chosen: Card[] = [];
-    const result = this.recursiveCombo(
-      rootDef,
-      pool,
-      slotCount,
-      direction,
-      chosen,
-      0,
-      { value: attempts },
-    );
-    return result;
-  }
+}
 
-  private recursiveCombo(
-    rootDef: number,
-    pool: Card[],
-    slotCount: number,
-    direction: "up" | "down",
-    chosen: Card[],
-    startIdx: number,
-    counter: { value: number },
-  ): { slots: number[] } | null {
-    if (counter.value >= MAX_COMBINATION_ATTEMPTS) return null;
-    if (chosen.length === slotCount) {
-      counter.value++;
-      const slotDefs = chosen.map((c) => c.packedDefinition);
-      const match = this.ctx.definitions.matchMagneticRecipe(
-        rootDef,
-        slotDefs,
-        direction,
-        {},
-      );
-      if (match !== null) {
-        return { slots: chosen.map((c) => c.cardId) };
+/** Walk every input statement in `recipe`, find `Seg::Slot` refs
+ *  that resolve through top-level iterators, and return the
+ *  required card count per branch (1-indexed by branch number,
+ *  i.e. `result.get(1)` is the count for branch 1).
+ *
+ *  A branch's required count is `max referenced offset + 1` — if
+ *  the recipe references `slot.1.0` and `slot.1.2`, the binding
+ *  for branch 1 must have at least 3 cards (positions 0, 1, 2).
+ *
+ *  Used by the magnetic success-path resolver to know how many
+ *  inventory cards to pull into branch 1 when trying combos.
+ *  Nested iterators (parent !== []) don't count — their card
+ *  pool isn't inventory. */
+function computeBranchCounts(recipe: {
+  input: Array<{ segments: Array<{ type: string; value: unknown }> }>;
+  iterators: Array<{ parent: unknown[]; branch: number }>;
+}): Map<number, number> {
+  const maxOffset = new Map<number, number>();
+  for (const stmt of recipe.input) {
+    for (const seg of stmt.segments) {
+      if (seg.type !== "slot") continue;
+      const slotValue = seg.value as { iteratorId: number; offset: number };
+      const it = recipe.iterators[slotValue.iteratorId];
+      if (!it || it.parent.length !== 0) continue;
+      const prev = maxOffset.get(it.branch);
+      if (prev === undefined || slotValue.offset > prev) {
+        maxOffset.set(it.branch, slotValue.offset);
       }
-      return null;
     }
-    for (let i = startIdx; i < pool.length; i++) {
-      chosen.push(pool[i]!);
-      const result = this.recursiveCombo(
-        rootDef,
-        pool,
-        slotCount,
-        direction,
-        chosen,
-        i + 1,
-        counter,
-      );
-      chosen.pop();
-      if (result !== null) return result;
-      if (counter.value >= MAX_COMBINATION_ATTEMPTS) return null;
-    }
-    return null;
   }
+  const counts = new Map<number, number>();
+  for (const [branch, max] of maxOffset) {
+    counts.set(branch, max + 1);
+  }
+  return counts;
 }

@@ -558,12 +558,23 @@ export class Card {
       // hex Card, that hex Card doesn't move with the rect, so the
       // re-evaluation we want is for this card's own chain.
       if (parentChanged || directionChanged || tileChanged) {
+        // Resolve old/new chain roots so ActionManager can re-evaluate
+        // both sides of the move. Under the unified card model, a
+        // state-3 child IS part of its hex parent's chain (buildChain
+        // walks state-3 children at chainIdx=1) — so when a state-3
+        // card joins/leaves its hex, the HEX's chain just gained or
+        // lost a member. We need to re-evaluate the hex's chain, not
+        // pretend the chain is rooted on the moving card itself.
+        // (Earlier code special-cased `direction === "hex"` to use
+        // `this.cardId` as root, which is correct only for the legacy
+        // "rect mounted on hex" model where hex was a separate
+        // anchor — now dropped.)
         const oldRoot =
-          oldParentId !== 0 && oldDirection !== "hex"
+          oldParentId !== 0
             ? this.cardManager.rootOf(oldParentId)
             : this.cardId;
         const newRoot =
-          newParentId !== 0 && newStackDirection !== "hex"
+          newParentId !== 0
             ? this.cardManager.rootOf(newParentId)
             : this.cardId;
         this.cardManager.fireStackChange(oldRoot);

@@ -15,7 +15,7 @@
 import type { Zone } from "../../server/spacetime/bindings/types";
 import type { DefinitionManager } from "../definitions/DefinitionManager";
 import { packMacroZone, packMicroZone, unpackMacroZone, unpackMicroZone } from "../../server/data/packing";
-import { STACKED_ON_HEX } from "../cards/cardData";
+import { STACKED_LOOSE } from "../cards/cardData";
 import { ZONE_SIZE, getZoneTileDef } from "./worldCoords";
 
 /** Default soul speed when the soul's def carries no `speed` trait.
@@ -120,7 +120,11 @@ function tileDefAt(
   return 0;
 }
 
-/** Encode a global coord back into a `TilePoint` on the given surface. */
+/** Encode a global coord back into a `TilePoint` on the given surface.
+ *  `microZone` packs state=Free (the unified card model retired
+ *  STACKED_ON_HEX / state 3 — the server's `StackedState::from_u2`
+ *  panics on value 3, which used to crash `move_soul` here). The
+ *  server's `move_soul` validator checks `state == Free` per step. */
 function coordToTilePoint(coord: Coord, surface: number): TilePoint {
   const macroQ = Math.floor(coord.q / ZONE_SIZE);
   const macroR = Math.floor(coord.r / ZONE_SIZE);
@@ -129,7 +133,7 @@ function coordToTilePoint(coord: Coord, surface: number): TilePoint {
   return {
     surface,
     macroZone: packMacroZone(macroQ * ZONE_SIZE, macroR * ZONE_SIZE),
-    microZone: packMicroZone(localQ, localR, STACKED_ON_HEX),
+    microZone: packMicroZone(localQ, localR, STACKED_LOOSE),
   };
 }
 

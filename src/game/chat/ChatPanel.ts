@@ -18,11 +18,24 @@ const HANDLE_SIZE = 16;
  *  rightmost tab and the resize handle. Full `TAB_HEIGHT` tall so it
  *  reads as part of the control strip rather than a floating glyph. */
 const SETTINGS_WIDTH = 24;
+/** Width of the minimize (`−`) button. Slots to the left of the
+ *  settings button. */
+const MINIMIZE_WIDTH = 24;
 const FONT_SIZE = 13;
 /** Settings glyph rendered slightly larger than body text — matches
  *  the title-bar gear's visual weight. */
 const SETTINGS_FONT_SIZE = 14;
 const SETTINGS_FONT_WEIGHT = "400";
+const MINIMIZE_FONT_SIZE = 18;
+const MINIMIZE_FONT_WEIGHT = "700";
+
+/** Exponential-lerp factor for the minimize/restore tween. Each
+ *  layout pass moves `currentHeight` this fraction of the remaining
+ *  distance to the target. Matches the shape of `LayoutCard.tweenTo`.
+ *  `TWEEN_SNAP_PX` collapses the last sub-pixel step so we always
+ *  land exactly on the target (clean, no perpetual dirty flag). */
+const TWEEN_LERP = 0.3;
+const TWEEN_SNAP_PX = 0.5;
 /** Explicit line height for body Text — locks each row to a fixed
  *  vertical step so the resize snap math operates in clean line units.
  *  Without this Pixi would compute line height from font metrics, which
@@ -179,6 +192,42 @@ class ChatSettingsButton extends LayoutNode {
   }
 }
 
+/** Minimize affordance — a `−` glyph in the tab strip, slotted to the
+ *  left of the settings gear. Same leaf-LayoutNode shape as
+ *  `ChatSettingsButton`: `hitTestLayout` returns `this` for in-bounds
+ *  clicks, which `ChatPanel`'s `left_click` listener uses to drive the
+ *  minimize toggle. Background matches the inactive-tab fill so the
+ *  control strip reads as one band. */
+class MinimizeButton extends LayoutNode {
+  private readonly bg = new Graphics();
+  private readonly labelText: Text;
+
+  constructor() {
+    super();
+    this.container.addChild(this.bg);
+    this.labelText = new Text({
+      text: "−",
+      style: {
+        fill: 0xffffff,
+        fontFamily: "sans-serif",
+        fontSize: MINIMIZE_FONT_SIZE,
+        fontWeight: MINIMIZE_FONT_WEIGHT,
+      },
+    });
+    this.labelText.anchor.set(0.5, 0.5);
+    this.container.addChild(this.labelText);
+  }
+
+  protected override layout(): void {
+    this.bg.clear();
+    this.bg.rect(0, 0, this.width, this.height).fill({ color: TAB_INACTIVE_BG });
+    // Nudge the glyph upward a hair — the minus sign sits below the
+    // optical centre of a Text bounding box and looks low-anchored
+    // when placed at the geometric midpoint.
+    this.labelText.position.set(this.width / 2, this.height / 2 - 1);
+  }
+}
+
 /** Top-right resize affordance. Filled right-triangle whose apex is
  *  pinned to the panel's top-right corner (the actual grab point);
  *  the hypotenuse slopes inward toward the panel body, reading as a
@@ -223,6 +272,7 @@ export class ChatPanel extends LayoutNode {
   private readonly tabs: TabNode[];
   private readonly resizeHandle: ResizeHandle;
   private readonly settingsButton: ChatSettingsButton;
+  private readonly minimizeButton: MinimizeButton;
   private readonly scrollbarTrack = new Graphics();
   private readonly scrollbarThumb: ScrollbarThumb;
   private readonly inputEl: HTMLInputElement;
@@ -257,9 +307,24 @@ export class ChatPanel extends LayoutNode {
   private readonly logsTexts: Text[] = [];
 
   /** User-driven preferred size. Updated by the resize-handle drag;
-   *  read by the parent layout (`GameLayout.layout()`). */
+   *  read by the parent layout (`GameLayout.layout()`). `currentHeight`
+   *  is the *animated* height — it tracks the minimize/restore tween,
+   *  so during a transition it sits between `TAB_HEIGHT` and
+   *  `restoredHeight`. The parent reads it as `preferredHeight`,
+   *  shrinking the panel smoothly each frame. */
   private currentWidth = DEFAULT_WIDTH;
   private currentHeight = DEFAULT_HEIGHT;
+  /** Height to restore to when the user un-minimizes. Stays in sync
+   *  with `currentHeight` whenever the panel is settled at its
+   *  un-minimized size (so resizes are remembered across minimize
+   *  cycles); decoupled while the tween is in flight or while
+   *  minimized. */
+  private restoredHeight = DEFAULT_HEIGHT;
+  /** True between a minimize click and the next un-minimize click.
+   *  Drives the layout's tween target (`TAB_HEIGHT` vs `restoredHeight`)
+   *  and gates resize-drag (the handle's bounds collapse to zero, so
+   *  hit-tests miss it). */
+  private minimized = false;
 
   // ── Resize-drag state ────────────────────────────────────────────────
   private resizing = false;
@@ -311,6 +376,9 @@ export class ChatPanel extends LayoutNode {
     this.tabs = TABS.map((spec) => new TabNode(spec));
     for (const tab of this.tabs) this.addChild(tab);
     this.tabs.find((t) => t.id === this.activeTab)?.setActive(true);
+
+    this.minimizeButton = new MinimizeButton();
+    this.addChild(this.minimizeButton);
 
     this.settingsButton = new ChatSettingsButton();
     this.addChild(this.settingsButton);
@@ -452,7 +520,11 @@ export class ChatPanel extends LayoutNode {
       const rawHeight = this.startHeight - dy;
       const rawBodyH = rawHeight - VERTICAL_OVERHEAD;
       const lines = Math.max(MIN_LINES, Math.round(rawBodyH / LINE_HEIGHT));
-      this.currentHeight = VERTICAL_OVERHEAD + lines * LINE_HEIGHT;
+      const snappedH = VERTICAL_OVERHEAD + lines * LINE_HEIGHT;
+      this.currentHeight = snappedH;
+      // Keep `restoredHeight` in lockstep so a future minimize/restore
+      // round-trip lands back on the size the user just chose.
+      this.restoredHeight = snappedH;
       debug.log(
         ["chat"],
         `[ChatPanel] resize move dx=${dx} dy=${dy} widthUnits=${widthUnits} lines=${lines} → ${this.currentWidth}x${this.currentHeight}`,
@@ -481,6 +553,10 @@ export class ChatPanel extends LayoutNode {
         `[ChatPanel] left_click hit=${hit?.constructor.name ?? "null"}`,
       );
       if (!hit) return;
+      if (hit === this.minimizeButton) {
+        this.toggleMinimized();
+        return;
+      }
       if (hit === this.settingsButton) {
         // Compute viewport coords for the settings button so the menu
         // anchors its bottom-right corner to the button's position.
@@ -626,6 +702,20 @@ export class ChatPanel extends LayoutNode {
   }
   get preferredHeight(): number {
     return this.currentHeight;
+  }
+
+  /** Flip the minimize flag. `restoredHeight` is already in sync with
+   *  `currentHeight` while un-minimized (the resize handler keeps them
+   *  paired), so we don't need to capture it here — the tween in
+   *  `layout()` will pick the right target on the next pass. */
+  private toggleMinimized(): void {
+    this.minimized = !this.minimized;
+    debug.log(
+      ["chat"],
+      `[ChatPanel] minimize → ${this.minimized} (restoredHeight=${this.restoredHeight})`,
+    );
+    this.parent?.invalidate();
+    this.invalidate();
   }
 
   private setActiveTab(id: TabId): void {
@@ -900,7 +990,7 @@ export class ChatPanel extends LayoutNode {
     this.activeThumbHeight = thumbHeight;
   }
 
-  protected override layout(): void {
+  protected override layout(): boolean | void {
     // Lazy-wire input subscriptions once GameScene has populated
     // `ctx.input`. See the field doc comment above for why.
     if (!this.subscriptionsWired && this.ctxRef.input) {
@@ -908,14 +998,43 @@ export class ChatPanel extends LayoutNode {
       this.subscriptionsWired = true;
     }
 
+    // Step the minimize / restore tween. `currentHeight` is the
+    // animated value the parent reads via `preferredHeight`; each
+    // pass it eases toward `target` by `TWEEN_LERP`. When the gap
+    // closes below `TWEEN_SNAP_PX` we snap and let the dirty flag
+    // clear; otherwise we invalidate the parent so it re-reads
+    // `preferredHeight` next frame and returns `true` so our own
+    // layout runs again. Same shape as `LayoutCard.tweenTo`.
+    const target = this.minimized ? TAB_HEIGHT : this.restoredHeight;
+    let stillTweening = false;
+    if (this.currentHeight !== target) {
+      const dh = target - this.currentHeight;
+      if (Math.abs(dh) < TWEEN_SNAP_PX) {
+        this.currentHeight = target;
+      } else {
+        this.currentHeight += dh * TWEEN_LERP;
+        stillTweening = true;
+      }
+      this.parent?.invalidate();
+    }
+    // `hideContent` covers both the at-rest minimized state and the
+    // in-flight tween in either direction — the HTML input would
+    // overlap the tab strip if shown while the panel is shorter than
+    // its un-minimized size, and we don't want resize-drag to grab
+    // the handle while the layout is sliding around.
+    const hideContent = this.minimized || this.currentHeight !== this.restoredHeight;
+
     this.bg.clear();
     this.bg.rect(0, 0, this.width, this.height).fill({ color: PANEL_BG });
 
     // Tab strip layout: tabs fill the remaining width after reserving
-    // space for the settings button (full TAB_HEIGHT tall, left of the
-    // resize handle) and the resize handle itself (square, top-right
-    // corner). Tabs share the leftover width evenly.
-    const tabsAvailableW = Math.max(0, this.width - HANDLE_SIZE - SETTINGS_WIDTH);
+    // space for the minimize / settings buttons (full TAB_HEIGHT tall,
+    // left of the resize handle) and the resize handle itself (square,
+    // top-right corner). Tabs share the leftover width evenly.
+    const tabsAvailableW = Math.max(
+      0,
+      this.width - HANDLE_SIZE - SETTINGS_WIDTH - MINIMIZE_WIDTH,
+    );
     const tabW = this.tabs.length > 0 ? Math.floor(tabsAvailableW / this.tabs.length) : 0;
     let tx = 0;
     for (let i = 0; i < this.tabs.length; i++) {
@@ -924,13 +1043,27 @@ export class ChatPanel extends LayoutNode {
       tx += w;
     }
 
+    this.minimizeButton.setBounds(
+      this.width - HANDLE_SIZE - SETTINGS_WIDTH - MINIMIZE_WIDTH,
+      0,
+      MINIMIZE_WIDTH,
+      TAB_HEIGHT,
+    );
     this.settingsButton.setBounds(
       this.width - HANDLE_SIZE - SETTINGS_WIDTH,
       0,
       SETTINGS_WIDTH,
       TAB_HEIGHT,
     );
-    this.resizeHandle.setBounds(this.width - HANDLE_SIZE, 0, HANDLE_SIZE, HANDLE_SIZE);
+    // Collapse the resize handle's bounds to zero while minimized or
+    // mid-tween — the hit-test in `LayoutNode.intersects` then misses
+    // it, so `left_drag_start` can't grab it. Cleaner than guarding
+    // every resize-path branch separately.
+    if (hideContent) {
+      this.resizeHandle.setBounds(this.width - HANDLE_SIZE, 0, 0, 0);
+    } else {
+      this.resizeHandle.setBounds(this.width - HANDLE_SIZE, 0, HANDLE_SIZE, HANDLE_SIZE);
+    }
     debug.log(
       ["chat"],
       `[ChatPanel] layout panel=${this.width}x${this.height} handle=(${this.resizeHandle.x},${this.resizeHandle.y},${this.resizeHandle.width},${this.resizeHandle.height})`,
@@ -969,7 +1102,13 @@ export class ChatPanel extends LayoutNode {
       .rect(trackX, bodyTop + 2, SCROLLBAR_WIDTH, bodyHeight - 4)
       .fill({ color: SCROLLBAR_TRACK });
 
-    this.repositionInput(bodyBottom);
+    this.repositionInput(bodyBottom, hideContent);
+
+    // Returning `true` keeps `selfDirty` set so the next frame runs
+    // `layout()` again — the in-flight tween advances another step.
+    // When `stillTweening` is false the dirty flag clears and we
+    // park until the next user-driven invalidation.
+    return stillTweening;
   }
 
   /** Project the panel's bottom-edge bounds into viewport CSS-pixel
@@ -983,7 +1122,15 @@ export class ChatPanel extends LayoutNode {
    *  `rect.width / canvas.width`, which silently equalled 1 in the
    *  `resolution: 1` era but becomes `1 / DPR` once autoDensity is on
    *  and visibly misaligns the input. */
-  private repositionInput(bodyBottom: number): void {
+  private repositionInput(bodyBottom: number, hidden: boolean): void {
+    // Hide the input outright while minimized or mid-tween — it would
+    // otherwise slide across the tab strip as the panel shrinks, and
+    // capture focus from clicks meant for the un-minimize button.
+    if (hidden) {
+      this.inputEl.style.display = "none";
+      return;
+    }
+    this.inputEl.style.display = "";
     let gx = this.x;
     let gy = this.y;
     let node: LayoutNode | null = this.parent;

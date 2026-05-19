@@ -6,6 +6,7 @@ import { LayoutInventory } from "../../game/inventory/InventoryLayout";
 import { LayoutWorld } from "../../game/world/LayoutWorld";
 import { TitleBar } from "../../game/titlebar/TitleBar";
 import { ToolBar } from "../../game/toolbar/ToolBar";
+import { WrenchPanel } from "../../game/toolbar/WrenchPanel";
 import { ChatPanel } from "../../game/chat/ChatPanel";
 import { DetailsPanel } from "../../game/details/DetailsPanel";
 
@@ -26,6 +27,7 @@ class OverlayNode extends LayoutNode {
 export class GameLayout extends LayoutNode {
   readonly titleBar: TitleBar;
   readonly toolBar: ToolBar;
+  readonly wrenchPanel: WrenchPanel;
   readonly detailsPanel: DetailsPanel;
   readonly chatPanel: ChatPanel;
   readonly worldView: LayoutWorld;
@@ -47,6 +49,7 @@ export class GameLayout extends LayoutNode {
     super();
     this.titleBar = new TitleBar(playerName);
     this.toolBar = new ToolBar();
+    this.wrenchPanel = new WrenchPanel();
     this.detailsPanel = new DetailsPanel();
     this.chatPanel = new ChatPanel(ctx);
     this.worldView = new LayoutWorld(ctx, layoutManager);
@@ -58,18 +61,25 @@ export class GameLayout extends LayoutNode {
     // adjacent views drawing afterward to cover the bleed. So:
     //   1. worldView     — draws first (any bleed lands underneath).
     //   2. titleBar      — covers bleed above the world.
-    //   3. toolBar       — top-left strip, sits on top of the world.
-    //   4. detailsPanel  — below toolbar, overlays the world.
-    //   5. chatPanel     — bottom-left chat / logs, sits on top of the world.
-    //   6. inventoryView — covers bleed to the right of the world.
-    //   7. overlay       — drag previews / tooltips, always on top.
+    //   3. wrenchPanel   — left sidebar, behind toolbar / details / chat,
+    //                      above world. Width is 0 until toggled open.
+    //   4. toolBar       — top-left strip, sits on top of the wrench panel
+    //                      so the toggle glyph stays visible when open.
+    //   5. detailsPanel  — below toolbar, overlays the world.
+    //   6. chatPanel     — bottom-left chat / logs, sits on top of the
+    //                      wrench panel and the world.
+    //   7. inventoryView — covers bleed to the right of the world.
+    //   8. overlay       — drag previews / tooltips, always on top.
     this.addChild(this.worldView);
     this.addChild(this.titleBar);
+    this.addChild(this.wrenchPanel);
     this.addChild(this.toolBar);
     this.addChild(this.detailsPanel);
     this.addChild(this.chatPanel);
     this.addChild(this.inventoryView);
     this.addChild(this.overlay);
+
+    this.toolBar.onWrenchClick = () => this.wrenchPanel.toggle();
   }
 
   protected override layout(): void {
@@ -81,6 +91,19 @@ export class GameLayout extends LayoutNode {
 
     this.titleBar.setBounds(0, 0, this.width, titleH);
     this.worldView.setBounds(0, bodyTop, worldW, bodyH);
+    // Chat-panel size computed up front because the wrench panel needs
+    // it as its overscroll allowance — the chat draws on top of the
+    // wrench panel's bottom edge, so we let the user scroll the bottom
+    // rows past the chat by exactly `chatH` extra pixels.
+    const chatW = Math.min(this.chatPanel.preferredWidth, worldW);
+    const chatH = Math.min(this.chatPanel.preferredHeight, bodyH);
+    // Wrench panel spans full body height down the left edge. `currentWidth`
+    // is 0 until toggled open, so a closed panel reserves no space and
+    // intercepts no clicks. The toolbar / chat / details draw afterward
+    // and cover the panel where they overlap.
+    const wrenchW = Math.min(this.wrenchPanel.currentWidth, worldW);
+    this.wrenchPanel.setOverscroll(chatH);
+    this.wrenchPanel.setBounds(0, bodyTop, wrenchW, bodyH);
     this.toolBar.setBounds(0, bodyTop, ToolBar.WIDTH, ToolBar.HEIGHT);
     // Details panel floats over the world, flush against the left edge of
     // the inventory. Height varies with compact/expanded state and is zero
@@ -89,8 +112,6 @@ export class GameLayout extends LayoutNode {
     const detailsH = this.detailsPanel.currentHeight;
     this.detailsPanel.setBounds(detailsX, bodyTop, DetailsPanel.WIDTH, detailsH);
     // Chat panel pinned to the bottom-left of the world area.
-    const chatW = Math.min(this.chatPanel.preferredWidth, worldW);
-    const chatH = Math.min(this.chatPanel.preferredHeight, bodyH);
     this.chatPanel.setBounds(0, this.height - chatH, chatW, chatH);
     this.inventoryView.setBounds(worldW, bodyTop, inventoryW, bodyH);
     this.overlay.setBounds(0, 0, this.width, this.height);

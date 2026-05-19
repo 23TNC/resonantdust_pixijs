@@ -10,11 +10,7 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default {
-  recipeId: __t.u16(),
-  surface: __t.u8(),
-  macroZone: __t.u32(),
-  microZone: __t.u8(),
-  root: __t.u32(),
-  bindings: __t.array(__t.array(__t.u32())),
-};
+export default __t.row({
+  cardId: __t.u32().primaryKey().name("card_id"),
+  blueprints0: __t.u64().name("blueprints_0"),
+});

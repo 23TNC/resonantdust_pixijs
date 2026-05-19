@@ -156,19 +156,28 @@ export class SoulManager {
     const existing = this.data.soulsLocal.get(next);
     if (existing) this.setSoul(existing);
 
-    // Fire-and-forget for both subscriptions. The Soul row carries
-    // the data we react to (position + stats); the Card row is what
-    // the rect-card visual needs to actually render. The world-zone
-    // subscription overlaps both once the soul anchor is set, but
-    // until then these per-id subs bootstrap the chain.
+    // Fire-and-forget for the soul-scoped subscriptions:
+    // - `subscribeSoul` brings in the public Soul row (position +
+    //   stat counters — visible to other players in the same zone).
+    // - `subscribeCard` brings in the soul's Card row, which the
+    //   rect-card visual needs to actually render.
+    // - `subscribeSoulPrivate` brings in the per-soul private state
+    //   (blueprints, etc.) — this row is only delivered to the
+    //   client(s) that explicitly subscribe by card_id, mirroring
+    //   the PlayerProfile convention.
+    // The world-zone subscription overlaps the first two once the
+    // soul anchor is set, but the SoulPrivate row only ever arrives
+    // through this path.
     void this.data.subscriptions.subscribeSoul(next);
     void this.data.subscriptions.subscribeCard(next);
+    void this.data.subscriptions.subscribeSoulPrivate(next);
   }
 
   private teardownSoulSubscription(): void {
     if (this.currentSoulId !== null) {
       this.data.subscriptions.unsubscribeSoul(this.currentSoulId);
       this.data.subscriptions.unsubscribeCard(this.currentSoulId);
+      this.data.subscriptions.unsubscribeSoulPrivate(this.currentSoulId);
     }
     this.unsubSoulRow?.();
     this.unsubSoulRow = null;
