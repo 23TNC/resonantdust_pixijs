@@ -4,17 +4,20 @@
 Game logic for in-play cards: spawn/destroy, stack chains, drag-drop, inventory layout, recipe matching, definition decoding. Everything that's "what's happening to the cards the player can see" lives here. Pure data flows in (`ctx.data.cardsLocal`) and pure layout / reducer calls flow out — this folder doesn't talk to the SpacetimeDB SDK directly (that's `../server/`).
 
 ## Subfolders
-- `cards/`: `Card` (composite of game + layout halves), `CardManager` (registry, zones, stack chain ops, splice), `cardData` (microZone/microLocation packing helpers), `layout/rectangle` and `layout/hexagon` (per-shape `RectCard` / `HexCard` subclasses, each integrating both game and layout concerns).
-- `actions/`: `ActionManager` — the recipe pre-filter + submission queue.
-- `chat/`: `ChatPanel` (bottom-left resizable tabbed panel — general chat + logs tab) + `LogManager` (scene-scoped ring buffer of flavor-text events pushed by game systems). See [chat/AGENTS.md](chat/AGENTS.md).
-- `definitions/`: `DefinitionManager` — wasm-backed wrapper around the `resonantdust-content` crate. Exposes `decode`, `findPackedByKey`, `cardFlagBit`, `matchStackRecipe`. Bootstraps via `await initDefinitions()` in `main.ts`.
-- `input/`: `InputManager` (canvas-level pointer + keyboard plumbing), `DragManager` (pickup / drop, with `position_hold` / `drop_hold` flag enforcement), `DragGhost` (translucent ghost-drag visual for non-pickup flows like soul movement).
-- `inventory/`: `GameInventory` (per-zone overlap-push and clamp), `InventoryLayout` (the right-column `LayoutNode`).
+- `actions/`: `ActionManager` (gather-chain → match → queue → submit) and `recipeMatcher.ts` (the client-side recipe walker under the [recipe-tape model](../../../docs/RECIPE_TAPE_REWRITE.md)).
+- `blueprints/`: client side of the `request_blueprint` / `request_player_blueprint` flow — discovery bitfields, placement caps, the build-cursor UI.
+- `cards/`: `Card` (composite of game + layout halves), `CardManager` (registry, zones, stack chain ops, splice), `cardData` (microZone/microLocation packing helpers), `cards/game/` (`CardGame` core), `cards/layout/rectangle` and `cards/layout/hexagon` (per-shape `RectCard` / `HexCard` subclasses, each integrating both game and layout concerns).
+- `chat/`: `ChatPanel` (bottom-left DOM panel — general chat + logs tab) + `LogManager` (scene-scoped ring buffer of flavor-text events). See [chat/AGENTS.md](chat/AGENTS.md).
+- `definitions/`: `DefinitionManager` — wasm-backed wrapper around the `resonantdust-content` crate. Exposes `decode`, `findPackedByKey`, `cardFlagBit`, `cardFlagFieldValueIn`, `recipeById` / `recipeByKey` / `recipesAll`, `findRecipeMatch`, `aspectIdByName`, etc. Bootstraps via `await initDefinitions()` in `main.ts`.
+- `details/`: the click-to-inspect details panel — shows aspects, traits, stocks, lifecycle progress for the currently-selected card.
+- `input/`: `InputManager` (canvas-level pointer + keyboard plumbing), `DragManager` (pickup / drop, consults `position_hold_count > 0` server-side and `DragHoldStore` client-side), `DragGhost` (translucent ghost-drag visual for non-pickup flows like soul movement), `dropResolver` (post-drop intent dispatch → `firePlaceCard(c, intent)` → `placeCard` reducer).
+- `inventory/`: `InventoryGame` (per-zone overlap-push and clamp), `InventoryLayout` (the right-column `LayoutNode`).
 - `layout/`: scene-agnostic layout primitives (`LayoutManager`, `LayoutNode`).
-- `permissions.ts`: `canPickUpCard(ctx, card)` — the single ownership-check entry point for whether the local player may drag a card. Walks the `ownerId` chain through `cardsLocal`; orthogonal to `position_hold` / `position_locked` flag checks in `DragManager` (both must pass for a successful pickup).
-- `titlebar/`: `TitleBar` UI component.
-- `toolbar/`: `ToolBar` — top-left emoji-button strip; width is derived from the button list so `GameLayout` reads `ToolBar.WIDTH` to position it.
-- `world/`: `LayoutWorld` (hex tile grid + world card surface) + `WorldPanManager` (drag-to-pan + programmatic recenter tween). See [world/AGENTS.md](world/AGENTS.md).
+- `lifecycle/`: `LifecycleResolutionManager` — observes owned cards carrying `FLAG_LIFECYCLE_PENDING` (`magnetic` bit), tries the success recipe via `findRecipeMatch` + inventory combo search, falls back to the failure recipe at expiry. Bootstrap-scoped.
+- `permissions.ts`: `canPickUpCard(ctx, card)` — the single ownership-check entry point for whether the local player may drag a card. Walks the `ownerId` chain through `cardsLocal`; orthogonal to the position-hold count check in `DragManager` (both must pass).
+- `titlebar/`: two pinned DOM dropdowns on the top taskbar — `DebugPanel` (📊 perf / sync HUD) and `SettingsMenu` (⛯ log-out / fullscreen / sound + UI edit mode). The Pixi `TitleBar` is gone; directory name is historical. See [titlebar/AGENTS.md](titlebar/AGENTS.md).
+- `toolbar/`: `ToolBar` — top-left emoji-button strip; width is derived from the button list so `MainLayout` reads `ToolBar.WIDTH` to position it.
+- `world/`: `LayoutWorld` (hex tile grid + world card surface, with tile-card resolution and chain-stitch-clobber walks) + `WorldPanManager` (drag-to-pan + programmatic recenter tween) + `pathfind.ts` (client-side A*). See [world/AGENTS.md](world/AGENTS.md).
 - `zones/`: `ZoneManager` — tiered zone refcount with per-tier add/remove listeners and the named world-anchor system.
 
 ## Data tier rule (load-bearing)
@@ -104,11 +107,18 @@ chain — recipes that need contiguity won't match across gaps.
 `CardManager.rootOf(cardId)` branches on state:
 - state 0 (Free): card is its own root.
 - state 1 (Slot): walk via `microLocation` parent-pointers until a
-  non-Slot state is hit (`OnRoot`, `Free`, or `OnHex`). For chains
-  ending in `OnRoot`, then take that one's `microLocation` as the
-  final root.
+  non-Slot state is hit (`OnRoot` or `Free`). For chains ending in
+  `OnRoot`, then take that one's `microLocation` as the final root.
 - state 2 (OnRoot): one-hop — `microLocation` IS the root.
-- state 3 (OnHex): legacy walk via `microLocation` (parent hex chain).
+- state 3 (Deferred): transient placement. `microLocation` is the host
+  card_id (or 0); `microZone` holds a fallback `(q, r)`. Resolved at
+  mirror-time by `CardManager.appendAtChainLeaf` to state 1/2 via the
+  cascade (leaf-append on host's chain → loose at q/r → owner inventory
+  → free q/r in zone → worst-case loose). Recipe outputs like
+  `stack.N.create` emit this state so placement doesn't go stale between
+  propose and write. Chain walks never observe state 3 in `cardsLocal`
+  because mirror resolution converts it first; if one slips through via
+  a subscription gap, it's treated as having no chain identity.
 
 Constraints maintained by `CardManager.stack`:
 - A card's chain is **uniform-direction**: all cards on the same side
@@ -119,47 +129,40 @@ Constraints maintained by `CardManager.stack`:
   stack proceeds.
 
 ## ActionManager (recipe matching)
-Watches stack-change events from `CardManager` and asks `definitions.matchStackRecipe(...)` repeatedly against the chains rooted at each loose root. R is always the recipe's root tier; there is no "sub-root" concept. Multiple matches per evaluation are normal — every recipe that can fit somewhere in the chain gets queued, with each match's consumed cards reserved for the rest of that evaluation pass.
+Watches stack-change events from `CardManager` and runs the recipe-tape matcher against the chain rooted at each loose root. Submits matches via `proposeAction(client_time_ms, recipe_id, surface, macro_zone, micro_zone, root, bindings)` — the wire format under the recipe-tape model (see [docs/RECIPE_TAPE_REWRITE.md](../../../docs/RECIPE_TAPE_REWRITE.md)).
 
 ### The matching algorithm
 
-**Inputs per loose root R:**
-- `hex` = R's hex parent's def if R is `STACKED_ON_HEX`, else 0.
-- `topChain` = `cards.buildChain(R, up)` — every chain member above R in visual order, mixing state-2 and state-1 (see [Stack chains](#stack-chains--two-attachment-modes)).
-- `botChain` = `cards.buildChain(R, down)` — same for below.
-- `held` = an evaluation-local set, seeded with cards whose `flags` carry `slot_hold` and grown by every match this pass.
+`ActionManager.evaluateRoot(R)` gathers the chains (`buildChain(R, HEX)` for tile-branch, `buildChain(R, UP)` for top, `buildChain(R, DOWN)` for bottom) and calls `definitions.findRecipeMatch(input, recipes)` where `input` carries:
+- `root` (R's def + flags), the three branch chains as arrays of `(card_id, packed_def, flags_state, flags_bk)`.
+- `syntheticTile` resolver for branch-0 references when no tile-card is present at the hex (`findFreeTileCardAt` consulted first; falls back to zone slot).
+- `aspectIdByName` (wasm helper) for `aspect.<name>.min` predicates.
+- `branchWalker` for nested iterators (e.g. `slot.1.0.owner.slot.1.0.def_id: axe` — walk the actor's equipment chain).
 
-**A "sub-chain" is a maximal run of contiguous unheld cards** within `topChain` or `botChain`. The "first sub-chain" of a direction is the one whose first card sits at chain index 1 — i.e. R-adjacent with no held block between R and it. If chain index 1 is held, the direction has no first sub-chain; every run of unheld cards in that direction is "subsequent."
+The matcher walks recipes in `AnchorSet.priorityKey` order; for each recipe, resolves every `Seg::Slot { iter, offset }` via the branch chains, evaluates input predicates, and returns the first match plus its per-iterator bindings. A `QueuedAction` is created: `{ looseRootId, recipeId, bindings, surface, macroZone, microZone, submitted, scheduledAt, actorId }`.
 
-**Loop until a full pass produces no match (restart-on-match):**
-
-- **Phase 1 — rooted firsts (top before bottom).** `match(hex, R.def, firstSubChain.defs, dir)`. The matcher slides the recipe's actor window across `[R, ...firstSubChain]` and returns the highest-scoring recipe match.
-- **Phase 2 — rootless firsts.** Skipped if R is held. `match(hex, 0, [R, ...firstSubChain].defs, dir)` — R is prepended into the slots, no root tier passed, so the matcher can match recipes that don't constrain root.
-- **Phase 3+ — rooted subsequents (interleaved by sub-chain index across directions).** `match(hex, R.def, subsequentSubChain.defs, dir)` for each remaining sub-chain past the first held block, walked in chain-index order, top before bottom at each index.
-
-On any match: add the consumed cards (the recipe's slot window) to `held` and restart the loop. R is added to `held` only when a rootless match consumes it as slot 0. Hex is never added.
-
-When no phase produces a match, the loop terminates. Every match accumulated this pass becomes a queue entry; entries with the same key (see below) are de-duplicated by stable identity, fresh ones replace stale ones, and dropped ones are cancelled.
-
-**Consumed-card mapping.** The matcher's `chain` is `[root_card_or_None, ...slot_cards]`. A returned `slot_start` ≥ 1 always (rooted recipes have `min_start=1`; rootless attempts have `chain[0] = None` so `slot_start=0` always fails). Consumed indices in our `slots` array = `[slot_start - 1 .. slot_start - 1 + slot_count]`.
-
-**Why drop the "sub-root" concept.** Treating cards past a held block as their own roots produced asymmetric duplicate matches (e.g. `corpus_up` + `corpus_down` on a 2-card chain) and a confusing rule about which direction a sub-root walks. The new model has one root per stack — R — and recipes that want to ignore root match via the rootless rule (Phase 2 only).
+Magnetic-style lifecycle resolution lives in [`LifecycleResolutionManager`](lifecycle/LifecycleResolutionManager.ts), not here. It uses a `searchCombos` K-combination search over the soul's inventory to find a filling combo, calls `runMatcher` (wraps `findRecipeMatch`), and submits via `proposeAction`.
 
 ### Submitted-action lock
-On timer fire, the queue entry is marked `submitted: true` and `proposeAction` is dispatched. While submitted, `evaluateRoot` and the cluster-pruning paths leave it alone — the server has been told and the player can't cancel. The promise's `then`/`catch` cleans up. Once the server's slot_hold flags arrive, the next chain walk excludes those cards naturally.
+On timer fire (debounce — re-queueing resets it), the queue entry is marked `submitted: true` and `proposeAction` is dispatched. While submitted, `evaluateRoot` leaves it alone — the server has been told and the player can't cancel. The promise's `then`/`catch` cleans up. Once the server's `slot_hold_count > 0` arrives on the bound cards, the next chain walk treats them as held.
 
 ## Drag-drop
-1. `DragManager.handleDragStart` checks `position_hold` and `position_locked` on the source row's `flags`. Either one blocks pickup.
-2. On drop, checks `drop_hold` and `drop_locked` on the target's flags. Either one rejects the drop and the card snaps back.
+1. `DragManager.handleDragStart` checks `position_hold_count > 0` on the source row's `flags_bk` (via `cardFlagFieldValueIn`). A held card refuses pickup.
+2. On drop, `targetBlocksDrop` checks `drop_hold_count > 0` (server-side; via `cardFlagFieldValueIn`) AND `DragHoldStore.has(targetId)` (client-side, the in-flight drag sentinel for the local user). Either rejects the drop.
 3. On accepted drop, `Card.setPosition` → `CardManager.setCardPosition` → `setLocalCard` writes the new row → per-key listener triggers `onDataChange` → tween to new target on next frame.
-4. Reducer call only happens later (if at all): the `ActionManager` watches the stack change and may queue a `proposeAction`.
+4. Post-drop, `dropResolver.executeDrop` calls `firePlaceCard(c, intent)`:
+   - `kind: "stack"` → `placeCard(card_id, { kind: PLACEMENT_STACK, parent_id, direction })`.
+   - `kind: "world"` → `placeCard(card_id, { kind: PLACEMENT_LOOSE, surface: WORLD_LAYER, macro_zone, q, r })`.
+   - `kind: "inventory"` → `placeCard(card_id, { kind: PLACEMENT_LOOSE, surface: INVENTORY_LAYER, macro_zone: soul_id, xy })`.
+   - `kind: "loose"` / `kind: "rejected"` → no server call (purely local).
+5. `ActionManager` may separately queue a `proposeAction` if the new chain shape matches a recipe.
 
 ## Conventions
 - **All chain reads use `cardsLocal`.** Repeating the tier rule because it's the single most common bug source in this folder.
 - **`Card` instances persist across data updates.** Don't write code that assumes destroy+respawn on flag changes; the `Card` is alive and applying the new row.
 - **Don't read `RectCard.dying` from outside the visual.** It's a per-instance animation flag, not part of the data model. The data-model signal is `LocalCard.dead`.
 - **Stack changes fan out by loose root.** `CardManager.fireStackChange(rootId)` is called with the loose root id, not the card that actually moved. Subscribers walk the chain themselves to discover the cards in it.
-- **`flags` bits come from the registry.** Use `definitions.cardFlagMask(name)` / `definitions.hasCardFlag(flags, name)` rather than hard-coding bit positions. The names are in `content/cards/flags.json`.
+- **`flags_state` / `flags_bk` bits come from the registry.** Use `definitions.hasCardFlag(state, bk, name)` for single bits and `definitions.cardFlagFieldValueIn(field, host, name)` for multi-bit fields rather than hard-coding bit positions. The names + bit positions are in [`content/cards/flags.json`](../content/cards/flags.json); the registry split into the dual-host layout under the unified-hold-counts rework.
 
 ## Pitfalls
 - **`encodeLooseXY` clamps to `[0, 0xffff]` and rounds.** Negative coords become 0; sub-pixel inputs round to the nearest integer. Inventory surfaces use positive coords so the clamp is invisible in practice, but the round means a position-set followed by a read can drift by 0.5 px.

@@ -51,7 +51,7 @@
  *       root (`1..31`; `0` reserved). `direction` is `0 = up / top` or
  *       `1 = down / bottom`. The "server is forcing this position"
  *       signal moved out of `microZone` and lives in `flags`
- *       (`force_position` at bit 11) — see `content/cards/flags.json`.
+ *       (`pos_need` / `pos_want` — see `content/cards/flags.json`).
  *
  *     - **Legacy layout** — everything else (`Free`, state-1 reserved,
  *       `OnHex`, world surfaces ≥ 64):
@@ -63,14 +63,14 @@
  *
  *  5. **`microLocation` u32 — interpretation depends on stackedState:**
  *
- *     - `STACKED_LOOSE`   → encoded `(x: i16, y: i16)` loose XY
- *     - state value 1     → RESERVED for an upcoming slot-pinning mode
- *                            (microLocation will hold the immediate parent
- *                            card_id, not the root). Unused today.
- *     - `STACKED_ON_ROOT` → ROOT card_id of the rect chain
- *     - `STACKED_ON_HEX`  → parent hex card_id (walk up via
- *                            microLocation; hex chains aren't migrated
- *                            to the (root_id, position) model)
+ *     - `STACKED_LOOSE`     → encoded `(x: i16, y: i16)` loose XY
+ *     - `STACKED_SLOT`      → IMMEDIATE parent's card_id
+ *                              (server-written parent-pointer chain)
+ *     - `STACKED_ON_ROOT`   → ROOT card_id of the rect chain
+ *     - `STACKED_DEFERRED`  → HOST card_id (or 0 if no host) — anchor
+ *                              for mirror-time resolution. Fallback
+ *                              (q, r) lives in `microZone`. Used by
+ *                              recipe outputs like `stack.N.create`.
  *
  *  Rect chains use the `(root_id, position, direction)` model; hex
  *  chains keep parent-pointer walking. Rect-on-hex must be a leaf — no
@@ -113,14 +113,32 @@ export const WORLD_LAYER = 64;
  *  `spacetime/server/spacetimedb/src/packed.rs`. */
 export const MINI_ZONE_LAYER = 63;
 
+/** Surface band for a player's private pocket dimension — a 2×2
+ *  grid of `Zone`s each player gets at signup, where all of that
+ *  player's souls can visit and permanent state lives. Unlike
+ *  other surfaces, `macro_zone` (packed chunk coords) is NOT a
+ *  unique container address here — multiple players' Zones
+ *  coexist at the same `macro_zone` and are discriminated by
+ *  `Zone.owner_id == player_id`. Cards on this surface follow the
+ *  same discriminator. Client subscriptions must include the
+ *  owner filter to scope to the local player's dim. */
+export const PLAYER_DIMENSION_LAYER = 62;
+
 /** Surface band for a pocket dimension — a private interior
  *  carried by an anchor card. `macro_zone` is the anchor's
  *  `card_id`, same convention as `MINI_ZONE_LAYER`. */
 export const POCKET_DIMENSION_LAYER = 32;
 
-/** Surface band for player inventory. `macro_zone` is the owning
- *  soul card's `card_id`. */
+/** Surface band for per-soul inventory. `macro_zone` is the
+ *  owning soul card's `card_id`. */
 export const INVENTORY_LAYER = 1;
+
+/** Surface band for the player's account-wide inventory bucket,
+ *  shared across all of that player's souls (for permanent /
+ *  account-scoped items). Same bucket convention as
+ *  `INVENTORY_LAYER` but `macro_zone = player_id` instead of
+ *  `soul.card_id`. */
+export const PLAYER_INVENTORY_LAYER = 2;
 
 /**
  * Packs `(macroZone: u32, layer: u8)` into a single `ZoneId`:
@@ -201,8 +219,8 @@ export function unpackMicroZone(microZone: number): {
  *  (saturates at 15). `direction` is the branch number — `0 = hex /
  *  tile`, `1 = up / top`, `2 = down / bottom`. Value 3 is reserved.
  *  The "server is forcing this position" signal moved out of
- *  microZone and now lives in `flags` (`force_position` bit 11) — set
- *  / clear that bit on `Card.flags` instead.
+ *  microZone and now lives in `flags` (`pos_need` / `pos_want`) —
+ *  set / clear those bits on `Card.flags` instead.
  *
  *  Only valid for `stackedState == STACKED_ON_ROOT` (= 2) and
  *  `surface < WORLD_LAYER`. Use [`packMicroZone`] for everything else. */
@@ -237,8 +255,8 @@ export function unpackStackMicroZone(microZone: number): {
  *  `STACKED_ON_ROOT` AND `surface < WORLD_LAYER`). False for loose /
  *  on-hex / world-surface cards — those keep the legacy `(localQ,
  *  localR)` layout. `STACKED_SLOT` (state 1) has its own preserve
- *  branch in `mirrorCard` (same `force_position` gate as stack
- *  layout); it doesn't go through this discriminator. */
+ *  branch in `mirrorCard` (same `pos_need` / `pos_want` gate as
+ *  stack layout); it doesn't go through this discriminator. */
 export function isStackLayout(stackedState: number, surface: number): boolean {
   return surface < WORLD_LAYER && stackedState === 2;
 }

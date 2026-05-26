@@ -11,6 +11,7 @@ import {
 } from "spacetimedb";
 
 export default {
+  clientTimeMs: __t.u64(),
   anchorCardId: __t.u32(),
   targetMacroZone: __t.u32(),
   targetMicroZone: __t.u8(),

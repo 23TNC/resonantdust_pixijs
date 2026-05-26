@@ -410,20 +410,21 @@ export class LifecycleResolutionManager {
   // ---------- helpers ----------------------------------------------
 
   private isOwnedMagnetic(card: Card, playerId: number): boolean {
-    if (!this.ctx.definitions.hasCardFlag(card.flags, "magnetic")) return false;
-    if (this.ctx.definitions.hasCardFlag(card.flags, "dead")) return false;
+    const def = this.ctx.definitions;
+    if (!def.hasCardFlag(card.flagsState, card.flagsBk, "magnetic")) return false;
+    if (def.hasCardFlag(card.flagsState, card.flagsBk, "dead")) return false;
     // The magnetic-resolution gate is per-player. World-owned magnetic
     // cards don't run through this client (no player to resolve);
     // those are sidecar-territory (when we have one). Check ownership
-    // via FLAG_OWNED_BY_PLAYER on the card or on a card up its owner
+    // via `is_owned_by_player` on the card or on a card up its owner
     // chain — for simplicity we just check the card's direct
     // owner_id matches the player when the player-owned flag is set,
     // and otherwise treat it as not-mine.
-    if (this.ctx.definitions.hasCardFlag(card.flags, "is_owned_by_player")) {
+    if (def.hasCardFlag(card.flagsState, card.flagsBk, "is_owned_by_player")) {
       return card.ownerId === playerId;
     }
     // Owner chain walk: cards in inventory carry `ownerId =
-    // soul_card_id`. The soul carries `FLAG_OWNED_BY_PLAYER` and
+    // soul_card_id`. The soul carries `is_owned_by_player` and
     // `ownerId = player_id`. So a "magnetic card in my inventory"
     // looks like: this card's ownerId is a soul I own. Resolve by
     // looking up the owner card in the local view and checking
@@ -431,7 +432,7 @@ export class LifecycleResolutionManager {
     // a soul's inventory bucket), this is a single lookup.
     const owner = this.ctx.data.cardsLocal.get(card.ownerId);
     if (owner === undefined) return false;
-    if (this.ctx.definitions.hasCardFlag(owner.flags, "is_owned_by_player")) {
+    if (def.hasCardFlag(owner.flagsState, owner.flagsBk, "is_owned_by_player")) {
       return owner.ownerId === playerId;
     }
     // Deeper chains would need recursion. Magnetic anchors today are
@@ -449,9 +450,10 @@ export class LifecycleResolutionManager {
       if (c.cardId === magneticCard.cardId) continue;
       if (c.macroZone !== magneticCard.macroZone) continue;
       if (c.surface !== magneticCard.surface) continue;
-      if (this.ctx.definitions.hasCardFlag(c.flags, "magnetic")) continue;
-      if (this.ctx.definitions.isSlotHeld(c.flags)) continue;
-      if (this.ctx.definitions.hasCardFlag(c.flags, "dead")) continue;
+      const def = this.ctx.definitions;
+      if (def.hasCardFlag(c.flagsState, c.flagsBk, "magnetic")) continue;
+      if ((def.cardFlagFieldValueIn("cards_bk", c.flagsBk, "slot_hold_count") ?? 0) > 0) continue;
+      if (def.hasCardFlag(c.flagsState, c.flagsBk, "dead")) continue;
       out.push(c);
     }
     return out;

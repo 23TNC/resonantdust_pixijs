@@ -118,6 +118,9 @@ export class TextureManager {
   private readonly renderer: Renderer;
   private readonly maxTextureSize: number;
   private readonly pages: PhysicalPage[] = [];
+  /** Count of packed slots, keyed by `slotSize` (power-of-2). Bumped
+   *  by every `pack()` call. Read by `stats()` for the HUD chip. */
+  private readonly slotCounts = new Map<number, number>();
 
   constructor(renderer: Renderer) {
     this.renderer = renderer;
@@ -127,6 +130,16 @@ export class TextureManager {
         `TextureManager: GPU max texture size ${this.maxTextureSize} < atlas size ${ATLAS_SIZE}`,
       );
     }
+  }
+
+  /** Snapshot of atlas occupancy for HUD / debug surfaces. `atlases`
+   *  is the total number of 4096-region atlases across every
+   *  physical page; `slotCounts` is the running tally of packed
+   *  slots grouped by their power-of-2 size. */
+  stats(): { atlases: number; slotCounts: ReadonlyMap<number, number> } {
+    let atlases = 0;
+    for (const page of this.pages) atlases += page.atlases.length;
+    return { atlases, slotCounts: this.slotCounts };
   }
 
   /**
@@ -144,6 +157,8 @@ export class TextureManager {
         `TextureManager: source ${w}×${h} (slot ${slotSize}) exceeds atlas size ${ATLAS_SIZE}`,
       );
     }
+
+    this.slotCounts.set(slotSize, (this.slotCounts.get(slotSize) ?? 0) + 1);
 
     for (const page of this.pages) {
       for (const atlas of page.atlases) {

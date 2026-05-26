@@ -5,15 +5,15 @@ import { debug } from "../../debug";
 import type { GameContext } from "../../GameContext";
 import type { LayoutNode } from "../layout/LayoutNode";
 import type { Card as CardRow } from "../../server/spacetime/bindings/types";
-import { packZoneId, type ZoneId } from "../../server/data/packing";
+import { packZoneId, WORLD_LAYER, type ZoneId } from "../../server/data/packing";
 import type { TableChange } from "../../server/data/ValidAtTable";
 import {
   getStackDirection,
   getStackedState,
   getStackPosition,
-  STACK_DIRECTION_DOWN,
+  STACK_DIRECTION_HEX,
   STACK_DIRECTION_UP,
-  STACKED_ON_HEX,
+  STACKED_DEFERRED,
   STACKED_ON_ROOT,
   STACKED_SLOT,
 } from "./cardData";
@@ -29,16 +29,45 @@ const INVENTORY_LAYER = 1;
 export type StackDirection = "top" | "bottom" | "hex";
 
 /** What `Card.setPosition` accepts. Loose = freely placed inventory xy;
- *  inventory = return to owner's inventory at given xy (resets surface/zone);
+ *  inventory = return to a bucket at given xy (resets surface/zone);
  *  stacked = pinned to another card's stack-host with a direction;
- *  world = placed at a specific world hex tile (q, r axial coords). World
- *  is unused while world tier is stripped, but kept on the type so the
- *  CardManager.setCardPosition switch stays exhaustive. */
+ *  world = placed at a specific hex tile `(q, r)` axial coord on a
+ *  hex-bearing surface. */
 export type CardPositionState =
   | { kind: "loose"; x: number; y: number }
-  | { kind: "inventory"; x: number; y: number }
+  /** Inventory placement: `soulCardId` is the bucket address.
+   *
+   *  - **Soul inventory** (default, `surface == INVENTORY_LAYER`):
+   *    `soulCardId` is the owning soul's `card_id`.
+   *  - **Player inventory** (`surface == PLAYER_INVENTORY_LAYER`):
+   *    `soulCardId` is the owning `player_id`. Name kept for
+   *    legacy reasons; the field is just the bucket's macro_zone.
+   *
+   *  `owner_id` is independent of position and is NOT changed by
+   *  inventory placement. */
+  | {
+      kind: "inventory";
+      soulCardId: number;
+      x: number;
+      y: number;
+      /** Defaults to `INVENTORY_LAYER (1)` for back-compat. Pass
+       *  `PLAYER_INVENTORY_LAYER (2)` for the player-wide bucket. */
+      surface?: number;
+    }
   | { kind: "stacked"; parentId: number; direction: StackDirection }
-  | { kind: "world"; q: number; r: number };
+  /** World / hex-grid placement. `q, r` are global axial coords.
+   *
+   *  - **Overworld** (default, `surface == WORLD_LAYER`).
+   *  - **Player pocket dimension** (`surface == PLAYER_DIMENSION_LAYER`).
+   *    `(q, r)` are still global axial coords; the converter
+   *    floors to chunk origin the same way as world. */
+  | {
+      kind: "world";
+      q: number;
+      r: number;
+      /** Defaults to `WORLD_LAYER (64)` for back-compat. */
+      surface?: number;
+    };
 
 export class Card {
   readonly cardId: number;
@@ -55,13 +84,16 @@ export class Card {
   private currentParentId = 0;
   /** Mirror of `getStackedState(microZone)` in semantic form. null when loose. */
   private currentStackDirection: StackDirection | null = null;
-  /** Last-seen `microZone` byte. For state-3 (STACKED_ON_HEX) cards, the
-   *  localQ/localR bits of `microZone` encode the world-tile address;
-   *  parent/direction don't change when a virtual-world-hex-root card
-   *  (microLocation = 0) moves between empty tiles, so we track
-   *  microZone directly to fire a stack-change event on tile moves and
-   *  let `ActionManager.evaluateRoot` re-evaluate against the new tile's
-   *  hex def. */
+  /** Last-seen `microZone` byte. Tracked so changes to the packed
+   *  (q, r, state) bits surface as stack-change events even when the
+   *  semantic parent/direction stay constant — e.g. a Free world card
+   *  moving between hexes only changes microZone's localQ/localR bits
+   *  while `microLocation` (0) and direction are unchanged. The legacy
+   *  state-3 tile-move trigger this used to feed (back when state 3
+   *  was `STACKED_ON_HEX`) is retired — state 3 is now
+   *  `STACKED_DEFERRED` and never lives in `cardsLocal` past
+   *  mirror-time resolution; the field stays as a generic microZone
+   *  change marker. */
   private currentMicroZone = 0;
 
   /**
@@ -76,28 +108,38 @@ export class Card {
   public stackedTop = 0;
   /** Card stacked directly below us (state 2), or 0 if none. Same caveat. */
   public stackedBottom = 0;
-  /** Rect card mounted on top of us (state 3, STACKED_ON_HEX), or 0 if none. */
+  /** Rect card mounted on us via STACK_DIRECTION_HEX (the hex-tile branch),
+   *  or 0 if none. Under the unified card model the encoding is
+   *  `STACKED_ON_ROOT + direction=HEX + position=1` with `microLocation
+   *  = this.cardId`; the field name and back-pointer role survive from
+   *  the legacy state-3 (then `STACKED_ON_HEX`, now repurposed as
+   *  `STACKED_DEFERRED`) model. */
   public stackedHex = 0;
 
   /** Resolve the IMMEDIATE parent's card_id for this row.
    *
-   *  - `STACKED_ON_HEX`: `microLocation` is the parent hex card_id
-   *    (legacy parent-pointer model).
    *  - `STACKED_SLOT`: `microLocation` IS the immediate parent
    *    (parent-pointer model — server-written for recipe slots above
-   *    the actor).
+   *    the actor; client-written for rect-chain drag attaches).
    *  - `STACKED_ON_ROOT`: `microLocation` is the chain ROOT. The
    *    immediate parent is the chain member at `position - 1` in the
    *    same direction. If `position == 1`, the parent is the root
    *    itself. Falls back to the root if the expected predecessor
-   *    isn't in the overlay (gap-tolerant).
+   *    isn't in the overlay (gap-tolerant). Covers the hex-mount case
+   *    (direction = HEX, position = 1, microLocation = parent hex tile)
+   *    via the same `position == 1 → root` path.
+   *  - `STACKED_DEFERRED` (3): transient deferred-placement row;
+   *    resolved by `mirrorCard` to a concrete state 1/2 before chain
+   *    walks see it. If one slips through (subscription gap where the
+   *    host hasn't arrived yet), we return 0 — deferred rows aren't
+   *    part of any chain until resolution lands.
    *  - `STACKED_LOOSE`: no parent. */
   private static stackParentOf(
     row: CardRow,
     cardsLocal: Map<number, LocalCard>,
   ): number {
     const state = getStackedState(row.microZone);
-    if (state === STACKED_ON_HEX) return row.microLocation;
+    if (state === STACKED_DEFERRED) return 0;
     if (state === STACKED_SLOT) return row.microLocation;
     if (state !== STACKED_ON_ROOT) return 0;
     const rootId = row.microLocation;
@@ -121,9 +163,17 @@ export class Card {
 
   private static stackDirectionOf(row: CardRow): StackDirection | null {
     const state = getStackedState(row.microZone);
-    if (state === STACKED_ON_HEX) return "hex";
+    // STACKED_DEFERRED (3) carries the host_id in `microLocation` and
+    // a fallback (q, r) in `microZone` — it has no chain direction of
+    // its own. The direction is decided at mirror-time resolution by
+    // `CardManager.appendAtChainLeaf` (reads the host's chain growth
+    // direction). If a deferred row reaches this method (subscription
+    // gap), returning null tells chain consumers "skip me."
+    if (state === STACKED_DEFERRED) return null;
     if (state !== STACKED_ON_ROOT && state !== STACKED_SLOT) return null;
-    return getStackDirection(row.microZone) === STACK_DIRECTION_UP ? "top" : "bottom";
+    const dir = getStackDirection(row.microZone);
+    if (dir === STACK_DIRECTION_HEX) return "hex";
+    return dir === STACK_DIRECTION_UP ? "top" : "bottom";
   }
 
   static create(
@@ -466,17 +516,22 @@ export class Card {
     const zoneChanged = newZoneId !== this.currentZoneId;
     const parentChanged = newParentId !== this.currentParentId;
     const directionChanged = newStackDirection !== this.currentStackDirection;
-    // World-tile move detection: a state-3 (STACKED_ON_HEX) card on a
-    // world tile encodes its (localQ, localR) in microZone bits 2-7.
-    // Moving between two empty tiles (microLocation = 0 on both sides)
-    // doesn't change parent or direction — without this trigger,
-    // `ActionManager.evaluateRoot` never re-runs and a queued recipe
-    // (e.g. corpus on tree) keeps the stale hex def. The
-    // STACKED_ON_HEX state guard avoids firing for unrelated
-    // microZone changes (chain position bits on state-2 rows already
-    // surface via parent/direction changes).
+    // World-tile move detection: a Free card on the world surface
+    // encodes its (localQ, localR) in microZone bits 2-7 and its
+    // (zoneQ, zoneR) chunk address in macroZone. A move between two
+    // empty tiles inside the same chunk doesn't change parent or
+    // direction (both rows are Free, microLocation = 0) — without
+    // this trigger, `ActionManager.evaluateRoot` never re-runs and a
+    // queued recipe (e.g. corpus on tree) keeps the stale hex def.
+    // Cross-chunk moves are caught by `zoneChanged` (macroZone
+    // changes). State 3 (`STACKED_DEFERRED`) is excluded — deferred
+    // rows resolve to state 1/2 at mirror time before this method
+    // sees them; the tile-change trigger is for loose world cards
+    // only.
+    const newState = getStackedState(newMicroZone);
     const tileChanged =
-      getStackedState(newMicroZone) === STACKED_ON_HEX &&
+      newState === 0 /* STACKED_LOOSE */ &&
+      row.surface >= WORLD_LAYER &&
       newMicroZone !== this.currentMicroZone;
 
     if (zoneChanged || parentChanged || directionChanged || tileChanged) {

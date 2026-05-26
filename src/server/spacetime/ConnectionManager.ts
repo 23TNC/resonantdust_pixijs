@@ -124,7 +124,7 @@ export class ConnectionManager<TConn> {
     debug.log(
       ["spacetime"],
       `[spacetime] connecting to ${this.options.uri} / ${this.options.databaseName}`,
-      3,
+      4,
     );
 
     this.connectPromise = new Promise<TConn>((resolve, reject) => {
@@ -140,7 +140,7 @@ export class ConnectionManager<TConn> {
           debug.log(
             ["spacetime"],
             `[spacetime] connected identity=${identity.toHexString()}`,
-            3,
+            4,
           );
           resolve(conn);
           this.notifyConnected(conn, identity);
@@ -149,7 +149,7 @@ export class ConnectionManager<TConn> {
           debug.log(
             ["spacetime"],
             `[spacetime] connect error: ${error.message}`,
-            3,
+            4,
           );
           this.connectPromise = null;
           this.notifyConnectError(error);
@@ -159,7 +159,7 @@ export class ConnectionManager<TConn> {
           debug.log(
             ["spacetime"],
             `[spacetime] disconnected${error ? `: ${error.message}` : ""}`,
-            3,
+            4,
           );
           this.connection = null;
           this.connectPromise = null;

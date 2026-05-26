@@ -17,7 +17,7 @@ changes.
   on first request for a definition, renders a `RectCardVisual` /
   `HexCardVisual` into the next free slot and returns a sub-texture
   for that region. Subsequent requests are pure cache hits.
-- `ParticleManager.ts`: scene-scoped (constructed in `GameScene.onEnter`,
+- `ParticleManager.ts`: scene-scoped (constructed in `MainScene.onEnter`,
   destroyed in `onExit`). Eagerly loads every JSON config in
   `effects/json/*.json` via `import.meta.glob`; `spawn(name, opts)`
   builds an `@spd789562/particle-emitter` `Emitter` from the named
@@ -49,7 +49,7 @@ changes.
   always a cache hit. Don't optimize this away — the cost is two
   Graphics renders instead of one, paid once.
 - **Particle effects are tickered manually.** `ParticleManager.tick`
-  is called from `GameScene.update`. Don't hook the Pixi ticker
+  is called from `MainScene.update`. Don't hook the Pixi ticker
   directly — the manual tick lets the scene own pause/resume and
   HMR teardown.
 
@@ -57,7 +57,7 @@ changes.
 - **`TextureManager` is bootstrap-scoped, particles are not.** The
   texture atlases survive scene changes (cards in different scenes
   reuse the same atlas), but `ParticleManager` is recreated on
-  every `GameScene.onEnter`. Don't cache `ctx.particles` outside a
+  every `MainScene.onEnter`. Don't cache `ctx.particles` outside a
   scene's lifetime.
 - **Atlas page allocation can fail late.** If a definition exhausts
   the current page's slot count, a new page is allocated lazily.

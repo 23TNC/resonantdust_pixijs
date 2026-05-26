@@ -1,37 +1,80 @@
 import type { GameContext } from "../GameContext";
 import type { Card as CardRow } from "../server/spacetime/bindings/types";
 
-/** `is_owned_by_player` (bit 20). Mirrors server-side
- *  `cards::FLAG_OWNED_BY_PLAYER`. Set on soul cards (their `ownerId`
- *  is a `player_id`); clear on every other card (their `ownerId` is
- *  a `card_id` — the immediate container card, `0` for world). */
-const FLAG_OWNED_BY_PLAYER = 1 << 20;
+/** `is_owned_by_player` lives in `cards_state` (bit 4 post unified-
+ *  hold-counts rework — see `content/cards/flags.json`). Set on
+ *  soul cards (their `ownerId` is a `player_id`); clear on every
+ *  other card (their `ownerId` is a `card_id` — the immediate
+ *  container card, `0` for world). */
+const FLAG_OWNED_BY_PLAYER = 1 << 4;
 /** Walker depth cap mirroring the server's
  *  `cards::OWNER_WALK_DEPTH_CAP`. Defensive against cycles that
  *  slipped past server-side `would_cycle` checks. */
 const OWNER_WALK_DEPTH_CAP = 32;
 
 /**
- * Resolve the player who ultimately owns `cardId` by walking
- * `ownerId` through the local card overlay until a row with
- * `FLAG_OWNED_BY_PLAYER` set is reached; that row's `ownerId` is
- * the player_id. Returns `null` if the walk reaches a card not
- * present in the local view (subscription gap), terminates at a
+ * Walk `ownerId` through the local card overlay until a row with
+ * `FLAG_OWNED_BY_PLAYER` set is reached. Returns `{ soulCardId,
+ * playerId }` — `soulCardId` is the row's id (the soul card),
+ * `playerId` is the row's `ownerId` (a player id under the
+ * post-flag-20 model). Returns `null` if the walk reaches a card
+ * not present locally (subscription gap), terminates at a
  * world-owned card (`ownerId === 0` without the flag), or trips
  * the depth cap.
+ *
+ * Centralized so drop-side-effect resolvers and permission gates
+ * agree on which soul a given card chain belongs to.
  */
-function owningPlayerId(ctx: GameContext, cardId: number): number | null {
+export function owningSoul(ctx: GameContext, cardId: number): { soulCardId: number; playerId: number } | null {
   let cur = cardId;
   for (let i = 0; i < OWNER_WALK_DEPTH_CAP; i++) {
     const row = ctx.data.cardsLocal.get(cur);
     if (!row) return null;
-    if ((row.flags & FLAG_OWNED_BY_PLAYER) !== 0) {
-      return row.ownerId;
+    if ((row.flagsState & FLAG_OWNED_BY_PLAYER) !== 0) {
+      return { soulCardId: cur, playerId: row.ownerId };
     }
     if (row.ownerId === 0) return null;
     cur = row.ownerId;
   }
   return null;
+}
+
+/** Convenience: just the player id. Returns `null` for cards whose
+ *  chain doesn't end at a player-owned soul. */
+function owningPlayerId(ctx: GameContext, cardId: number): number | null {
+  return owningSoul(ctx, cardId)?.playerId ?? null;
+}
+
+/**
+ * Centralized "click on something soul-related → activate it if the
+ * local player owns it" helper. Used by:
+ *
+ *   - Clicking a soul card in the game view (focused gameview
+ *     retargets to this soul; drag of the same card switches to
+ *     ghost-drag for movement).
+ *   - Clicking / focusing an inventory panel (drags of cards inside
+ *     the inventory are then permission-gated against the new
+ *     active soul).
+ *   - Selecting a soul in the chooser (Play / drag pathways read
+ *     the active soul next).
+ *
+ * Returns `true` when activation succeeded, `false` when the card
+ * isn't a soul card or isn't owned by the local player. No-op when
+ * the soul is already active. The check mirrors `canPickUpCard`'s
+ * shape but reads the row directly rather than walking the
+ * `owner_id` chain — soul cards carry `is_owned_by_player` and have
+ * their `owner_id` set to the player_id directly, so a one-row read
+ * suffices.
+ */
+export function tryActivateSoul(ctx: GameContext, soulCardId: number): boolean {
+  const row = ctx.data.cardsLocal.get(soulCardId);
+  if (!row) return false;
+  if ((row.flagsState & FLAG_OWNED_BY_PLAYER) === 0) return false;
+  const player = ctx.playerSession.getPlayer();
+  if (!player || row.ownerId !== player.playerId) return false;
+  if (ctx.souls.getSoulId() === soulCardId) return true;
+  ctx.souls.setActiveSoul(soulCardId);
+  return true;
 }
 
 /**

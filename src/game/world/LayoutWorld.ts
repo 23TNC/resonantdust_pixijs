@@ -7,6 +7,15 @@ import { WORLD_HEX_HEIGHT, WORLD_HEX_RADIUS, WORLD_HEX_WIDTH } from "./hexSize";
 import { getTextureRegistry, type TextureDefinition } from "../definitions/TextureRegistry";
 import { decodeZoneTiles, unpackMacroZone, WORLD_LAYER } from "./worldCoords";
 import { unpackZoneId } from "../../server/data/packing";
+import { getStackedState, STACKED_LOOSE } from "../cards/cardData";
+import { localPlayerFactionFolder } from "../../server/player/playerFlags";
+
+/** `card_type` value reserved for tile-cards (promoted zone tiles).
+ *  Mirrors the constant in `gc.rs` / `world_gen.rs` /
+ *  `movement.rs::TILE_CARD_TYPE`. Source of truth lives in
+ *  `content/cards/types.json` (`tile` = 7). See
+ *  `docs/TILE_AS_CARD.md`. */
+const TILE_CARD_TYPE = 7;
 
 const BG_COLOR = "#0d1218";
 
@@ -169,6 +178,13 @@ export class LayoutWorld extends LayoutNode {
   private readonly tileLayer = new Container();
   private readonly objectContainer: Container;
   private readonly worldCardSurface = new WorldCardSurface();
+  /** Debug overlay drawn above the tile layer. Currently used to
+   *  ring tiles whose `(packed, stocks)` came from a `cardsLocal`
+   *  tile-card (`card_type == 7`) rather than the zone-derived
+   *  `tileData` cache — helps diagnose tile-card sizing /
+   *  parenting bugs at a glance. Cleared and repainted every
+   *  `layout()` pass. */
+  private readonly debugOverlay = new Graphics();
 
   /** Pixi container that holds world cards and pans with the
    *  viewport (positioned each frame at `worldToLocal(0, 0)`).
@@ -198,13 +214,47 @@ export class LayoutWorld extends LayoutNode {
 
   private readonly unsubAnchor: () => void;
   private readonly unsubZones: () => void;
+  private readonly unsubCards: () => void;
   private readonly unsubZoneAdded: () => void;
   private readonly unsubZoneRemoved: () => void;
   private readonly unsubObjectLoad: () => void;
   private readonly tileChangeListeners = new Set<() => void>();
 
-  constructor(ctx: GameContext, layoutManager: LayoutManager) {
+  /** ZoneManager anchor name this view tracks for its (q, r)
+   *  viewport. Singleton instances pass `"viewport"`; per-panel
+   *  instances (multiple game-view panels open at once) pass
+   *  `"viewport:<panelId>"` so each panel anchors zones around its
+   *  own viewport independently. Stored so destroy can clear the
+   *  matching anchor if the panel doesn't outlive this view. */
+  readonly viewportAnchorName: string;
+
+  /** Surface this view renders. World panels start at `WORLD_LAYER`
+   *  (the default); player-dim panels start at
+   *  `PLAYER_DIMENSION_LAYER`. Mutable via [`setSurface`] so a
+   *  single panel can be re-pointed at a different surface
+   *  (e.g., the 👁-on-soul jump in `OwnedCardsPanel`). Used to
+   *  filter incoming card/zone rows to this view's surface, and to
+   *  gate `worldCardSurface` registration so each LayoutWorld only
+   *  registers itself for zones on its own layer. */
+  surface: number;
+
+  /** Stored for [`setSurface`] — we need `LayoutManager` to
+   *  re-register `worldCardSurface` against the new surface's
+   *  active zones. `ctx` is available via the inherited
+   *  `LayoutNode.ctx` getter once `setContext` has propagated, so
+   *  we don't store it ourselves. */
+  private readonly layoutManagerRef: LayoutManager;
+
+  constructor(
+    ctx: GameContext,
+    layoutManager: LayoutManager,
+    viewportAnchorName: string = "viewport",
+    surface: number = WORLD_LAYER,
+  ) {
     super();
+    this.viewportAnchorName = viewportAnchorName;
+    this.surface = surface;
+    this.layoutManagerRef = layoutManager;
 
     // Container z-order: bg < tileLayer < objectLayer < worldCardSurface.
     // bg is the dark backdrop; tileLayer holds tile sprites; objectLayer
@@ -231,17 +281,26 @@ export class LayoutWorld extends LayoutNode {
     this.children.push(this.worldCardSurface);
     this.container.addChild(this.worldCardSurface.container);
 
-    // Register the card surface for every world-layer zone the
-    // ZoneManager tracks now and as zones enter / leave "active" tier.
-    // Hex cards landing on these zones resolve their parent surface
-    // via `LayoutManager.surfaceFor(zoneId)`.
+    // Debug overlay on top of everything except drag previews
+    // (MainLayout's overlay still wins via its high zIndex). Stays
+    // hit-transparent — it's a raw Graphics, not a LayoutNode, so
+    // hit-test ignores it entirely.
+    this.container.addChild(this.debugOverlay);
+
+    // Register the card surface for every zone on THIS view's
+    // surface that the ZoneManager tracks now and as zones enter /
+    // leave "active" tier. Hex cards landing on these zones resolve
+    // their parent surface via `LayoutManager.surfaceFor(zoneId)`.
+    // The `=== this.surface` check means a world LayoutWorld and a
+    // player-dim LayoutWorld can coexist without stealing each
+    // other's zone registrations.
     const registerZone = (zoneId: number): void => {
-      if (unpackZoneId(zoneId).layer >= WORLD_LAYER) {
+      if (unpackZoneId(zoneId).layer === this.surface) {
         layoutManager.register(zoneId, this.worldCardSurface);
       }
     };
     const unregisterZone = (zoneId: number): void => {
-      if (unpackZoneId(zoneId).layer >= WORLD_LAYER) {
+      if (unpackZoneId(zoneId).layer === this.surface) {
         layoutManager.unregister(zoneId);
       }
     };
@@ -251,7 +310,7 @@ export class LayoutWorld extends LayoutNode {
     this.unsubZoneRemoved = ctx.zones.onRemoved("active", unregisterZone);
 
     this.unsubAnchor = ctx.zones.onAnchorChange((name, q, r) => {
-      if (name !== "viewport") return;
+      if (name !== this.viewportAnchorName) return;
       this.viewQ = q;
       this.viewR = r;
       this.invalidate();
@@ -261,7 +320,7 @@ export class LayoutWorld extends LayoutNode {
     // first sync after a fresh `get` returns null until the pack lands
     // in the atlas; this hook ensures we run a second sync once it's
     // ready instead of waiting for a pan to invalidate us.
-    this.unsubObjectLoad = ctx.objectTextures.onLoad(() => this.invalidate());
+    this.unsubObjectLoad = ctx.lodTextures.onLoad(() => this.invalidate());
 
     // Expose the per-card "in-front objects" snapshot service for hex
     // cards on world surfaces. Cards call this when their (q, r)
@@ -286,7 +345,11 @@ export class LayoutWorld extends LayoutNode {
     };
 
     // Hydrate tile cache from zones already in `data.zones.current`.
+    // Filter by surface so a player-dim LayoutWorld doesn't ingest
+    // world tiles (and vice versa) — necessary now that multiple
+    // surfaces can have Zone rows in `current` simultaneously.
     for (const zone of ctx.data.zones.current.values()) {
+      if (zone.surface !== this.surface) continue;
       for (const tile of decodeZoneTiles(zone, ctx.definitions)) {
         this.tileData.set(`${tile.q},${tile.r}`, {
           packed: tile.packed,
@@ -314,6 +377,27 @@ export class LayoutWorld extends LayoutNode {
     // zone's 8×8 block from `tileData` and re-decode if the row still
     // exists. Cheaper than a full rescan; per-zone diffing isn't worth
     // it for the 64-tile window.
+    // Tile-card subscription: post-tile-as-card, a card row at a
+    // world hex with `card_type == 7` is the canonical source of
+    // truth for tile def + stocks (`docs/TILE_AS_CARD.md`). When
+    // such a card lands / mutates / is reaped (demotion), the
+    // tile-overlay rendering needs to refresh — invalidate +
+    // notify, same as the zone-side subscription below.
+    this.unsubCards = ctx.data.cards.subscribe((change) => {
+      const row =
+        change.kind === "removed" ? change.oldRow
+        : change.kind === "added" ? change.row
+        : change.newRow;
+      if (row.surface !== this.surface) return;
+      const cardType = (row.packedDefinition >> 12) & 0xf;
+      if (cardType !== TILE_CARD_TYPE) return;
+      // Update-on-update only fires when the relevant fields
+      // (packed_def / flags_bk stock bits) actually changed; let
+      // the cheap render re-decide instead of diffing here.
+      this.invalidate();
+      for (const cb of this.tileChangeListeners) cb();
+    });
+
     this.unsubZones = ctx.data.zones.subscribe((change) => {
       debug.log(
         ["zone"],
@@ -323,6 +407,9 @@ export class LayoutWorld extends LayoutNode {
         change.kind === "removed" ? change.oldRow
         : change.kind === "added" ? change.row
         : change.newRow;
+      // Filter to this view's surface so a world LayoutWorld
+      // doesn't react to player-dim zone changes (and vice versa).
+      if (zone.surface !== this.surface) return;
       const { zoneQ, zoneR } = unpackMacroZone(zone.macroZone);
       for (let t = 0; t < 8; t++) {
         for (let b = 0; b < 8; b++) {
@@ -344,6 +431,55 @@ export class LayoutWorld extends LayoutNode {
       // re-bakes against the freshly arrived tile data.
       for (const cb of this.tileChangeListeners) cb();
     });
+  }
+
+  /** Re-point this view at a different surface. Unregisters the
+   *  `worldCardSurface` from active zones on the OLD surface
+   *  (`onAdded("active") → registerZone` only fires for zones
+   *  matching the current `this.surface`; without this manual
+   *  pass the old-surface zones would leak in `LayoutManager`
+   *  until they leave "active"), flips the surface, registers it
+   *  for active zones on the NEW surface, clears + re-hydrates
+   *  the tile cache, and invalidates.
+   *
+   *  Caller still needs to update the viewport anchor's surface
+   *  via `ZoneManager.setAnchor(name, q, r, surface)` so
+   *  `recomputeAnchorZones` swaps the subscribed zones to the new
+   *  layer. `GameViewPanel.focusAt` packages both calls together
+   *  for the typical "jump to soul" flow.
+   *
+   *  No-op when `newSurface === this.surface`. */
+  setSurface(newSurface: number): void {
+    if (newSurface === this.surface) return;
+    const oldSurface = this.surface;
+    for (const zoneId of this.ctx.zones.zonesIn("active")) {
+      if (unpackZoneId(zoneId).layer === oldSurface) {
+        this.layoutManagerRef.unregister(zoneId);
+      }
+    }
+    this.surface = newSurface;
+    for (const zoneId of this.ctx.zones.zonesIn("active")) {
+      if (unpackZoneId(zoneId).layer === newSurface) {
+        this.layoutManagerRef.register(zoneId, this.worldCardSurface);
+      }
+    }
+    // Tile cache is keyed by world `(q, r)` — surface-agnostic at
+    // the key level, but the VALUES came from the old surface's
+    // Zones. Clear and re-hydrate from any new-surface Zones
+    // already in `data.zones.current`.
+    this.tileData.clear();
+    for (const zone of this.ctx.data.zones.current.values()) {
+      if (zone.surface !== this.surface) continue;
+      for (const tile of decodeZoneTiles(zone, this.ctx.definitions)) {
+        this.tileData.set(`${tile.q},${tile.r}`, {
+          packed: tile.packed,
+          stock0: tile.stock0,
+          stock1: tile.stock1,
+        });
+      }
+    }
+    this.invalidate();
+    for (const cb of this.tileChangeListeners) cb();
   }
 
   /** World hex `(q, r)` → pixel position in this node's local frame.
@@ -430,6 +566,9 @@ export class LayoutWorld extends LayoutNode {
     this.bg.rect(0, 0, w, h).fill({ color: BG_COLOR });
 
     this.releaseActiveSprites();
+    // Reset the debug overlay; card-sourced tiles in the loop
+    // below append rings to it.
+    this.debugOverlay.clear();
 
     // Conservative ring radius: enough hex columns to cover the larger
     // of width / height plus a margin for half-tiles peeking in at the
@@ -437,6 +576,22 @@ export class LayoutWorld extends LayoutNode {
     const range = Math.ceil(Math.max(w, h) / (WORLD_HEX_RADIUS * Math.sqrt(3))) + 2;
     const baseQ = Math.round(this.viewQ);
     const baseR = Math.round(this.viewR);
+
+    // Tile centre objects (the `def.object` slot — e.g. the alter at
+    // the pocket-dimension centre, or building tiles) render in the
+    // local player's faction palette. Computed once per layout pass
+    // since the local-player row doesn't change per tile. Ring
+    // decoration objects intentionally don't take faction — they're
+    // world / climate flora that read as part of the landscape rather
+    // than as anyone's property. Refine to per-zone-owner lookup if
+    // shared dimensions ever need faction-tinted centres.
+    const tileFaction = localPlayerFactionFolder(this.ctx) ?? undefined;
+    // Hoisted: needed both by the tile body-fill branch (resolving
+    // `def.texture`) and by the centre/instance object loop later in
+    // the per-tile body. `getTextureRegistry()` returns a cached
+    // singleton — repeat calls are cheap, but one binding reads
+    // clearer than scattered calls.
+    const reg = getTextureRegistry();
 
     for (let dq = -range; dq <= range; dq++) {
       for (let dr = -range; dr <= range; dr++) {
@@ -450,11 +605,34 @@ export class LayoutWorld extends LayoutNode {
         if (x + WORLD_HEX_WIDTH / 2 < 0 || x - WORLD_HEX_WIDTH / 2 > w) continue;
         if (y + WORLD_HEX_HEIGHT / 2 < 0 || y - WORLD_HEX_HEIGHT / 2 > h) continue;
 
-        const entry = this.tileData.get(`${q},${r}`);
+        const entry = this.tileViewAt(q, r);
         const sprite = this.acquireSprite();
-        if (entry !== undefined) {
+        if (entry !== null) {
           const def = this.ctx.definitions.decode(entry.packed) ?? null;
-          sprite.texture = this.ctx.cardTextures.getHex(def);
+          // `def.texture` (when set) fills the tile body via the
+          // textures pipeline. Faction-aware via the same local-
+          // player lookup we use for tile centre objects; faction
+          // recursion to neutral happens inside `lodTextures.get`.
+          // `null` (no texture ref) keys the bake to the colour-only
+          // variant. When the ideal LOD lands (or upgrades from the
+          // white-fallback), the `lodTextures.onLoad` subscription
+          // re-invalidates and the next layout pass picks the new
+          // texture-filled bake. Body-fill aspects are shape-driven
+          // — desired size is the world hex's bbox so the LOD picker
+          // grabs a bucket large enough to cover-fit without
+          // upscaling.
+          let bodyTex: Texture | null = null;
+          const texRef = def?.texture;
+          if (texRef) {
+            bodyTex = this.ctx.lodTextures.get(
+              texRef.name,
+              Math.max(WORLD_HEX_WIDTH, WORLD_HEX_HEIGHT),
+              hash(q, r, INSTANCE_TEX_SEED_BASE),
+              texRef.index,
+              tileFaction,
+            );
+          }
+          sprite.texture = this.ctx.cardTextures.getHex(def, bodyTex);
         } else {
           sprite.texture = this.ctx.cardTextures.getHex(null);
         }
@@ -467,6 +645,17 @@ export class LayoutWorld extends LayoutNode {
           Math.round(x - WORLD_HEX_WIDTH / 2),
           Math.round(y - WORLD_HEX_HEIGHT / 2),
         );
+
+        // Debug: ring tiles whose `(packed, stocks)` came from a
+        // `cardsLocal` tile-card rather than the zone snapshot.
+        // The radius matches the inscribed hex circle so the ring
+        // hugs the tile's footprint; misshapen rings (smaller /
+        // larger) flag tile-cards being drawn at the wrong scale.
+        if (entry?.source === "card") {
+          this.debugOverlay
+            .circle(x, y, WORLD_HEX_RADIUS)
+            .stroke({ color: 0xff0000, width: 2, alpha: 0.9 });
+        }
       }
     }
 
@@ -481,13 +670,14 @@ export class LayoutWorld extends LayoutNode {
     // (0..=3) of sprites — a tile with `wood: 2, stone: 1` renders
     // 2 wood + 1 stone sprite. Defs without `stock` fall back to the
     // legacy per-aspect single-texture path used by non-tile decor.
-    const reg = getTextureRegistry();
+    // (`reg` is hoisted above so the tile body-fill branch and this
+    // loop share one binding.)
     for (let dq = -range; dq <= range; dq++) {
       for (let dr = -range; dr <= range; dr++) {
         const q = baseQ + dq;
         const r = baseR + dr;
-        const entry = this.tileData.get(`${q},${r}`);
-        if (entry === undefined) continue;
+        const entry = this.tileViewAt(q, r);
+        if (entry === null) continue;
         const def = this.ctx.definitions.decode(entry.packed);
         if (!def) continue;
 
@@ -500,18 +690,34 @@ export class LayoutWorld extends LayoutNode {
         // slot assignment stable across stock changes. Legacy stockless
         // defs use `OBJECTS_PER_TILE` copies of their first aspect, all
         // marked present.
-        const instances: { tex: TextureDefinition; present: boolean }[] = [];
+        // Ring instances: built from `stock` (per-row mutable
+        // counts) or from the legacy `aspects` fallback. These
+        // populate the 6 ring slots (1..6) of the 7-slot layout.
+        const instances: { tex: TextureDefinition; present: boolean; index?: number }[] = [];
         if (def.stock && def.stock.length > 0) {
           for (let i = 0; i < def.stock.length; i++) {
             const slot = def.stock[i];
             if (!slot) continue;
             const aspectName = this.ctx.definitions.aspectInfo(slot.aspectId)?.name;
             if (!aspectName) continue;
-            const tex = reg.find(def.cardType, aspectName);
+            const tex = reg.find(aspectName);
             if (!tex) continue;
             const cur = i === 0 ? entry.stock0 : entry.stock1;
-            for (let k = 0; k < MAX_STOCK_PER_SLOT; k++) {
-              instances.push({ tex, present: k < cur });
+            if (slot.mode === "index") {
+              // Index mode: one sprite per slot, pinned to
+              // `_<cur>.png`. Cycling the stock value cycles the
+              // visible variant. `cur = 0` → no sprite (matches
+              // count mode's empty state). See
+              // docs/STOCK_INDEX_MODE.md.
+              instances.push({ tex, present: cur > 0, index: cur });
+            } else {
+              // Count mode (default): N copies for stock = N, each
+              // pseudo-randomly picked from the pack. Roster
+              // reserves `MAX_STOCK_PER_SLOT` positions per slot so
+              // the visible / hidden mix is stable per (q, r).
+              for (let k = 0; k < MAX_STOCK_PER_SLOT; k++) {
+                instances.push({ tex, present: k < cur });
+              }
             }
           }
         } else if (def.aspects) {
@@ -519,7 +725,7 @@ export class LayoutWorld extends LayoutNode {
             if (!pair) continue;
             const aspectName = this.ctx.definitions.aspectInfo(pair[0])?.name;
             if (!aspectName) continue;
-            const tex = reg.find(def.cardType, aspectName);
+            const tex = reg.find(aspectName);
             if (!tex) continue;
             for (let k = 0; k < OBJECTS_PER_TILE; k++) {
               instances.push({ tex, present: true });
@@ -527,8 +733,19 @@ export class LayoutWorld extends LayoutNode {
             break;
           }
         }
-        if (instances.length === 0) continue;
-        let presentCount = 0;
+
+        // Centre instance — pinned to slot 0 when the def declares
+        // an `object`. Falls back to nothing if the referenced
+        // aspect isn't renderable (unknown / no `size`). See
+        // docs/CARD_OBJECT_UNIFICATION.md (M5).
+        let centre: { tex: TextureDefinition; index?: number } | null = null;
+        if (def.object) {
+          const cTex = reg.find(def.object.name);
+          if (cTex) centre = { tex: cTex, index: def.object.index };
+        }
+
+        if (instances.length === 0 && !centre) continue;
+        let presentCount = centre ? 1 : 0;
         for (const inst of instances) if (inst.present) presentCount++;
         if (presentCount === 0) continue;
 
@@ -547,21 +764,67 @@ export class LayoutWorld extends LayoutNode {
           const s = inst.tex.size * inst.tex.scale.max;
           if (s > maxSpriteSize) maxSpriteSize = s;
         }
+        if (centre) {
+          // Card-side `object.scale` overrides the object's declared
+          // envelope — use the override here so cull math matches the
+          // sprite the renderer will actually draw below.
+          const maxScale = def.object?.scale?.max ?? centre.tex.scale.max;
+          const s = centre.tex.size * maxScale;
+          if (s > maxSpriteSize) maxSpriteSize = s;
+        }
         const halfX  = ringRadius + maxSpriteSize * 0.5;
         const topY   = ringRadius + maxSpriteSize * 0.75;
         const botY   = ringRadius + maxSpriteSize * 0.25;
         if (cx + halfX < 0 || cx - halfX > w) continue;
         if (cy + botY < 0 || cy - topY > h) continue;
 
-        // Fixed 7-slot layout (1 centre + 6 ring). The roster index `i`
-        // maps to slot `slotOrder[i]` — a stable position that doesn't
-        // shift when other roster entries flip present/absent.
-        const slotOrder = slotPermutation(q, r);
+        // Fixed 7-slot layout (1 centre + 6 ring). When the def
+        // carries an `object`, centre (slot 0) is reserved for it
+        // and ring instances skip slot 0. When no `object`, the
+        // original behaviour: ring instances permute across all
+        // 7 slots, leaving slot 0 empty if instance count < 7.
+        const slotOrder = centre
+          ? slotPermutation(q, r).filter(s => s !== 0)
+          : slotPermutation(q, r);
         const startAngle = tileAngleOffset(q, r);
+
+        // Centre instance first, when present. A def carrying a
+        // faction sub-aspect (e.g. tile-flavoured chorus variant)
+        // overrides the local player's tileFaction so the variant
+        // looks the same regardless of who's viewing it. A def's
+        // `object.scale` overrides the object's declared scale
+        // envelope so the same pack can render at a different size.
+        if (centre) {
+          const t = hash(q, r, INSTANCE_SCALE_SEED_BASE) / 0x1_0000_0000;
+          const scaleEnv = def.object?.scale ?? centre.tex.scale;
+          const scale = scaleEnv.min + t * (scaleEnv.max - scaleEnv.min);
+          const centreFaction =
+            this.ctx.definitions.cardFactionOverride(def) ?? tileFaction;
+          this.ctx.objects.add(this.objectContainer, {
+            name: centre.tex.name,
+            // `tex.size` is the aspect's preferred draw size in px;
+            // `ObjectManager` resolves the matching LOD and scales
+            // the sprite to render at this size × `scale`.
+            desiredSize: centre.tex.size,
+            // Index pins a specific variant when set; otherwise the
+            // per-tile coordinate hash provides deterministic variance.
+            seed: hash(q, r, INSTANCE_TEX_SEED_BASE),
+            index: centre.index,
+            faction: centreFaction,
+            x: cx,
+            y: cy,
+            scale,
+            sortKey: cy,
+            anchorX: centre.tex.anchor.x,
+            anchorY: centre.tex.anchor.y,
+          });
+        }
+
         for (let i = 0; i < instances.length; i++) {
           const inst = instances[i];
           if (!inst.present) continue;
           const slot = slotOrder[i];
+          if (slot === undefined) break; // more ring instances than ring slots
           let x: number;
           let y: number;
           if (slot === 0) {
@@ -573,12 +836,16 @@ export class LayoutWorld extends LayoutNode {
             x = cx + Math.cos(angle) * ringRadius;
             y = cy + Math.sin(angle) * ringRadius;
           }
-          const t = hash(q, r, INSTANCE_SCALE_SEED_BASE + i) / 0x1_0000_0000;
+          const t = hash(q, r, INSTANCE_SCALE_SEED_BASE + i + 1) / 0x1_0000_0000;
           const scale = inst.tex.scale.min + t * (inst.tex.scale.max - inst.tex.scale.min);
           this.ctx.objects.add(this.objectContainer, {
-            object: inst.tex.object,
-            size: inst.tex.size,
-            seed: hash(q, r, INSTANCE_TEX_SEED_BASE + i),
+            name: inst.tex.name,
+            // Per-aspect preferred draw size; LOD picker resolves
+            // the matching bucket and the sprite is scaled to
+            // render at this size × `scale`.
+            desiredSize: inst.tex.size,
+            seed: hash(q, r, INSTANCE_TEX_SEED_BASE + i + 1),
+            index: inst.index,
             x, y,
             scale,
             sortKey: y,
@@ -615,6 +882,119 @@ export class LayoutWorld extends LayoutNode {
    *  local position is no longer in the world-card-surface frame.
    *  Going through global → surface-local via `getGlobalPosition()`
    *  keeps both states equivalent. */
+  /** Packed tile definition + current stock counters at world hex
+   *  `(q, r)`, or `null` if the containing zone hasn't loaded yet
+   *  (tile data missing from the cache). Used by the click→details
+   *  flow to surface tile details when the user clicks an empty
+   *  world hex (no card on it). Stock counters map to the def's
+   *  `stock` slot order — `stock0` ↔ `def.stock[0]`.
+   *
+   *  Card-priority: a promoted tile-card at this hex
+   *  (`docs/TILE_AS_CARD.md`) wins over the zone slot — its
+   *  `packed_definition` and `flags_bk.tile_stock_{0,1}` reflect
+   *  any mid-action mutations (e.g. wood decremented after
+   *  cut_tree). Falls back to `zonesLocal` only when no tile-card
+   *  resolves. */
+  tileAt(q: number, r: number): { packed: number; stock0: number; stock1: number } | null {
+    return this.tileViewAt(q, r);
+  }
+
+  /** Card-priority `(packed, stock0, stock1)` lookup at hex
+   *  `(q, r)`. Consults `cardsLocal` for a Free tile-card at the
+   *  hex (matching the zone's `card_type`), else falls back to the
+   *  zone-derived `tileData` cache. Returns `null` when neither
+   *  resolves (off-map / zone not loaded).
+   *
+   *  `source` distinguishes which path produced the entry —
+   *  `"card"` means a tile-card row in `cardsLocal` mid-action
+   *  (mutated by `chain_stitch`), `"zone"` means the resting
+   *  zone-derived snapshot. Used by `layout()` to ring card-
+   *  sourced tiles in the debug overlay so tile-card sizing /
+   *  parenting bugs are visible at a glance. */
+  private tileViewAt(
+    q: number,
+    r: number,
+  ): { packed: number; stock0: number; stock1: number; source: "card" | "zone" } | null {
+    const tileCard = this.findFreeTileCardAt(q, r);
+    if (tileCard !== null) {
+      return {
+        packed: tileCard.packedDefinition,
+        stock0:
+          this.ctx.definitions.cardFlagFieldValueIn(
+            "cards_bk",
+            tileCard.flagsBk,
+            "tile_stock_0",
+          ) ?? 0,
+        stock1:
+          this.ctx.definitions.cardFlagFieldValueIn(
+            "cards_bk",
+            tileCard.flagsBk,
+            "tile_stock_1",
+          ) ?? 0,
+        source: "card",
+      };
+    }
+    const zone = this.tileData.get(`${q},${r}`);
+    if (!zone) return null;
+    return { ...zone, source: "zone" };
+  }
+
+  /** Find a tile-card (`card_type == 7`) whose hex resolves to world
+   *  `(q, r)`. Walks every tile-card in `cardsLocal`; for each,
+   *  resolves its hex either directly from `microZone` (Free state)
+   *  or by chasing the parent-pointer chain to the first Free
+   *  ancestor (OnRoot / Slot state — set by chain_stitch when the
+   *  tile-card was bound to an action). The orphan case (Free
+   *  ancestor reaped by GC before the tile-card was demoted) returns
+   *  `null` and the caller falls back to zone data — temporary
+   *  staleness that resolves on the next server tile write or the
+   *  next GC demote-then-promote cycle. Bounded by total card count
+   *  × max chain depth; called per-tile during overlay rendering so
+   *  kept tight. */
+  private findFreeTileCardAt(q: number, r: number) {
+    for (const row of this.ctx.data.cardsLocal.values()) {
+      // Match the LayoutWorld instance's own surface. Each LayoutWorld
+      // is scoped to a single surface (world, mini-zone, player-dim,
+      // …) — a tile-card promotion on a different surface belongs to
+      // a different LayoutWorld instance, not this one. The prior
+      // hard-coded `WORLD_LAYER` filter dated from when LayoutWorld
+      // only served the world surface; left dim tile-cards invisible
+      // here (and the zone-tile rendering double-drew over them).
+      if (row.surface !== this.surface) continue;
+      const cardType = (row.packedDefinition >> 12) & 0xf;
+      if (cardType !== TILE_CARD_TYPE) continue;
+      const hex = this.resolveTileCardHex(row);
+      if (hex === null) continue;
+      const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
+      if (zoneQ + hex.q !== q || zoneR + hex.r !== r) continue;
+      return row;
+    }
+    return null;
+  }
+
+  /** Resolve a tile-card's local (q, r) within its zone. For Free
+   *  tile-cards, read bits 5-7 / 2-4 of `microZone` directly. For
+   *  OnRoot / Slot tile-cards (chain_stitch repacked `microZone` as
+   *  `[position:4 | direction:2 | state:2]` and lost the original
+   *  hex), walk the parent chain to the first Free ancestor and
+   *  inherit its (q, r). Returns `null` when the chain dead-ends
+   *  (parent reaped) or exceeds the depth cap. */
+  private resolveTileCardHex(
+    row: { microZone: number; microLocation: number },
+  ): { q: number; r: number } | null {
+    let cur: { microZone: number; microLocation: number } | undefined = row;
+    for (let depth = 0; depth < 32 && cur !== undefined; depth++) {
+      if (getStackedState(cur.microZone) === STACKED_LOOSE) {
+        return {
+          q: (cur.microZone >> 5) & 0x7,
+          r: (cur.microZone >> 2) & 0x7,
+        };
+      }
+      cur = this.ctx.data.cardsLocal.get(cur.microLocation);
+    }
+    return null;
+  }
+
   worldHexAt(
     globalX: number,
     globalY: number,
@@ -714,8 +1094,8 @@ export class LayoutWorld extends LayoutNode {
     centerY: number,
     half: "top" | "bottom" | "all",
   ): void {
-    const entry = this.tileData.get(`${q},${r}`);
-    if (entry === undefined) return;
+    const entry = this.tileViewAt(q, r);
+    if (entry === null) return;
     const def = this.ctx.definitions.decode(entry.packed);
     if (!def) return;
 
@@ -725,18 +1105,26 @@ export class LayoutWorld extends LayoutNode {
     // Identical inputs → identical roster → identical slot
     // assignment, so the overlay lines up with the world surface.
     const reg = getTextureRegistry();
-    const instances: { tex: TextureDefinition; present: boolean }[] = [];
+    const instances: { tex: TextureDefinition; present: boolean; index?: number }[] = [];
     if (def.stock && def.stock.length > 0) {
       for (let i = 0; i < def.stock.length; i++) {
         const slot = def.stock[i];
         if (!slot) continue;
         const aspectName = this.ctx.definitions.aspectInfo(slot.aspectId)?.name;
         if (!aspectName) continue;
-        const tex = reg.find(def.cardType, aspectName);
+        const tex = reg.find(aspectName);
         if (!tex) continue;
         const cur = i === 0 ? entry.stock0 : entry.stock1;
-        for (let k = 0; k < MAX_STOCK_PER_SLOT; k++) {
-          instances.push({ tex, present: k < cur });
+        // Mirror the main-sync branch (`syncTiles`) so the overlay
+        // roster matches the world surface exactly: same (q, r) +
+        // same stock-slot index always produces identical
+        // `present` / `index` markings. See STOCK_INDEX_MODE.md.
+        if (slot.mode === "index") {
+          instances.push({ tex, present: cur > 0, index: cur });
+        } else {
+          for (let k = 0; k < MAX_STOCK_PER_SLOT; k++) {
+            instances.push({ tex, present: k < cur });
+          }
         }
       }
     } else if (def.aspects) {
@@ -744,7 +1132,7 @@ export class LayoutWorld extends LayoutNode {
         if (!pair) continue;
         const aspectName = this.ctx.definitions.aspectInfo(pair[0])?.name;
         if (!aspectName) continue;
-        const tex = reg.find(def.cardType, aspectName);
+        const tex = reg.find(aspectName);
         if (!tex) continue;
         for (let k = 0; k < OBJECTS_PER_TILE; k++) {
           instances.push({ tex, present: true });
@@ -752,19 +1140,67 @@ export class LayoutWorld extends LayoutNode {
         break;
       }
     }
-    if (instances.length === 0) return;
+    // Centre instance — `def.object` is the tile's pinned centre
+    // sprite (alter, table, fountain, etc. under the unified card
+    // model). Mirrors the main render path at the top of
+    // [`syncTiles`] so the overlay roster carries the same centre
+    // the world surface drew. Without this, tile-card objects
+    // (alter, table) wouldn't occlude cards visually — a soul
+    // placed on the alter's tile would render in front of the
+    // alter sprite instead of behind it.
+    let centre: { tex: TextureDefinition; index?: number; scaleMin: number; scaleMax: number } | null = null;
+    if (def.object) {
+      const cTex = reg.find(def.object.name);
+      if (cTex) {
+        const scaleEnv = def.object.scale ?? cTex.scale;
+        centre = {
+          tex: cTex,
+          index: def.object.index,
+          scaleMin: scaleEnv.min,
+          scaleMax: scaleEnv.max,
+        };
+      }
+    }
+
+    if (instances.length === 0 && !centre) return;
 
     const ringRadius = WORLD_HEX_RADIUS / 2;
     const startAngle = tileAngleOffset(q, r);
     const TWO_PI = 2 * Math.PI;
     // Must mirror the main sync — same `(q, r)` produces the same
     // slot order, so the overlay's sprites line up with the world's.
-    const slotOrder = slotPermutation(q, r);
+    // When `centre` is set, slot 0 is reserved for it; ring instances
+    // skip slot 0 (same filter the main render path applies).
+    const slotOrder = centre
+      ? slotPermutation(q, r).filter(s => s !== 0)
+      : slotPermutation(q, r);
+
+    // Centre first — pinned to (centerX, centerY), filtered out on
+    // "bottom" queries (the own-tile / same-row-neighbour overlay
+    // case) because the centre sprite already renders behind cards
+    // on its own tile via the main pass z-order; re-adding it via
+    // the overlay would double-layer it. "all" (southern neighbour
+    // tiles) keeps the centre so an alter / table on a southward tile
+    // can occlude a card placed northward.
+    if (centre && half !== "bottom") {
+      const tex = centre.tex;
+      const t = hash(q, r, INSTANCE_SCALE_SEED_BASE) / 0x1_0000_0000;
+      const variance = centre.scaleMin + t * (centre.scaleMax - centre.scaleMin);
+      const seed = hash(q, r, INSTANCE_TEX_SEED_BASE);
+      const objTex = this.ctx.lodTextures.get(tex.name, tex.size, seed, centre.index);
+      const sprite = new Sprite(objTex);
+      sprite.anchor.set(tex.anchor.x, tex.anchor.y);
+      sprite.position.set(centerX, centerY);
+      sprite.scale.set((tex.size / objTex.width) * variance);
+      staged.push({ sprite, y: centerY });
+    }
+
     for (let i = 0; i < instances.length; i++) {
       const inst = instances[i];
       if (!inst.present) continue;
       const tex = inst.tex;
       const slot = slotOrder[i];
+      if (slot === undefined) break; // more ring instances than ring slots
       let sx: number;
       let sy: number;
       if (slot === 0) {
@@ -775,6 +1211,8 @@ export class LayoutWorld extends LayoutNode {
         // would occlude). Skip on "bottom" queries (the own-tile /
         // same-row-neighbour overlay case) so the centre sprite
         // doesn't bleed into the card's translucent overlay.
+        // Only reachable when `centre` is null — when `centre` is
+        // set, slot 0 was filtered out of `slotOrder` above.
         if (half === "bottom") continue;
         sx = centerX;
         sy = centerY;
@@ -798,15 +1236,18 @@ export class LayoutWorld extends LayoutNode {
       }
 
       const t = hash(q, r, INSTANCE_SCALE_SEED_BASE + i) / 0x1_0000_0000;
-      const scale = tex.scale.min + t * (tex.scale.max - tex.scale.min);
+      const variance = tex.scale.min + t * (tex.scale.max - tex.scale.min);
       const seed = hash(q, r, INSTANCE_TEX_SEED_BASE + i);
-      const objTex = this.ctx.objectTextures.get(tex.object, tex.size, seed);
-      if (!objTex) continue;
-
+      // `LodTextureManager.get` always returns a Texture (substitute
+      // / white fallback covers load-pending). Sprite scale =
+      // `(desiredSize / objTex.width) × variance` so the rendered
+      // size matches the aspect's `tex.size × variance` regardless
+      // of which LOD bucket backs it this frame.
+      const objTex = this.ctx.lodTextures.get(tex.name, tex.size, seed, inst.index);
       const sprite = new Sprite(objTex);
       sprite.anchor.set(tex.anchor.x, tex.anchor.y);
       sprite.position.set(sx, sy);
-      sprite.scale.set(scale);
+      sprite.scale.set((tex.size / objTex.width) * variance);
       staged.push({ sprite, y: sy });
     }
   }
@@ -821,6 +1262,7 @@ export class LayoutWorld extends LayoutNode {
     }
     this.unsubAnchor();
     this.unsubZones();
+    this.unsubCards();
     this.unsubZoneAdded();
     this.unsubZoneRemoved();
     this.unsubObjectLoad();

@@ -1,6 +1,7 @@
 import { Graphics, Text } from "pixi.js";
 import { GRID_W, GRID_H } from "./InventoryGame";
 import { LayoutNode } from "../layout/LayoutNode";
+import { LayoutCard } from "../cards/layout/CardLayout";
 import type { LayoutManager } from "../layout/LayoutManager";
 import type { ZoneId } from "../../server/data/packing";
 
@@ -22,7 +23,11 @@ export class LayoutInventory extends LayoutNode {
   private readonly grid = new Graphics();
   private readonly label: Text;
   private readonly layoutManager: LayoutManager;
-  private readonly zoneId: ZoneId;
+  /** Bucket address `(macro_zone | surface)` this inventory renders.
+   *  Public-readable so the drop resolver can recover the bucket's
+   *  `surface` + `macro_zone` to build the right inventory-placement
+   *  intent (soul inv vs player inv). */
+  readonly zoneId: ZoneId;
 
   private gridTarget = 0;
   private gridAlpha = 0;
@@ -55,7 +60,24 @@ export class LayoutInventory extends LayoutNode {
   }
 
   override destroy(): void {
+    // Detach LayoutCard children without destroying — CardManager
+    // owns their lifecycle, and the zone may still be subscribed
+    // (SoulManager holds an inventory-zone refcount for every owned
+    // soul). Letting Pixi's destroy cascade nuke them would leave
+    // CardManager pointing at dead Pixi nodes, so the next
+    // LayoutInventory built for this zone (e.g. user clicks back to
+    // this soul) finds zombie Cards with no visuals.
+    //
+    // Unregister our surface first, then re-arm each card's
+    // pending-attach so it picks up the next surface registered for
+    // this zone. Re-arming before unregister would just re-parent
+    // them to this dying surface.
+    const cards = [...this.children];
+    for (const child of cards) this.removeChild(child);
     this.layoutManager.unregister(this.zoneId);
+    for (const child of cards) {
+      if (child instanceof LayoutCard) child.attach(this.zoneId);
+    }
     super.destroy();
   }
 

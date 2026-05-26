@@ -1,4 +1,4 @@
-import { packZoneId, type ZoneId } from "../../server/data/packing";
+import { INVENTORY_LAYER, packZoneId, PLAYER_INVENTORY_LAYER, type ZoneId } from "../../server/data/packing";
 import { packMacroZone, WORLD_LAYER, zonesAroundAnchor } from "../world/worldCoords";
 
 export type ZoneTier = "active" | "hot" | "cold";
@@ -6,8 +6,24 @@ export type ZoneTier = "active" | "hot" | "cold";
 export type ZoneListener = (zoneId: ZoneId) => void;
 
 export type AnchorName = string;
-export interface WorldAnchor { readonly q: number; readonly r: number; }
-export type AnchorListener = (name: AnchorName, q: number, r: number) => void;
+/** Named viewport anchor. Carries the surface it's pinned to so
+ *  `recomputeAnchorZones` can pack zone_ids on the right layer —
+ *  WORLD_LAYER for the overworld, PLAYER_DIMENSION_LAYER for a
+ *  player's pocket dim, etc. `surface` is part of the anchor's
+ *  identity for zone-recompute purposes; changing it via
+ *  `setAnchor(name, q, r, surface)` re-walks the surrounding ring
+ *  on the new surface. */
+export interface WorldAnchor {
+  readonly q: number;
+  readonly r: number;
+  readonly surface: number;
+}
+export type AnchorListener = (
+  name: AnchorName,
+  q: number,
+  r: number,
+  surface: number,
+) => void;
 
 const TIERS: readonly ZoneTier[] = ["active", "hot", "cold"];
 
@@ -32,11 +48,49 @@ export class ZoneManager {
   /** How many hex rings around each anchor to keep subscribed. */
   anchorRadius = 2;
 
-  private prevWorldZones = new Set<ZoneId>();
+  private prevAnchorZones = new Set<ZoneId>();
 
-  constructor() {
-    this.anchors.set("viewport", { q: 0, r: 0 });
-    this.recomputeWorldZones();
+  /** Local player_id, set when login resolves. Read by the subscribe
+   *  dispatch in `main.ts` to scope `PLAYER_DIMENSION_LAYER` zones to
+   *  the local player's pocket dim (owner_id = player_id). `null`
+   *  pre-login; consumers must defer player-dim subscriptions until
+   *  this is populated. */
+  private playerId: number | null = null;
+
+  // Anchors are set by callers via `setAnchor(name, q, r, surface)`.
+  // With the PanelManager rollout, each `GameViewPanel` owns a pair
+  // of namespaced anchors (`viewport:<panelId>` / `soul:<panelId>`) —
+  // there is no singleton `"viewport"` anchor anymore. Until any
+  // panel is open there are no anchors and no zones get collected;
+  // player row + chat subscriptions are the only baseline traffic.
+  //
+  // Surface plumbing: each anchor is tied to a surface (default
+  // WORLD_LAYER). `recomputeAnchorZones` packs zone_ids using each
+  // anchor's surface, so a viewport pinned to
+  // `PLAYER_DIMENSION_LAYER` activates zones on that layer (which
+  // the `main.ts` dispatch routes through `subscribePlayerDimension`
+  // rather than `subscribeWorldZone`).
+  constructor() {}
+
+  /** Set the local player_id (called from `PlayerManager`'s login
+   *  listener). Triggers a recompute so any pre-login player-dim
+   *  anchors get their subscriptions activated. */
+  setPlayerId(playerId: number | null): void {
+    if (this.playerId === playerId) return;
+    this.playerId = playerId;
+    // No recompute needed — the zone IDs in `entries` don't change
+    // when the player_id changes; the dispatcher in `main.ts`
+    // reads `getPlayerId()` lazily when it fires `subscribeZone`.
+    // Consumers that need a player-dim subscription installed
+    // immediately after login should call `setAnchor(... surface =
+    // PLAYER_DIMENSION_LAYER)` to seed the active set.
+  }
+
+  /** Read the local player_id. Returns `null` pre-login. Used by the
+   *  `main.ts` zone-subscribe dispatcher to scope
+   *  `PLAYER_DIMENSION_LAYER` subscriptions. */
+  getPlayerId(): number | null {
+    return this.playerId;
   }
 
   set(zoneId: ZoneId, tier: ZoneTier | null): void {
@@ -75,6 +129,29 @@ export class ZoneManager {
       released = true;
       this.release(zoneId);
     };
+  }
+
+  /**
+   * Convenience wrapper around `ensure` for the per-soul inventory
+   * zone. Callers pass the soul's `card_id`; the inventory zone id
+   * is computed here (`packZoneId(soulCardId, INVENTORY_LAYER)`) so
+   * the surface-layer constant doesn't have to leak into every
+   * consumer. Returns the same refcounted release fn shape as
+   * `ensure`.
+   */
+  ensureInventory(soulCardId: number): () => void {
+    return this.ensure(packZoneId(soulCardId, INVENTORY_LAYER));
+  }
+
+  /**
+   * Convenience wrapper around `ensure` for the player-wide
+   * inventory zone (account-scoped, shared across all of the
+   * player's souls). Mirror of `ensureInventory` but keyed on
+   * `player_id` and `PLAYER_INVENTORY_LAYER (2)`. Returns the
+   * same refcounted release fn.
+   */
+  ensurePlayerInventory(playerId: number): () => void {
+    return this.ensure(packZoneId(playerId, PLAYER_INVENTORY_LAYER));
   }
 
   private release(zoneId: ZoneId): void {
@@ -118,27 +195,40 @@ export class ZoneManager {
   // ── World coordinate anchor API ──────────────────────────────────────────
 
   /**
-   * Set or update a named anchor point in world q/r space. No-ops if the
-   * values are unchanged. Common names: `"viewport"`, `"player"`.
+   * Set or update a named anchor point in (q, r) hex space on a
+   * specific `surface`. No-ops if the values are unchanged. Common
+   * names: `"viewport"`, `"player"`, `"viewport:<panelId>"`.
    *
-   * LayoutWorld subscribes to `"viewport"` to know where to center its hex
-   * grid. Other anchors keep their surrounding zones warm even when off-screen.
+   * `surface` defaults to `WORLD_LAYER` for backward compatibility
+   * with the world-pan code. Player-dim viewports pass
+   * `PLAYER_DIMENSION_LAYER` so `recomputeAnchorZones` packs zone
+   * ids on the right layer and the `main.ts` dispatch routes them
+   * through `subscribePlayerDimension`.
+   *
+   * LayoutWorld subscribes to `"viewport:<panelId>"` to know where
+   * to center its hex grid. Other anchors keep their surrounding
+   * zones warm even when off-screen.
    */
-  setAnchor(name: AnchorName, q: number, r: number): void {
+  setAnchor(name: AnchorName, q: number, r: number, surface: number = WORLD_LAYER): void {
     const prev = this.anchors.get(name);
-    if (prev?.q === q && prev.r === r) return;
-    this.anchors.set(name, { q, r });
-    for (const l of this.anchorListeners) l(name, q, r);
-    this.recomputeWorldZones();
+    if (prev?.q === q && prev.r === r && prev.surface === surface) return;
+    this.anchors.set(name, { q, r, surface });
+    for (const l of this.anchorListeners) l(name, q, r, surface);
+    this.recomputeAnchorZones();
+  }
+
+  /** Drop a named anchor entirely. The anchor's contribution to the
+   *  active zone ring is removed in the next
+   *  `recomputeAnchorZones` pass — zones that were only kept alive
+   *  by this anchor demote and unsubscribe. */
+  clearAnchor(name: AnchorName): void {
+    if (!this.anchors.has(name)) return;
+    this.anchors.delete(name);
+    this.recomputeAnchorZones();
   }
 
   getAnchor(name: AnchorName): WorldAnchor | undefined {
     return this.anchors.get(name);
-  }
-
-  /** The `"viewport"` anchor, defaulting to origin if not yet set. */
-  get viewportAnchor(): WorldAnchor {
-    return this.anchors.get("viewport") ?? { q: 0, r: 0 };
   }
 
   /**
@@ -147,24 +237,28 @@ export class ZoneManager {
    */
   onAnchorChange(listener: AnchorListener): () => void {
     this.anchorListeners.add(listener);
-    for (const [name, { q, r }] of this.anchors) listener(name, q, r);
+    for (const [name, { q, r, surface }] of this.anchors) listener(name, q, r, surface);
     return () => { this.anchorListeners.delete(listener); };
   }
 
-  private recomputeWorldZones(): void {
+  /** Walk every anchor, pack a zone_id per `(zoneQ, zoneR)` in the
+   *  anchor's `anchorRadius` ring on the anchor's surface, diff
+   *  against the previous set, promote/demote zones accordingly.
+   *  Same shape as the old world-only version; now surface-keyed. */
+  private recomputeAnchorZones(): void {
     const next = new Set<ZoneId>();
-    for (const { q, r } of this.anchors.values()) {
+    for (const { q, r, surface } of this.anchors.values()) {
       for (const { zoneQ, zoneR } of zonesAroundAnchor(q, r, this.anchorRadius)) {
-        next.add(packZoneId(packMacroZone(zoneQ, zoneR), WORLD_LAYER));
+        next.add(packZoneId(packMacroZone(zoneQ, zoneR), surface));
       }
     }
-    for (const zoneId of this.prevWorldZones) {
+    for (const zoneId of this.prevAnchorZones) {
       if (!next.has(zoneId)) this.set(zoneId, null);
     }
     for (const zoneId of next) {
-      if (!this.prevWorldZones.has(zoneId)) this.set(zoneId, "active");
+      if (!this.prevAnchorZones.has(zoneId)) this.set(zoneId, "active");
     }
-    this.prevWorldZones = next;
+    this.prevAnchorZones = next;
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────

@@ -74,7 +74,7 @@ export function soulSpeed(
   defs: DefinitionManager,
   packedDef: number,
 ): number {
-  const v = defs.traitValue(packedDef, "speed");
+  const v = defs.aspectValue(packedDef, "speed");
   return v ?? DEFAULT_SOUL_SPEED;
 }
 
@@ -89,7 +89,7 @@ function tileCostFromPacked(
   // Same `traitValue` lookup the server uses via `def.trait_value`.
   // Missing trait → fall back to DEFAULT_TILE_COST, matching the
   // server's `unwrap_or(DEFAULT_TILE_COST)` in `tile_cost`.
-  const v = defs.traitValue(packedDef, "cost");
+  const v = defs.aspectValue(packedDef, "cost");
   return v ?? DEFAULT_TILE_COST;
 }
 
@@ -121,10 +121,11 @@ function tileDefAt(
 }
 
 /** Encode a global coord back into a `TilePoint` on the given surface.
- *  `microZone` packs state=Free (the unified card model retired
- *  STACKED_ON_HEX / state 3 — the server's `StackedState::from_u2`
- *  panics on value 3, which used to crash `move_soul` here). The
- *  server's `move_soul` validator checks `state == Free` per step. */
+ *  `microZone` packs state=Free; the server's `move_soul` validator
+ *  checks `state == Free` per step. State 3 is now `STACKED_DEFERRED`
+ *  (anchored deferred placement, emitted by recipe outputs); using it
+ *  for a pathfind target would mis-signal "resolve at mirror time"
+ *  to the placement layer. */
 function coordToTilePoint(coord: Coord, surface: number): TilePoint {
   const macroQ = Math.floor(coord.q / ZONE_SIZE);
   const macroR = Math.floor(coord.r / ZONE_SIZE);

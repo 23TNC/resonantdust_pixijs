@@ -265,8 +265,11 @@ export class GameInventory {
    *  - `STACKED_ON_ROOT`: one-hop — `microLocation` is the chain root.
    *  - `STACKED_SLOT`: walk via `microLocation` (parent could be
    *    another Slot, an OnRoot, or Free).
-   *  - `STACKED_ON_HEX`: returns null — hex-anchored rect cards aren't
-   *    inventory chain members.
+   *  - Any other state (state 3, `STACKED_DEFERRED`, which should be
+   *    resolved by `mirrorCard` before chain walks see it): returns
+   *    null. If a deferred row reaches inventory chain walking via a
+   *    subscription gap, it's not part of any chain yet and the walk
+   *    correctly aborts.
    *
    * Returns null if the chain is broken (parent missing) or if we
    * exceed `FIND_ROOT_MAX_DEPTH`.

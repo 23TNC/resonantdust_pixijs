@@ -19,7 +19,8 @@ export const Card = __t.object("Card", {
   microLocation: __t.u32(),
   ownerId: __t.u32(),
   packedDefinition: __t.u16(),
-  flags: __t.u32(),
+  flagsState: __t.u32(),
+  flagsBk: __t.u32(),
 });
 export type Card = __Infer<typeof Card>;
 
@@ -42,11 +43,30 @@ export const LifecyclePending = __t.object("LifecyclePending", {
 });
 export type LifecyclePending = __Infer<typeof LifecyclePending>;
 
+export const PendingAction = __t.object("PendingAction", {
+  dedupKey: __t.u64(),
+  completionMs: __t.u64(),
+});
+export type PendingAction = __Infer<typeof PendingAction>;
+
+export const Placement = __t.object("Placement", {
+  kind: __t.u8(),
+  parentId: __t.u32(),
+  direction: __t.u8(),
+  surface: __t.u8(),
+  macroZone: __t.u32(),
+  q: __t.u8(),
+  r: __t.u8(),
+  xy: __t.u32(),
+});
+export type Placement = __Infer<typeof Placement>;
+
 export const Player = __t.object("Player", {
   validAt: __t.u64(),
   playerId: __t.u32(),
   name: __t.string(),
   lastLoginSecs: __t.u32(),
+  flags: __t.u32(),
 });
 export type Player = __Infer<typeof Player>;
 
@@ -61,6 +81,9 @@ export const PlayerProfile = __t.object("PlayerProfile", {
   starterPacks: __t.u64(),
   lifecycleCount: __t.u32(),
   earliestLifecycleExpiresMs: __t.u64(),
+  blueprints0: __t.u64(),
+  blueprintInfo: __t.u8(),
+  soulInfo: __t.u8(),
 });
 export type PlayerProfile = __Infer<typeof PlayerProfile>;
 
@@ -93,6 +116,7 @@ export type Soul = __Infer<typeof Soul>;
 export const SoulPrivate = __t.object("SoulPrivate", {
   cardId: __t.u32(),
   blueprints0: __t.u64(),
+  activeBlueprints: __t.u8(),
 });
 export type SoulPrivate = __Infer<typeof SoulPrivate>;
 

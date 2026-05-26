@@ -1,5 +1,4 @@
 import type { GameContext } from "../../../GameContext";
-import { debug } from "../../../debug";
 import { LayoutNode } from "../../layout/LayoutNode";
 import type { Card as CardRow } from "../../../server/spacetime/bindings/types";
 import type { ZoneId } from "../../../server/data/packing";
@@ -73,9 +72,11 @@ export abstract class LayoutCard extends LayoutNode {
 
   /**
    * Front-mount host for a rect card mounted on top of this hex card
-   * (STACKED_ON_HEX). Added to the container *after* the visual so mounted
-   * rects render in front. Only populated by LayoutHexCard; null on all
-   * other card types.
+   * (the rect lives as `STACKED_ON_ROOT` with `direction = HEX` under
+   * the unified card model; the host hex is `STACKED_LOOSE`). Added
+   * to the container *after* the visual so mounted rects render in
+   * front. Only populated by LayoutHexCard; null on all other card
+   * types.
    */
   hexMount: LayoutNode | null = null;
 
@@ -87,6 +88,14 @@ export abstract class LayoutCard extends LayoutNode {
   protected targetX = 0;
   protected targetY = 0;
   private hasTarget = false;
+
+  /** Unsubscribe for a deferred-attach wait: set when `attach(zoneId)`
+   *  found no surface for that zone yet and is waiting for the
+   *  matching `LayoutManager.onRegister` event. Cleared the moment we
+   *  successfully attach, or when the card is destroyed / re-attached
+   *  to a different zone before the surface lands. `null` whenever
+   *  we're not waiting. */
+  private pendingAttachUnsub: (() => void) | null = null;
 
   /**
    * Drag offset (cursor → card top-left) in the card's parent surface coords.
@@ -178,14 +187,40 @@ export abstract class LayoutCard extends LayoutNode {
     this.invalidate();
   }
 
-  /** Self-attach to the layout surface registered for `zoneId`. */
+  /** Self-attach to the layout surface registered for `zoneId`.
+   *
+   *  When no surface is registered for `zoneId` yet — the common
+   *  case for world cards whose hex isn't currently in the
+   *  viewport's neighbourhood — the card sits in memory and waits
+   *  for `LayoutManager.onRegister` to fire for our zone. As soon
+   *  as the viewport (or any other consumer) causes that zone's
+   *  surface to register, we attach. Surface absence is not an
+   *  error; it just means nobody's looking at this card's hex
+   *  yet. */
   attach(zoneId: ZoneId): void {
-    const surface = this.ctx.layout?.surfaceFor(zoneId);
-    if (!surface) {
-      debug.warn(["cards"], `[LayoutCard] no surface for zone ${zoneId}; card ${this.cardId} not attached`);
+    // Cancel any prior deferred wait — we're either attaching now,
+    // or queuing a fresh wait against a new zone.
+    this.pendingAttachUnsub?.();
+    this.pendingAttachUnsub = null;
+
+    const layoutManager = this.ctx.layout;
+    if (!layoutManager) return;
+
+    const surface = layoutManager.surfaceFor(zoneId);
+    if (surface) {
+      surface.addChild(this);
       return;
     }
-    surface.addChild(this);
+
+    // Defer: wait for the matching surface to register. Filter
+    // every register event by zone id; on match, fire the same
+    // attach path the synchronous branch took.
+    this.pendingAttachUnsub = layoutManager.onRegister((registeredZoneId, registeredSurface) => {
+      if (registeredZoneId !== zoneId) return;
+      this.pendingAttachUnsub?.();
+      this.pendingAttachUnsub = null;
+      registeredSurface.addChild(this);
+    });
   }
 
   /**
@@ -198,7 +233,18 @@ export abstract class LayoutCard extends LayoutNode {
   }
 
   detach(): void {
+    // Cancel any pending deferred-attach wait too — a detach is an
+    // explicit "I don't belong to this zone any more", so we
+    // shouldn't quietly auto-attach the moment the surface lands.
+    this.pendingAttachUnsub?.();
+    this.pendingAttachUnsub = null;
     this.parent?.removeChild(this);
+  }
+
+  override destroy(): void {
+    this.pendingAttachUnsub?.();
+    this.pendingAttachUnsub = null;
+    super.destroy();
   }
 
   /** Called by a parent card to share its in-front-objects overlay

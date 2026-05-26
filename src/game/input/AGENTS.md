@@ -5,7 +5,7 @@ Pointer- and key-event router. Listens to DOM events on the canvas (pointer)
 and `window` (keys), runs a tiny pointer state machine, hit-tests **only at
 down and up** (not on every move — that's expensive), and emits semantic
 events that downstream consumers (drag manager, click handlers, scene-
-specific shortcuts) subscribe to. Scene-scoped — owned by `GameScene`.
+specific shortcuts) subscribe to. Scene-scoped — owned by `MainScene`.
 
 ## Important files
 - `InputManager.ts`: pointer + key event router. Constructor `(canvas, hitRoot: LayoutNode)`. Subscribe to pointer events via `on(event, listener)` and key events via `onKey(event, listener)`; both return unsubscribe fns. Exposes `lastPointer: { x, y }` updated on every `pointermove` so per-frame consumers (e.g. `WorldPanManager`) can read the live cursor without subscribing.
@@ -35,6 +35,6 @@ specific shortcuts) subscribe to. Scene-scoped — owned by `GameScene`.
 ## Pitfalls
 - Re-entrant `pointerdown` while already pressed/dragging is ignored. If a second pointer (multi-touch) fires down, the existing gesture continues; the new touch is dropped. Multi-touch / multi-button is a separate design.
 - `lastPointer` stays at `(0, 0)` until the first `pointermove`. Consumers that read it cold (no prior pointer activity) must handle the origin sentinel; in practice, anything reading it inside a drag has already seen many moves.
-- `dispose()` removes listeners and releases capture. Call it from `GameScene.onExit` **before** destroying the layout root — a hit test against a destroyed root would crash.
+- `dispose()` removes listeners and releases capture. Call it from `MainScene.onExit` **before** destroying the layout root — a hit test against a destroyed root would crash.
 - Events are dispatched synchronously inside the DOM event handler. Listener work that blocks (heavy compute, sync XHR) will jank the input thread. Keep listeners light; queue heavy work to the next frame.
 - Pointermove handler is intentionally minimal (no hit-test). When we add continuous-drag support on a non-DragManager path, do it in a way that lets consumers opt in — don't make every move pay the hit-test cost just because one consumer wants drag tracking.

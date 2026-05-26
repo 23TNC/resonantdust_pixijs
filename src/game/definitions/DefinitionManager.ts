@@ -17,7 +17,12 @@ import init, {
   findPackedByKey as wasmFindPackedByKey,
   isHexType as wasmIsHexType,
   cardFlagBit as wasmCardFlagBit,
+  cardFlagBitIn as wasmCardFlagBitIn,
+  cardFlagFieldShape as wasmCardFlagFieldShape,
   cardFlagFieldValue as wasmCardFlagFieldValue,
+  cardFlagFieldValueAny as wasmCardFlagFieldValueAny,
+  cardFlagFieldValueIn as wasmCardFlagFieldValueIn,
+  hasCardFlag as wasmHasCardFlag,
   cardTypeId as wasmCardTypeId,
   recipeById as wasmRecipeById,
   recipeByKey as wasmRecipeByKey,
@@ -27,7 +32,10 @@ import init, {
   blueprintById as wasmBlueprintById,
   blueprintByKey as wasmBlueprintByKey,
   allBlueprints as wasmAllBlueprints,
-  traitValue as wasmTraitValue,
+  playerBlueprintById as wasmPlayerBlueprintById,
+  playerBlueprintByKey as wasmPlayerBlueprintByKey,
+  allPlayerBlueprints as wasmAllPlayerBlueprints,
+  aspectValue as wasmAspectValue,
 } from "../../content/pkg/resonantdust_content";
 import {
   findRecipeMatch as findRecipeMatchInternal,
@@ -37,28 +45,38 @@ import {
   type RecipeEntry,
 } from "../actions/recipeMatcher";
 
+/** Which top-level section of `aspects.json` declared the entry.
+ *  See the Rust `AspectCategory` enum.
+ *  - `aspect`  — primary recipe input. Always rendered in details.
+ *  - `feature` — behavioural tag (faction, fleeting, level, crafting,
+ *                speed, inventory). Rendered in expanded details only.
+ *  - `trait`   — descriptive number consumed by simulation code
+ *                (cost, height, climate envelopes). Not rendered. */
+export type AspectCategory = "aspect" | "feature" | "trait";
+
 /** Shape returned by `wasm_api::aspect_info`. Matches the Rust `Aspect` struct. */
 export interface AspectInfo {
   id: number;
   name: string;
   description: string;
+  /** Optional — defaults to `""` for entries (typically `trait`-category)
+   *  with no display intent. */
   icon: string;
   /** Display color packed as `0xRRGGBB`. Sub-aspects inherit their
-   *  parent's color when their JSON entry omits the field, so all
-   *  members of a family render with the same hue out of the box.
-   *  Pass directly to PIXI: `gfx.fill({ color: info.color })`. */
+   *  parent's color when their JSON entry omits the field. Defaults to
+   *  `0x888888` (neutral grey) when no ancestor declares one. */
   color: number;
-  /** Top-level family — the root-ancestor's name. `berry.group === "food"`
-   *  even though `berry`'s direct parent is `food`; the chain is collapsed
-   *  to the top so renderers can group by family without walking. */
+  /** Top-level family — the root-ancestor's name within the same
+   *  section. `berry.group === "food"`, `pine.group === "wood"`,
+   *  `chorus.group === "faction"`. */
   group: string;
-  /** Direct parent aspect id, or `null` for top-level entries. Forms the
-   *  single-inheritance tree the recipe matcher walks for `Entity::Aspect`
-   *  widening (a card carrying `corpus++` satisfies `{aspect: corpus}`).
-   *  Renderers use this to distinguish sub-aspects of the same parent
-   *  (e.g. `corpus+` vs `corpus--`) — the parent supplies the icon and
-   *  family colour, the leaf-name suffix supplies the polarity badge. */
+  /** Direct parent aspect id, or `null` for top-level entries within
+   *  their section. Forms the single-inheritance tree the recipe
+   *  matcher walks for `Entity::Aspect` widening. */
   parent: number | null;
+  /** Section the entry was declared under — drives details-panel
+   *  visibility. See [`AspectCategory`]. */
+  category: AspectCategory;
 }
 
 export interface StarterPackItem {
@@ -99,6 +117,13 @@ export interface Blueprint {
   cardPackedDefinition: number;
 }
 
+/** Render mode for a stock slot — see `StockMode` in the content
+ *  crate + `docs/STOCK_INDEX_MODE.md`. `"count"` (default) renders
+ *  `cur` copies of the aspect's sprite into ring slots; `"index"`
+ *  renders a single sprite pinned to `_<cur>.png` (cycling the
+ *  variant as the stock value mutates). */
+export type StockMode = "count" | "index";
+
 /** One row-mutable aspect slot on a `CardDefinition`. Mirrors
  *  `StockSlot` from the content crate. Order in the def's `stock`
  *  array maps to the per-tile u2 slots `stock0` / `stock1`. */
@@ -110,6 +135,8 @@ export interface StockSlot {
   max: number;
   /** Initial value worldgen / spawn paths seed the slot with. */
   default: number;
+  /** Render mode. Defaults to `"count"`. */
+  mode: StockMode;
 }
 
 export interface CardDefinition {
@@ -125,14 +152,33 @@ export interface CardDefinition {
    *  the locales registry; the bare key is the dev-side fallback. */
   key: string;
   /** Style array. Exactly 3 entries: CSS hex colors `[primary,
-   *  secondary, outline]`. Sprite filenames used to live at indices
-   *  3-4; they now live on the top-level [`sprite`] field. */
+   *  secondary, outline]`. */
   style: readonly string[];
-  /** Optional sprite filename rendered centred on the card body
-   *  (rect cards) or as the foreground overlay (hex cards). Resolved
-   *  at runtime against `public/textures/cards/objects/<filename>`.
-   *  `null`/`undefined` means "no sprite." */
-  sprite?: string | null;
+  /** Unified card-art reference. Picks a texture by object name
+   *  from the `master/<name>/` folder; `index` (when set) pins
+   *  `<N>.png`, otherwise the runtime hashes `card_id` for a
+   *  deterministic-per-row pseudo-random pick. `scale` (optional)
+   *  overrides the object's declared scale envelope so a card can
+   *  reuse a baseline pack at a different size. `null` / `undefined`
+   *  means "no card art." */
+  object?: {
+    name: string;
+    index?: number;
+    scale?: { min: number; max: number };
+  } | null;
+  /** Optional card-body background texture. Same `{ name, index?, scale? }`
+   *  shape as `object`, same asset pipeline
+   *  (`master/<name>/[<faction>/]<N>.png` resolved through
+   *  `LodTextureManager`), different render role: this PNG fills
+   *  the card body (behind the foreground art) instead of layering
+   *  on top of it. Cover-fit (uniform scale, polygon clip) — `scale`
+   *  is ignored here. `null` / `undefined` → fall back to `style[0]`
+   *  solid fill. See [docs/CARD_TEXTURE_FIELD.md](../../../docs/CARD_TEXTURE_FIELD.md). */
+  texture?: {
+    name: string;
+    index?: number;
+    scale?: { min: number; max: number };
+  } | null;
   /** `(aspectId, value)` pairs. */
   aspects: ReadonlyArray<readonly [number, number]>;
   /** Bit-mask of flags carried by this definition, built from the JSON
@@ -231,49 +277,80 @@ export class DefinitionManager {
     return wasmCardFlagBit(name);
   }
 
-  /** Bit mask (`1 << bit`) for a card-flag by name. Returns `0` for
-   *  unknown flag names — making `(row.flags & mask) !== 0` evaluate
-   *  to false, which is the safe default for the absent case. */
+  /** Bit mask (`1 << bit`) for a card-flag by name, looked up across
+   *  both `cards_state` and `cards_bk` (state first). Returns `0` for
+   *  unknown flag names — making `(host & mask) !== 0` evaluate to
+   *  false, which is the safe default for the absent case. The caller
+   *  must apply the mask against the correct host integer
+   *  (`flagsState` or `flagsBk`); use [`hasCardFlag`] if you have the
+   *  pair and want the routing handled automatically. */
   cardFlagMask(name: string): number {
     const bit = wasmCardFlagBit(name);
     return bit === undefined ? 0 : 1 << bit;
   }
 
-  /** Convenience: is the named flag set in `flags`? Returns false for
-   *  unknown flag names and for cards whose bit is clear. */
-  hasCardFlag(flags: number, name: string): boolean {
-    const mask = this.cardFlagMask(name);
-    return mask !== 0 && (flags & mask) !== 0;
+  /** Field-routing helper: is the named single-bit flag set in
+   *  whichever host integer (`flagsState` or `flagsBk`) declares it?
+   *  Returns false for unknown flag names. Pass the card row's
+   *  pair — `hasCardFlag(card.flagsState, card.flagsBk, "dead")`. */
+  hasCardFlag(flagsState: number, flagsBk: number, name: string): boolean {
+    return wasmHasCardFlag(flagsState, flagsBk, name);
   }
 
-  /** Read the value of a multi-bit card-flag field (e.g.
-   *  `"progress_style"`, `"position_hold_count"`) out of `flags`.
-   *  Returns `undefined` for unknown field names (callers should
-   *  treat that as "field absent"; for predicates like "is held"
-   *  test `> 0`). */
+  /** Field-routing helper for multi-bit fields. Pass the card row's
+   *  `(flagsState, flagsBk)` pair; returns the extracted value from
+   *  whichever host declares the named field, or `undefined` if
+   *  unknown. For predicates like "is held," test `> 0`. */
+  cardFlagFieldValueAny(
+    flagsState: number,
+    flagsBk: number,
+    name: string,
+  ): number | undefined {
+    return wasmCardFlagFieldValueAny(flagsState, flagsBk, name);
+  }
+
+  /** **Legacy** — read a multi-bit value out of a single `flags`
+   *  integer. Searches across both fields by name; ambiguous
+   *  against the split schema. Prefer [`cardFlagFieldValueAny`]
+   *  with both host integers, or [`cardFlagFieldValueIn`] with an
+   *  explicit field. */
   cardFlagFieldValue(flags: number, name: string): number | undefined {
     return wasmCardFlagFieldValue(flags, name);
   }
 
-  /** Merged "is slot held?" — server's `slot_hold` OR the client-only
-   *  `predict_slot_hold` that `ActionManager` sets between proposeAction
-   *  dispatch and the round-trip response. Consumers asking "should
-   *  I treat this card as committed?" (death-animation deferral,
-   *  in-flight skip, lifecycle held-set seed, etc.) use this so the
-   *  prediction window is invisible at the read site. */
-  isSlotHeld(flags: number): boolean {
-    return (
-      this.hasCardFlag(flags, "slot_hold") ||
-      this.hasCardFlag(flags, "predict_slot_hold")
-    );
+  /** Field-aware bit lookup. `field` is `"cards_state"` or
+   *  `"cards_bk"`. Returns the bit position (0..=31) of the named
+   *  single-bit flag within that field, or `undefined` if not
+   *  declared. Preferred over `cardFlagBit(name)` once the
+   *  `Card.flags` split lands — explicit field argument means
+   *  lookups can't collide across the two host integers. */
+  cardFlagBitIn(field: "cards_state" | "cards_bk", name: string): number | undefined {
+    return wasmCardFlagBitIn(field, name);
   }
 
-  /** Merged "is position held?" — `position_hold_count > 0` OR the
-   *  client-only `predict_position_hold`. Counterpart to
-   *  `isSlotHeld`; same lifecycle on the prediction bit. */
-  isPositionHeld(flags: number): boolean {
-    const count = this.cardFlagFieldValue(flags, "position_hold_count") ?? 0;
-    return count > 0 || this.hasCardFlag(flags, "predict_position_hold");
+  /** Field-aware multi-bit shape lookup. Returns `[shift, width]`
+   *  for the named field within the given host integer, or
+   *  `undefined` if not declared. Caller computes mask /
+   *  extract value as needed. */
+  cardFlagFieldShape(
+    field: "cards_state" | "cards_bk",
+    name: string,
+  ): [number, number] | undefined {
+    const arr = wasmCardFlagFieldShape(field, name);
+    if (arr === undefined || arr.length !== 2) return undefined;
+    return [arr[0], arr[1]];
+  }
+
+  /** Field-aware multi-bit value read. `host` is the value of the
+   *  corresponding `Card.flags_state` / `Card.flags_bk` column.
+   *  Returns the extracted unsigned value, or `undefined` if no
+   *  multi-bit field with that name is declared in the given field. */
+  cardFlagFieldValueIn(
+    field: "cards_state" | "cards_bk",
+    host: number,
+    name: string,
+  ): number | undefined {
+    return wasmCardFlagFieldValueIn(field, host, name);
   }
 
   /** Look up a `card_type` id by name (e.g. `"mini_zone"`, `"soul"`).
@@ -284,14 +361,14 @@ export class DefinitionManager {
     return wasmCardTypeId(name);
   }
 
-  /** Read the numeric value of a named trait off a packed card
-   *  definition. Returns `null` when the trait isn't declared in
-   *  `traits.json`, the def doesn't carry that trait, or the packed
+  /** Read the numeric value of a named aspect off a packed card
+   *  definition. Returns `null` when the aspect isn't declared in
+   *  `aspects.json`, the def doesn't carry that aspect, or the packed
    *  id doesn't resolve. Pairs 1:1 with the server's
-   *  `def.trait_value(trait_id(name))` lookup so client and server
-   *  agree on cost / speed numbers by construction. */
-  traitValue(packedDefinition: number, name: string): number | null {
-    const v = wasmTraitValue(packedDefinition, name);
+   *  `def.aspect_value(aspect_id(name))` lookup so client and server
+   *  agree on cost / speed / inventory / etc. numbers by construction. */
+  aspectValue(packedDefinition: number, name: string): number | null {
+    const v = wasmAspectValue(packedDefinition, name);
     return v === undefined ? null : v;
   }
 
@@ -404,6 +481,48 @@ export class DefinitionManager {
     return id === undefined ? null : id;
   }
 
+  /** Cached id of the `faction` aspect — looked up once on first
+   *  `cardFactionOverride` call. `null` here means "lookup ran and
+   *  faction isn't in the catalog" (legitimate state, just disables
+   *  the override path); `undefined` means "not looked up yet." */
+  private factionAspectId: number | null | undefined = undefined;
+
+  /** If `def` carries any aspect that's a descendant of the
+   *  top-level `faction` aspect (e.g. `chorus`, `chord`, `resonance`),
+   *  return that descendant's name. Otherwise `null`.
+   *
+   *  Use at every render site that picks a faction folder: the
+   *  card's own faction override takes precedence over the local
+   *  player's faction. Walks the parent chain via
+   *  `aspectInfo(id).parent` — bounded by tree depth, currently ≤ 4.
+   *  Returns the FIRST matching descendant if a card somehow
+   *  carries more than one faction sub-aspect. */
+  cardFactionOverride(
+    def: { aspects: ReadonlyArray<readonly [number, number]> } | null | undefined,
+  ): string | null {
+    if (!def) return null;
+    if (this.factionAspectId === undefined) {
+      this.factionAspectId = this.aspectIdByName("faction");
+    }
+    const factionId = this.factionAspectId;
+    if (factionId === null) return null;
+    for (const [aspectId] of def.aspects ?? []) {
+      let cur: number | null = aspectId;
+      for (let depth = 0; depth < 16 && cur !== null; depth++) {
+        const info = this.aspectInfo(cur);
+        if (!info) break;
+        if (info.id === factionId) {
+          // `aspectId` is a descendant of `faction`. Return ITS name
+          // (e.g. "chorus"), not "faction" — the folder name on disk
+          // is the leaf, not the umbrella.
+          return this.aspectInfo(aspectId)?.name ?? null;
+        }
+        cur = info.parent;
+      }
+    }
+    return null;
+  }
+
   /** All starter packs registered for the given soul card key
    *  (e.g. `"human"`), in stable-id order. Empty array for unknown
    *  soul keys — there's no enum of valid souls on the client, so
@@ -440,6 +559,28 @@ export class DefinitionManager {
    *  wrench panel to enumerate the catalog for display. */
   allBlueprints(): Blueprint[] {
     const raw = wasmAllBlueprints() as unknown;
+    return raw as Blueprint[];
+  }
+
+  /** Player-scope counterpart of [`blueprintById`]. Looks up a
+   *  player-scoped blueprint (registered from
+   *  `content/player_blueprints/data/`) by its stable u16 id.
+   *  `null` for unknown ids and for `BLUEPRINT_NONE` (id 0). */
+  playerBlueprintById(id: number): Blueprint | null {
+    const raw = wasmPlayerBlueprintById(id) as unknown;
+    return raw === null || raw === undefined ? null : (raw as Blueprint);
+  }
+
+  /** Player-scope counterpart of [`blueprintByKey`]. */
+  playerBlueprintByKey(key: string): Blueprint | null {
+    const raw = wasmPlayerBlueprintByKey(key) as unknown;
+    return raw === null || raw === undefined ? null : (raw as Blueprint);
+  }
+
+  /** Every registered player-scope blueprint in stable-id order.
+   *  Drives the dna-panel's catalog enumeration. */
+  allPlayerBlueprints(): Blueprint[] {
+    const raw = wasmAllPlayerBlueprints() as unknown;
     return raw as Blueprint[];
   }
 

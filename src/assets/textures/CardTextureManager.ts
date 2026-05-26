@@ -1,4 +1,4 @@
-import { Assets, Container, Graphics, Rectangle, RenderTexture, Texture, type Renderer } from "pixi.js";
+import { Container, Graphics, Rectangle, RenderTexture, Texture, type Renderer } from "pixi.js";
 import type { TextureManager } from "./TextureManager";
 import { RectCardVisual } from "../../game/cards/layout/rectangle/RectVisual";
 import { HexCardVisual } from "../../game/cards/layout/hexagon/HexVisual";
@@ -9,7 +9,6 @@ import {
 } from "../../game/cards/layout/rectangle/RectCard";
 import { WORLD_HEX_RADIUS } from "../../game/world/hexSize";
 import type { CardDefinition } from "../../game/definitions/DefinitionManager";
-import { cardSpriteUrlFor } from "../objectUrls";
 
 /**
  * Hex bake radius. Set to the largest hex display radius (world hex
@@ -51,31 +50,18 @@ export class CardTextureManager {
   private readonly textures: TextureManager;
 
   private readonly rectCache = new Map<number, Texture>();
-  private readonly hexCache  = new Map<number, Texture>();
+  /** Hex bakes keyed by `(packedDef, bodyTextureUid)`. The body-
+   *  texture id participates so a card def with `def.texture` set
+   *  bakes one entry per resolved source texture — typically one per
+   *  faction (`chorus`, `chord`, …) since the URL changes per
+   *  faction folder. Defs without `def.texture` use uid `0` and
+   *  bake once like before. */
+  private readonly hexCache  = new Map<string, Texture>();
   /** Single-entry cache for the blank-rect texture — a rect card body
    *  with outline but no title bar and no label. Used by callers
    *  (today: `WrenchPanel`) that want the rect-card silhouette as a
    *  placeholder for slots without a resolved card definition. */
   private blankRectCache: Texture | null = null;
-  /** Card-art atlas cache. Keyed by the sprite basename passed to
-   *  [`getCardArt`]. One entry per *sprite filename*, independent of
-   *  which definitions reference it — sixteen soul portraits share
-   *  the cache space of sixteen textures regardless of how many soul
-   *  cards exist. Pairs with the per-def `hexCache` / `rectCache`
-   *  bakes: the background is keyed per def, the art per filename. */
-  private readonly artCache = new Map<string, Texture>();
-  /** Sprite basenames currently in the middle of an async
-   *  `Assets.load` call. Deduplicates concurrent `getCardArt` requests
-   *  for the same name so we don't trigger the same network fetch N
-   *  times when many cards spawn at once referencing a not-yet-loaded
-   *  sprite. Cleared once the load resolves and the result is packed
-   *  into [`artCache`]. */
-  private readonly artLoading = new Set<string>();
-  /** Subscribers to `onArtLoad`. Fired once per sprite as soon as its
-   *  texture lands in [`artCache`], so cards that hit the `null`
-   *  branch on first request can re-sync without polling. Mirror of
-   *  `ObjectTextureManager.onLoad`. */
-  private readonly artLoadListeners = new Set<() => void>();
 
   private readonly rectVisual = new RectCardVisual();
   private readonly hexVisual  = new HexCardVisual(HEX_BAKE_RADIUS);
@@ -121,11 +107,27 @@ export class CardTextureManager {
    *  the cache size linear when a single def can carry many art
    *  variants (e.g. soul cards with 16 portraits — see
    *  `content/cards/flags.json` → `cards.portrait_id`). */
-  getHex(definition: CardDefinition | null): Texture {
-    const key = hexKey(definition);
+  /** Packed atlas texture for a hex card definition, optionally with
+   *  a body-fill texture baked in.
+   *
+   *  When `bodyTexture` is set, the hex polygon is filled with that
+   *  source PNG (cover-fit, polygon-clipped) instead of `style[0]`.
+   *  Cache key includes `bodyTexture.uid` so faction-aware lookups
+   *  (each faction resolves to a different `objects/<size>_<aspect>/<faction>/...`
+   *  URL → different atlas Texture → different `uid`) get their own
+   *  cached bake — up to one per faction per def. Defs without a
+   *  `def.texture` ref (or whose chosen URL hasn't loaded yet) pass
+   *  `null`, which keys on uid `0` and bakes the existing colour-fill
+   *  variant.
+   *
+   *  The bake includes only the hex *background*; per-definition art
+   *  is fetched separately via `lodTextures` and layered on top
+   *  by the caller (`LayoutHexCard`). */
+  getHex(definition: CardDefinition | null, bodyTexture?: Texture | null): Texture {
+    const key = hexKey(definition, bodyTexture ?? null);
     let tex = this.hexCache.get(key);
     if (!tex) {
-      tex = this.bakeHex(definition);
+      tex = this.bakeHex(definition, bodyTexture ?? null);
       this.hexCache.set(key, tex);
     }
     return tex;
@@ -159,72 +161,12 @@ export class CardTextureManager {
     return this.blankRectCache;
   }
 
-  /** Atlas-packed texture for a card-art sprite, addressed by the
-   *  basename of its PNG (with or without `.png`, e.g.
-   *  `"128_requisite_8"`). Resolves the basename to a bundled URL via
-   *  [`cardSpriteUrlFor`], packs the source texture into the shared
-   *  atlas on first request, and caches the result forever.
-   *
-   *  Returns `null` when the PNG hasn't been loaded into `Assets`
-   *  yet. Two cases hit that branch:
-   *  - **Preloaded sprites** ([`corePreloadUrls`]): only `null` for
-   *    the rare frame between an unknown name landing and the
-   *    asset registry warming.
-   *  - **Lazy-loaded sprites** (everything outside the preload set,
-   *    e.g. tile art): `null` for as long as the PNG is in flight.
-   *    First miss triggers `Assets.load(url)`; the load is deduped
-   *    via [`artLoading`] so N concurrent callers share one fetch.
-   *    On resolution the texture is packed and cached, and every
-   *    [`onArtLoad`] subscriber fires so cards that skipped a frame
-   *    can re-render. */
-  getCardArt(name: string): Texture | null {
-    const cached = this.artCache.get(name);
-    if (cached) return cached;
-    const url = cardSpriteUrlFor(name);
-    if (!url) return null;
-    const src = Assets.get<Texture>(url);
-    if (src) {
-      const packed = this.textures.pack(src);
-      this.artCache.set(name, packed);
-      return packed;
-    }
-    if (!this.artLoading.has(name)) {
-      this.artLoading.add(name);
-      void this.loadCardArt(name, url);
-    }
-    return null;
-  }
-
-  /** Subscribe to card-art load completions. Fires once per sprite
-   *  the moment its texture lands in [`artCache`] (whether triggered
-   *  by lazy `getCardArt` or by a future eager-load API), so cards
-   *  that hit the `null` branch on a previous `applyCardArt` call
-   *  can re-resolve without polling. Mirror of
-   *  `ObjectTextureManager.onLoad`. Returns an unsubscribe fn. */
-  onArtLoad(callback: () => void): () => void {
-    this.artLoadListeners.add(callback);
-    return () => this.artLoadListeners.delete(callback);
-  }
-
-  private async loadCardArt(name: string, url: string): Promise<void> {
-    try {
-      const tex = await Assets.load<Texture>(url);
-      this.artCache.set(name, this.textures.pack(tex));
-    } finally {
-      this.artLoading.delete(name);
-      for (const cb of [...this.artLoadListeners]) cb();
-    }
-  }
-
   destroy(): void {
     this.rectVisual.destroy();
     this.hexVisual.destroy();
     this.rectCache.clear();
     this.hexCache.clear();
     this.blankRectCache = null;
-    this.artCache.clear();
-    this.artLoading.clear();
-    this.artLoadListeners.clear();
   }
 
   private bakeRect(
@@ -236,8 +178,8 @@ export class CardTextureManager {
     return this.renderAndPack(this.rectVisual, RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
   }
 
-  private bakeHex(def: CardDefinition | null): Texture {
-    this.hexVisual.draw(def);
+  private bakeHex(def: CardDefinition | null, bodyTexture: Texture | null): Texture {
+    this.hexVisual.draw(def, bodyTexture);
     const w = Math.ceil(Math.sqrt(3) * HEX_BAKE_RADIUS);
     const h = 2 * HEX_BAKE_RADIUS;
     return this.renderAndPack(this.hexVisual, w, h);
@@ -274,10 +216,15 @@ function packedKey(def: CardDefinition): number {
   return (def.cardType << 12) | def.definitionId;
 }
 
-/** Cache key for `getHex`. Real definitions produce non-negative
- *  packed ids; `null` uses -1 as a sentinel. */
-function hexKey(def: CardDefinition | null): number {
-  return def === null ? -1 : packedKey(def);
+/** Cache key for `getHex`. Composite of the packed def id and the
+ *  body-texture's atlas uid (0 when no texture is baked in). Real
+ *  definitions produce non-negative packed ids; `null` uses -1 as a
+ *  sentinel. Stringified so the two ids round-trip cleanly without
+ *  worrying about Pixi's uid growing past 32 bits. */
+function hexKey(def: CardDefinition | null, bodyTexture: Texture | null): string {
+  const defPart = def === null ? -1 : packedKey(def);
+  const texPart = bodyTexture?.uid ?? 0;
+  return `${defPart}:${texPart}`;
 }
 
 /** Cache key for `getRect`. Real definitions produce non-negative
@@ -286,4 +233,12 @@ function hexKey(def: CardDefinition | null): number {
 function rectKey(def: CardDefinition | null, pos: RectCardTitlePosition): number {
   if (def === null) return pos === "bottom" ? -1 : -2;
   return (packedKey(def) << 1) | (pos === "bottom" ? 1 : 0);
+}
+
+function insetFrame(tex: Texture, inset: number): Texture {
+  const { x, y, width, height } = tex.frame;
+  return new Texture({
+    source: tex.source,
+    frame: new Rectangle(x + inset, y + inset, width - inset * 2, height - inset * 2),
+  });
 }

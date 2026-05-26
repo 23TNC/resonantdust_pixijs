@@ -9,10 +9,12 @@
  *  Replaces the legacy `matchStackRecipe` / `matchMagneticRecipe`
  *  wasm matchers, which are gone in the unified card model.
  *
- *  **Current scope (Phase 10.2 v1):**
- *  - Predicates: `<path>.def_id: <key>`. `<path>.aspect.<name>.min:
- *    <N>` is stubbed (no aspect-name → id lookup exposed from wasm
- *    yet — TODO).
+ *  **Current scope:**
+ *  - Predicates: `<path>.def_id: <key>` and `<path>.aspect.<name>.min:
+ *    <N>`. The aspect form resolves names via `input.aspectIdByName`
+ *    and counts contributions from any descendant aspect (a tile
+ *    carrying `pine` satisfies `aspect.wood.min: 1`), summing across
+ *    static aspects and stock slots.
  *  - Iterators: top-level only (`parent === []`). Nested iterators
  *    (e.g., `slot.1.0.owner.slot.1.0` reaching into actor's
  *    equipment) cause the recipe to be skipped. TODO: equipment-walk

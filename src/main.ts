@@ -1,11 +1,16 @@
-import { Application, Assets } from "pixi.js";
-import { debug } from "./debug";
+import { Application } from "pixi.js";
+import { debug, installPixiWarnInterceptor } from "./debug";
+
+// Route PixiJS' internal `console.warn` chatter through `debug` so
+// the `"pixi"` tag in `debug/config` gates visibility. Has to run
+// before `new Application()` because Pixi can warn during init.
+installPixiWarnInterceptor();
 import { DrawCallCounter } from "./debug/DrawCallCounter";
 import { TextureManager } from "./assets/textures/TextureManager";
 import { CardTextureManager } from "./assets/textures/CardTextureManager";
-import { ObjectTextureManager } from "./assets/textures/ObjectTextureManager";
+import { LodTextureManager } from "./assets/textures/LodTextureManager";
 import { ObjectManager } from "./assets/ObjectManager";
-import { corePreloadUrls } from "./assets/objectUrls";
+import { smallestLodUrls } from "./assets/lodUrls";
 import { initTextures } from "./game/definitions/TextureRegistry";
 import { loadFonts } from "./assets/fonts";
 import { DefinitionManager, initDefinitions } from "./game/definitions/DefinitionManager";
@@ -19,8 +24,15 @@ import { SceneManager } from "./scenes/SceneManager";
 import { ConnectionRegistry } from "./server/spacetime/ConnectionRegistry";
 import { ReducerManager } from "./server/spacetime/ReducerManager";
 import { DataManager } from "./server/data/DataManager";
+import { DomPanel } from "./ui/dom/DomPanel";
+import panelDefaults from "./content/panels/defaults.json";
 import { ZoneManager } from "./game/zones/ZoneManager";
-import { unpackMacroZone, unpackZoneId, WORLD_LAYER } from "./server/data/packing";
+import { PLAYER_DIMENSION_LAYER, unpackZoneId, WORLD_LAYER } from "./server/data/packing";
+import { PanelTaskbar } from "./ui/dom/PanelTaskbar";
+import { UiEditMode } from "./ui/dom/UiEditMode";
+import { PanelSettingsPopup } from "./ui/dom/PanelSettingsPopup";
+import { DebugPanel } from "./game/titlebar/DebugPanel";
+import { SettingsMenu } from "./game/titlebar/SettingsMenu";
 
 interface Runtime {
   app: Application;
@@ -63,10 +75,52 @@ async function main(): Promise<Runtime> {
   const scenes = new SceneManager(app);
   const textures = new TextureManager(app.renderer);
   const cardTextures = new CardTextureManager(app.renderer, textures);
-  const objectTextures = new ObjectTextureManager(textures);
-  const objects = new ObjectManager(objectTextures);
+  const lodTextures = new LodTextureManager(textures, app.renderer);
+  const objects = new ObjectManager(lodTextures);
   const drawCallCounter = new DrawCallCounter();
   drawCallCounter.patch(app.renderer);
+  // App-level taskbars — appended to `#app` and live for the
+  // session. `taskbar` is the bottom bar (primary app surfaces:
+  // chat, future inventory / world panels). `topTaskbar` is the
+  // top bar (system surfaces: debug HUD, settings). Each panel
+  // picks which one it registers with via its `taskbar` option.
+  const taskbar    = new PanelTaskbar({ position: "bottom" });
+  const topTaskbar = new PanelTaskbar({ position: "top" });
+  // App-wide UI-edit-mode flag. Off at session start; toggled
+  // from the settings menu. Panels subscribe to it for the extra
+  // action buttons + forced title-bar visibility while editing.
+  // The grid avoids the two taskbar strips so snapped panels can't
+  // partially overlap them — the available viewport between the
+  // taskbars gets divided into whole cells.
+  const uiEditMode = new UiEditMode({
+    reservedTop:    PanelTaskbar.HEIGHT,
+    reservedBottom: PanelTaskbar.HEIGHT,
+  });
+  // Shared per-panel settings popup, attached to the UiEditMode
+  // after construction so the popup itself can reference DomPanel
+  // without the import-cycle (UiEditMode → popup → DomPanel →
+  // UiEditMode). When edit mode flips off, auto-close the popup
+  // — its controls only make sense while editing.
+  const panelSettingsPopup = new PanelSettingsPopup();
+  uiEditMode.settingsPopup = panelSettingsPopup;
+  uiEditMode.on((enabled) => {
+    if (!enabled) panelSettingsPopup.close();
+  });
+  // App-level debug HUD + settings menu. Both pinned in the top
+  // taskbar; the user opens / closes them via their pinned entries
+  // (📊 and ⛯ on the right side of the top bar). Persistent across
+  // scenes — the old per-scene title bar used to own these.
+  const debugPanel   = new DebugPanel(topTaskbar,   uiEditMode);
+  const settingsMenu = new SettingsMenu(topTaskbar, uiEditMode);
+  // Edit mode is normally entered by clicking "Enter UI Edit
+  // Mode" inside the settings menu, which leaves the menu
+  // sitting on top of the panel that's about to be edited. Drop
+  // the menu when edit mode flips on so the user has a clean
+  // surface to interact with — and a fresh re-open later
+  // restacks it above whatever else moved during editing.
+  uiEditMode.on((enabled) => {
+    if (enabled) settingsMenu.close();
+  });
 
   // Bootstrap the wasm-built content crate before any code calls into the
   // definitions API. `initDefinitions` is idempotent — safe to await
@@ -76,17 +130,16 @@ async function main(): Promise<Runtime> {
   // canvas-based Text caches a fallback-font rasterisation and never
   // re-renders.
   //
-  // The card-sprite pre-warm runs `Assets.load` against the
-  // first-frame-visible slice of card sprites (everything outside
-  // `/textures/cards/tiles/`); the lazy slice (tile art) loads on
-  // first reference via `CardTextureManager.getCardArt`, which
-  // dedupes in-flight loads and fires `onArtLoad` so cards that
-  // hit the null branch can re-resolve. See [`corePreloadUrls`]
-  // for the policy.
+  // Pre-warm the smallest LOD bucket (64×64) for every aspect in
+  // the catalog. This guarantees the LodTextureManager's fallback
+  // chain (ideal LOD → cached substitute → white 64×64) always
+  // lands on a real texture rather than the white floor while the
+  // ideal LOD races to load. Higher LODs lazy-load on first
+  // reference and fire `onLoad` so consumers re-resolve.
   await Promise.all([
     initDefinitions(),
     loadFonts(),
-    Assets.load([...corePreloadUrls()]),
+    lodTextures.prewarm(smallestLodUrls()),
   ]);
 
   // TextureRegistry reads its data from the wasm content crate, so it
@@ -94,39 +147,62 @@ async function main(): Promise<Runtime> {
   // Map build.
   initTextures();
 
+  // Content-shipped panel defaults — first-launch layout for every
+  // panel that opts in via `defaultsKey`. Loaded once here so the
+  // registry is populated before any DomPanel constructor runs.
+  // Precedence: localStorage > content defaults > constructor
+  // `defaultRect`. File is the FLAT map produced by the
+  // "Copy All JSON" button in PanelSettingsPopup — top-level keys
+  // are panel `defaultsKey`s, values are `PanelStateJSON` blobs.
+  // Any key starting with `_` is treated as a comment / metadata
+  // slot and filtered out by `setPanelDefaults` before lookup
+  // (lets the JSON carry inline docs without a wrapper key
+  // re-introducing the paste-format mismatch).
+  // The cast is safe — every enum field is re-validated at apply
+  // time by `readAnchor` / `readPin` / etc.
+  DomPanel.setPanelDefaults(panelDefaults as Parameters<typeof DomPanel.setPanelDefaults>[0]);
+
   const definitions = new DefinitionManager();
   // const recipes = new RecipeManager(definitions);
   const zones = new ZoneManager();
 
   const connections = new ConnectionRegistry({
-    uri: import.meta.env.VITE_SPACETIME_URI ?? "http://47.222.135.56:3000",
+    uri: import.meta.env.VITE_SPACETIME_URI ?? "http://localhost:3000",
     env: import.meta.env.VITE_SPACETIME_ENV ?? "dev",
   });
+  const reducers = new ReducerManager(connections);
+  debugPanel.setReducers(reducers);
   connections.shard.addListener({
     onConnected: (_conn, identity) => {
-      debug.log(["spacetime"], `[spacetime] shard connected as ${identity.toHexString()}`);
+      debug.log(["spacetime"], `[spacetime] shard connected as ${identity.toHexString()}`, 4);
+      // Clock sync happens implicitly via `claim_or_login`: PlayerManager
+      // subscribes to the player row before calling the reducer, so the
+      // resulting row write is delivered as a `Reducer`-tagged event and
+      // `captureReducerTimestamp` seeds `noteServerTime` from it. No
+      // separate sync_clock call is needed — and wouldn't help anyway,
+      // since sync_clock writes no rows and therefore produces no row
+      // callback to capture the timestamp from.
     },
     onConnectError: (error: Error) => {
       console.error("[spacetime] shard connect error", error);
     },
     onDisconnected: (error?: Error) => {
-      if (error) debug.warn(["spacetime"], `[spacetime] shard disconnected ${String(error)}`);
-      else debug.log(["spacetime"], "[spacetime] shard disconnected");
+      if (error) debug.warn(["spacetime"], `[spacetime] shard disconnected ${String(error)}`, 4);
+      else debug.log(["spacetime"], "[spacetime] shard disconnected", 4);
     },
   });
   connections.chat.addListener({
     onConnected: (_conn, identity) => {
-      debug.log(["spacetime"], `[spacetime] chat connected as ${identity.toHexString()}`);
+      debug.log(["spacetime"], `[spacetime] chat connected as ${identity.toHexString()}`, 4);
     },
     onConnectError: (error: Error) => {
       console.error("[spacetime] chat connect error", error);
     },
     onDisconnected: (error?: Error) => {
-      if (error) debug.warn(["spacetime"], `[spacetime] chat disconnected ${String(error)}`);
-      else debug.log(["spacetime"], "[spacetime] chat disconnected");
+      if (error) debug.warn(["spacetime"], `[spacetime] chat disconnected ${String(error)}`, 4);
+      else debug.log(["spacetime"], "[spacetime] chat disconnected", 4);
     },
   });
-  const reducers = new ReducerManager(connections);
   const data = new DataManager(connections, reducers, definitions);
 
   // Per-frame promote: lifts elapsed `valid_at` rows from each table's
@@ -138,33 +214,64 @@ async function main(): Promise<Runtime> {
   app.ticker.add(() => data.promote());
 
   // Drive per-zone SDK subscriptions off the ZoneManager refcount.
-  // Anything that calls `zones.ensure(zoneId)` (GameScene for the
-  // inventory zone) or that ZoneManager's anchor-driven recompute
-  // adds (world zones around each anchor) bumps the zone to "active"
-  // → we open the matching SDK subscription so the server starts
-  // pushing rows.
+  // Anything that calls `zones.ensure(zoneId)` /
+  // `zones.ensureInventory(soulCardId)` (MainScene + MainLayout)
+  // or that ZoneManager's anchor-driven recompute adds (zones
+  // around each `setAnchor` target, on that anchor's surface)
+  // bumps the zone to "active" → we open the matching SDK
+  // subscription so the server starts pushing rows. Note: with
+  // ZoneManager no longer seeding a default viewport anchor at
+  // (0, 0), the "active" set starts empty at app boot — no zone
+  // subscriptions until a caller actually sets an anchor.
   //
-  // Two flavors, branched on the zoneId's layer:
+  // Three flavors, branched on the zoneId's layer:
   //
-  //  - World zones (`layer >= WORLD_LAYER`): subscribeWorldZone pulls
-  //    both the `zones` row (tile data for LayoutWorld) AND world-
-  //    surface `cards` for that macro_zone. Pulling just
-  //    `subscribeCards` leaves the tile grid empty because the
-  //    `zones` table never gets data.
-  //  - Inventory / non-world zones: subscribeCards pulls cards for
-  //    `(macro_zone, surface)`. No `zones` row to fetch.
+  //  - World zones (`layer === WORLD_LAYER`): `subscribeWorldZone`
+  //    pulls both the `zones` row (tile data) AND world-surface
+  //    `cards` / `souls` for that macro_zone.
+  //  - Player-dim zones (`layer === PLAYER_DIMENSION_LAYER`): one
+  //    `subscribePlayerDimension(playerId)` covers ALL 4 chunks of
+  //    the local player's dim — filtered server-side by
+  //    `owner_id = playerId`, not by macro_zone. Multiple zone-id
+  //    activations on this layer dedupe via `installSubscription`'s
+  //    name key (`player_dim:<playerId>`). The `playerId` is read
+  //    lazily from `zones.getPlayerId()` so anchors set before
+  //    login defer their subscriptions until login lands and
+  //    `setPlayerId` fires (see PlayerManager listener below).
+  //  - Inventory / non-world zones: `subscribeCards` pulls cards
+  //    for `(macro_zone, surface)`. No `zones` row to fetch.
   const subscribeZone = (zoneId: number) => {
     const { macroZone, layer } = unpackZoneId(zoneId);
-    if (layer >= WORLD_LAYER) {
+    if (layer === WORLD_LAYER) {
       void data.subscriptions.subscribeWorldZone(macroZone);
+    } else if (layer === PLAYER_DIMENSION_LAYER) {
+      const playerId = zones.getPlayerId();
+      if (playerId !== null) {
+        void data.subscriptions.subscribePlayerDimension(playerId);
+      }
+      // No-op pre-login; the PlayerManager listener below
+      // re-runs subscribeZone for every active player-dim zone
+      // once the player_id lands.
     } else {
       void data.subscriptions.subscribeCards(zoneId);
     }
   };
   const unsubscribeZone = (zoneId: number) => {
     const { macroZone, layer } = unpackZoneId(zoneId);
-    if (layer >= WORLD_LAYER) {
+    if (layer === WORLD_LAYER) {
       data.subscriptions.unsubscribeWorldZone(macroZone);
+    } else if (layer === PLAYER_DIMENSION_LAYER) {
+      const playerId = zones.getPlayerId();
+      if (playerId !== null) {
+        // Single shared subscription across the 4 chunks — only
+        // tear down when ALL player-dim zones have demoted.
+        const stillActive = Array.from(zones.zonesIn("active")).some(
+          (zid) => unpackZoneId(zid).layer === PLAYER_DIMENSION_LAYER,
+        );
+        if (!stillActive) {
+          data.subscriptions.unsubscribePlayerDimension(playerId);
+        }
+      }
     } else {
       data.subscriptions.unsubscribeCards(zoneId);
     }
@@ -179,8 +286,59 @@ async function main(): Promise<Runtime> {
   zones.onAdded("active", subscribeZone);
   zones.onRemoved("active", unsubscribeZone);
 
-  const playerSession = new PlayerManager(connections.shard, data);
-  const souls = new SoulManager(playerSession, data);
+  const playerSession = new PlayerManager(reducers, data);
+  const souls = new SoulManager(playerSession, data, zones);
+
+  // Feed the player_id into ZoneManager so the player-dim subscribe
+  // dispatch above can resolve owner_id at subscription time. Also
+  // re-run `subscribeZone` for every player-dim zone that landed in
+  // "active" before login — those were no-ops at the time (player_id
+  // was null) and need a second chance now that we know the owner.
+  playerSession.on((player) => {
+    zones.setPlayerId(player?.playerId ?? null);
+    if (player) {
+      for (const zoneId of zones.zonesIn("active")) {
+        if (unpackZoneId(zoneId).layer === PLAYER_DIMENSION_LAYER) {
+          subscribeZone(zoneId);
+        }
+      }
+      // PlayerProfile mirror — covers blueprint_info / soul_info
+      // capacity readouts and the player-scope blueprint
+      // discovery bitfield. One-off install per login (the row is
+      // keyed by player_id and the SDK dedupes by subscription
+      // name).
+      void data.subscriptions.subscribePlayerProfile(player.playerId);
+    }
+  });
+
+  // Reconnect-time clock re-sync. On the FIRST connect of a session,
+  // `PlayerManager.claimOrLogin` is the sync primitive — its server
+  // row write is delivered as a `Reducer`-tagged event that seeds
+  // `noteServerTime`. But on a mid-session reconnect, `claim_or_login`
+  // doesn't fire (the player is already cached), so the offset window
+  // is left with stale captures from the previous connection.
+  // `setLastLogin` is the per-reconnect re-sync hook: it updates the
+  // already-subscribed player row, which delivers as a `Reducer`-tagged
+  // event and re-seeds the window. `setLastLogin` is grace-exempt
+  // server-side (see `players::set_last_login`) so a stale-capture
+  // submission won't be rejected.
+  connections.shard.addListener({
+    onConnected: () => {
+      if (!playerSession.isLoggedIn()) return;
+      void reducers.setLastLogin().catch((err) => {
+        debug.warn(["spacetime"], `[spacetime] reconnect setLastLogin failed: ${String(err)}`, 4);
+      });
+    },
+  });
+
+  // RTT is measured by bookending `performance.now()` around every
+  // shard reducer call inside `ReducerManager`. Each user action
+  // contributes a sample to the rolling window; the panel's
+  // `bestRttMs` reads the minimum over the window (closest to pure
+  // network RTT, since cheap reducers bottom out near network-only
+  // timing). No periodic polling — the estimate refreshes on
+  // activity. Stale during idle, which is fine for a diagnostic
+  // surface.
 
   // Lifecycle resolution: client-side state machine that submits
   // propose_action calls for the success or failure recipe of any
@@ -196,25 +354,16 @@ async function main(): Promise<Runtime> {
   });
   lifecycle.start();
 
-  // Drive ZoneManager's `"soul"` anchor off the local soul card's
-  // current `macro_zone`. Whenever the soul row arrives or moves
-  // between world chunks, the soul anchor follows — its surrounding
-  // zone ring stays subscribed regardless of where the camera (the
-  // `"viewport"` anchor) is panned. Without this, a player who pans
-  // away from their soul would stop receiving updates about their own
-  // avatar's neighbourhood.
-  souls.on((soul) => {
-    if (!soul || soul.surface < WORLD_LAYER) return;
-    const { zoneQ, zoneR } = unpackMacroZone(soul.macroZone);
-    zones.setAnchor("soul", zoneQ, zoneR);
-  });
+  // The old singleton `"soul"` anchor (zones-around-the-active-soul)
+  // moved into `GameViewPanel`: each open panel maintains its own
+  // namespaced `soul:<panelId>` anchor for the soul it displays.
 
   const ctx: GameContext = {
     app,
     scenes,
     textures,
     cardTextures,
-    objectTextures,
+    lodTextures,
     objects,
     drawCallCounter,
     definitions,
@@ -226,6 +375,12 @@ async function main(): Promise<Runtime> {
     lifecycle,
     data,
     zones,
+    taskbar,
+    topTaskbar,
+    uiEditMode,
+    debugPanel,
+    settingsMenu,
+    panels: null,
     cards: null,
     layout: null,
     game: null,

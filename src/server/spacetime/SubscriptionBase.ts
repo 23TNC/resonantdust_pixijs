@@ -111,7 +111,7 @@ export abstract class SubscriptionBase<
         debug.log(
           ["spacetime"],
           `[spacetime] sub "${name}" already in flight, waiting`,
-          1,
+          2,
         );
         return existing.inFlight;
       }
@@ -119,7 +119,7 @@ export abstract class SubscriptionBase<
         debug.log(
           ["spacetime"],
           `[spacetime] sub "${name}" already active, skipping`,
-          1,
+          2,
         );
         return;
       }
@@ -130,7 +130,7 @@ export abstract class SubscriptionBase<
     debug.log(
       ["spacetime"],
       `[spacetime] installing sub "${name}" scope=${def.scopeKey}`,
-      2,
+      3,
     );
 
     const sub: ActiveSubscription = { name, def, handle: null, inFlight: null };
@@ -148,7 +148,7 @@ export abstract class SubscriptionBase<
   protected removeSubscription(name: string): void {
     const sub = this.subscriptions.get(name);
     if (!sub) return;
-    debug.log(["spacetime"], `[spacetime] removing sub "${name}"`, 2);
+    debug.log(["spacetime"], `[spacetime] removing sub "${name}"`, 3);
     if (sub.handle?.isActive()) sub.handle.unsubscribe();
     this.subscriptions.delete(name);
   }
@@ -157,10 +157,10 @@ export abstract class SubscriptionBase<
     debug.log(
       ["spacetime"],
       `[spacetime] opening sub "${sub.name}" queries=${sub.def.queries.join(" | ")}`,
-      1,
+      2,
     );
     sub.handle = await this.subscribeRaw(sub.def.queries);
-    debug.log(["spacetime"], `[spacetime] sub "${sub.name}" applied`, 2);
+    debug.log(["spacetime"], `[spacetime] sub "${sub.name}" applied`, 3);
   }
 
   private async subscribeRaw(queries: string[]): Promise<AnySubscriptionHandle> {
@@ -201,11 +201,11 @@ export abstract class SubscriptionBase<
     debug.log(
       ["spacetime"],
       `[spacetime] reissuing ${subs.length} subscription(s) after reconnect`,
-      3,
+      4,
     );
     await Promise.all(
       subs.map(async (sub) => {
-        debug.log(["spacetime"], `[spacetime] reissuing sub "${sub.name}"`, 1);
+        debug.log(["spacetime"], `[spacetime] reissuing sub "${sub.name}"`, 3);
         sub.handle = null;
         const inFlight = this.openSubscription(sub);
         sub.inFlight = inFlight;
@@ -215,7 +215,7 @@ export abstract class SubscriptionBase<
           debug.log(
             ["spacetime"],
             `[spacetime] re-subscribe "${sub.name}" failed: ${err instanceof Error ? err.message : String(err)}`,
-            3,
+            4,
           );
           console.error(`[spacetime] re-subscribe ${sub.name} failed`, err);
         } finally {

@@ -1,40 +1,18 @@
+import { DomPanel } from "../../ui/dom/DomPanel";
+import type { UiEditMode } from "../../ui/dom/UiEditMode";
+
 /**
- * Minimal DOM overlay for the login / create-user form. Lives inside
- * `#app` (the same host the PixiJS canvas is appended to in `main.ts`),
- * absolutely positioned and centered over the canvas via CSS transform
- * so it stays put on canvas resize without per-frame layout math.
+ * Login / create-user form. The chrome (background, border,
+ * positioning, mount / unmount lifecycle) comes from `DomPanel`
+ * with the title bar hidden — a centered, non-draggable modal-ish
+ * surface. The form-specific API (`addInput`, `addButton`,
+ * `setStatus`, …) lives on this class.
  *
- * Scope: this is the ONE place the codebase touches DOM input elements.
- * Swapping in a Pixi-native form later only requires replacing the
- * `LoginScene` body — no other module reads or references the overlay.
- *
- * Style is inline so the overlay is self-contained (no external CSS
- * file, no class names to keep in sync). The visual approximates the
- * dark game palette but doesn't pull from any shared theme — if/when
- * a theming system arrives this lifts straight in.
+ * Scope: this is the only place the codebase touches DOM input
+ * elements. Swapping in a Pixi-native form later only requires
+ * replacing the `LoginScene` body — no other module reads or
+ * references the overlay.
  */
-
-const HOST_ID = "app";
-
-const PANEL_CSS: Partial<CSSStyleDeclaration> = {
-  position: "absolute",
-  left: "50%",
-  top: "50%",
-  transform: "translate(-50%, -50%)",
-  display: "flex",
-  flexDirection: "column",
-  gap: "12px",
-  padding: "24px 32px",
-  background: "rgba(20, 22, 30, 0.92)",
-  border: "1px solid #3a3a4a",
-  borderRadius: "6px",
-  color: "#ecd6aa",
-  fontFamily: "sans-serif",
-  fontSize: "14px",
-  minWidth: "280px",
-  zIndex: "10",
-};
-
 const LABEL_CSS: Partial<CSSStyleDeclaration> = {
   display: "flex",
   flexDirection: "column",
@@ -77,15 +55,46 @@ const BUTTON_ROW_CSS: Partial<CSSStyleDeclaration> = {
   marginTop: "4px",
 };
 
+const BODY_CSS: Partial<CSSStyleDeclaration> = {
+  display: "flex",
+  flexDirection: "column",
+  gap: "12px",
+  padding: "24px 32px",
+  minWidth: "280px",
+};
+
 export class FormOverlay {
-  readonly panel: HTMLDivElement;
+  private readonly panel: DomPanel;
+  private readonly body: HTMLDivElement;
   private readonly buttonRow: HTMLDivElement;
   private readonly status: HTMLDivElement;
-  private mounted = false;
 
-  constructor() {
-    this.panel = document.createElement("div");
-    Object.assign(this.panel.style, PANEL_CSS);
+  constructor(uiEditMode?: UiEditMode) {
+    this.panel = new DomPanel({
+      // Title is unused because `showTitleBar: false` hides the bar
+      // entirely. Keeping it non-empty avoids any DOM-tools display
+      // glitches if a debug surface ever reflects panel titles.
+      title: "Login",
+      showTitleBar: false,
+      minimizable: false,
+      closable: false,
+      resizable: false,
+      defaultRect: { left: "50%", top: "50%" },
+      // Hand the edit-mode manager through so the user can
+      // click the form in edit mode and tweak it via the
+      // shared `PanelSettingsPopup` (anchor / snap / etc.) —
+      // same surface every other panel exposes.
+      uiEditMode,
+    });
+    // Classic centering trick — top-left at viewport center, then
+    // translate back by half the panel's own size. `DomPanelRect`
+    // doesn't carry `transform` (it's not really a rect property),
+    // so set it on the underlying element directly.
+    this.panel.panel.style.transform = "translate(-50%, -50%)";
+
+    this.body = document.createElement("div");
+    Object.assign(this.body.style, BODY_CSS);
+    this.panel.setBody(this.body);
 
     this.buttonRow = document.createElement("div");
     Object.assign(this.buttonRow.style, BUTTON_ROW_CSS);
@@ -94,35 +103,24 @@ export class FormOverlay {
     Object.assign(this.status.style, STATUS_CSS);
   }
 
-  /** Insert the overlay into the canvas host. Idempotent — calling
-   *  twice without `unmount` in between is a no-op. */
-  mount(): void {
-    if (this.mounted) return;
-    const host = document.getElementById(HOST_ID) ?? document.body;
-    host.appendChild(this.panel);
-    this.mounted = true;
-  }
+  /** Mount the form into the canvas host. Idempotent. */
+  mount(): void { this.panel.open(); }
 
-  /** Remove the overlay from the DOM. Safe to call multiple times. */
-  unmount(): void {
-    if (!this.mounted) return;
-    this.panel.remove();
-    this.mounted = false;
-  }
+  /** Remove the form from the DOM. Safe to call multiple times. */
+  unmount(): void { this.panel.close(); }
 
-  /** Clear the panel's contents (between mode switches). Preserves
-   *  the panel element itself so its DOM identity / focus state
-   *  scope isn't disturbed. */
+  /** Clear the form's contents between mode switches. Preserves the
+   *  outer panel + body elements so DOM identity / focus scope
+   *  isn't disturbed. */
   clear(): void {
-    while (this.panel.firstChild) {
-      this.panel.removeChild(this.panel.firstChild);
+    while (this.body.firstChild) {
+      this.body.removeChild(this.body.firstChild);
     }
-    // The button row is a reusable child of `panel` — removed above
-    // by the firstChild walk, but its OWN children (the buttons from
-    // the prior mode) survive in detached form. Drop them too,
-    // otherwise the next `addButton` call re-appends the row to the
-    // panel still carrying its stale buttons → mode-switching
-    // accumulates buttons on each render.
+    // The button row is a reusable child of `body` — removed above
+    // by the firstChild walk, but its OWN children (the buttons
+    // from the prior mode) survive in detached form. Drop them too
+    // so the next `addButton` doesn't re-append the row carrying
+    // stale buttons.
     while (this.buttonRow.firstChild) {
       this.buttonRow.removeChild(this.buttonRow.firstChild);
     }
@@ -142,17 +140,16 @@ export class FormOverlay {
     Object.assign(input.style, INPUT_CSS);
 
     wrap.appendChild(input);
-    this.panel.appendChild(wrap);
+    this.body.appendChild(wrap);
     return input;
   }
 
-  /** Append a button. Buttons share a horizontal row at the bottom
-   *  of the panel — the row is created lazily on the first call so
-   *  panels without buttons (degenerate) don't accumulate empty
-   *  rows. */
+  /** Append a button to the bottom-of-form row. The row is added
+   *  lazily on the first call so forms without buttons don't carry
+   *  an empty row. */
   addButton(label: string, onClick: () => void | Promise<void>): HTMLButtonElement {
     if (!this.buttonRow.isConnected) {
-      this.panel.appendChild(this.buttonRow);
+      this.body.appendChild(this.buttonRow);
     }
     const button = document.createElement("button");
     button.textContent = label;
@@ -165,12 +162,11 @@ export class FormOverlay {
     return button;
   }
 
-  /** Append (or re-show) the status line at the bottom of the panel.
-   *  Called automatically by `setStatus` if not already attached, so
-   *  callers don't have to remember to add it. */
+  /** Append (or re-show) the status line at the bottom of the form.
+   *  Called automatically by `setStatus` if not already attached. */
   attachStatus(): void {
     if (!this.status.isConnected) {
-      this.panel.appendChild(this.status);
+      this.body.appendChild(this.status);
     }
   }
 

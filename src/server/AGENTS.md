@@ -8,36 +8,46 @@ The client's SpacetimeDB boundary AND the local data layer. Split into four narr
 
 ## Important files
 - `spacetime/ConnectionManager.ts`: websocket lifecycle, identity, auth-token persistence (`TokenStore`, default `localStorageTokenStore`). Exposes `connect()` / `disconnect()` / `getConnection()` / `getIdentity()` / `clearToken()` and a multi-listener pub/sub: `addListener({ onConnected, onConnectError, onDisconnected })` returns an unsubscribe fn. Constructs the `DbConnection.builder()` internally — `main.ts` only hands in `uri` and `databaseName`.
-- `spacetime/SubscriptionManager.ts`: holds the active-subscription registry (`Map<name, ActiveSubscription>` keyed by `"cards:<zoneId>"`, `"zones:<macroZone>"`, …) AND the per-(table, event) SDK callback. Exposes typed `subscribe<Table>(...)` / `unsubscribe<Table>(...)` methods that wrap the registry, plus `registerTableHandlers(table, handlers)` for downstream consumers (DataManager) to plug into insert/update/delete events. Registers a `ConnectionListener` so it re-binds row handlers and re-issues every subscription on reconnect.
-- `spacetime/ReducerManager.ts`: thin wrappers around `conn.reducers.*`. Currently `proposeAction({hex, root, slots, surface, macroZone, microZone, microLocation, recipeId})` — fired by `ActionManager` once a queued recipe match's debounce timer expires. Each call awaits `connection.connect()` so callers don't have to track connection state.
-- `data/DataManager.ts`: dual-tier data layer. Owns the `SubscriptionManager` (constructed internally from a `ConnectionManager`) and one `ValidAtTable<T>` per server table (`cards`, `players`, `zones`, `souls`) plus a parallel overlay (`cardsLocal`, `playersLocal`, `zonesLocal`, `soulsLocal`). Also owns `chatMessages: AppendTable<ChatMessage>` (flat, non-versioned). `mirrorCard` (cards-specific) preserves position fields from local when both sides say inventory-loose; `mirror` (generic) just copies through. Exposes `setLocalCard(id, row)` for client-driven writes, `subscribeLocalCard` / `subscribeLocalCardKey` / `subscribeLocalSoulKey` for downstream listeners. `promote(now)` fans out across all `ValidAtTable`s.
+- `spacetime/SubscriptionManager.ts`: holds the active-subscription registry (`Map<name, ActiveSubscription>` keyed by `"cards:<zoneId>"`, `"zones:<macroZone>"`, `"soul_private:<cardId>"`, `"player_profile:<playerId>"`, …) AND the per-(table, event) SDK callback. Exposes typed `subscribe<Table>(...)` / `unsubscribe<Table>(...)` methods that wrap the registry, plus `registerTableHandlers(table, handlers)` for downstream consumers (DataManager) to plug into insert/update/delete events. The per-owner narrow-scope subscriptions `subscribeSoulPrivate(cardId)` (active soul's progression bits) and `subscribePlayerProfile(playerId)` (local player's profile / discovery / cap fields) follow the same convention — public tables filtered to the caller's own row so other clients don't fan in foreign progression. Registers a `ConnectionListener` so it re-binds row handlers and re-issues every subscription on reconnect.
+- `spacetime/ReducerManager.ts`: thin wrappers around `conn.reducers.*` for every shard-module reducer (`proposeAction`, `placeCard`, `moveSoul`, `createCharacter`, `addCard`, `claimOrLogin`, `setLastLogin`, `deployMiniZone`, `pickupMiniZone`, `enterPlayerDimension`, `exitPlayerDimension`, `requestBlueprint` (soul-scope blueprint placement), `requestPlayerBlueprint` (player-scope)) plus the chat-module `sendChatMessage`. Each wrapper awaits `connection.connect()` so callers don't have to track connection state. **Owns the client's notion of server time** — a sliding window of `noteServerTime` captures fed by `SubscriptionManager.captureReducerTimestamp` on every `Reducer`-tagged row event, `serverNowMs()` interpolating the freshest sample forward via `performance.now()`, `CLIENT_LAG_MS` (= 2000 ms) subtracted as a display/submission buffer. Every wrapper auto-injects `clientTimeMs = BigInt(round(serverNowMs()))` and bookends the SDK call with `performance.now()` to feed the RTT sample window. `syncStats()` returns a snapshot for the debug panel's `🛰 sync` tab. The server validates each submission via [`cards::effective_now_ms`](../../../spacetime/server/modules/shard/src/cards.rs); back-grace 5000 ms (`TIME_DRIFT_BUFFER_MS + MAX_RTT_MS`), forward-grace 2000 ms. On `time_drift:client_ahead_by=<N>` rejections, [`ActionManager`](../game/actions/ActionManager.ts) retries after `N + 250 ms`.
+- `data/DataManager.ts`: dual-tier data layer. Owns the `SubscriptionManager` (constructed internally from a `ConnectionManager`) and one `ValidAtTable<T>` per versioned server table (`cards`, `players`, `zones`, `souls`) plus parallel overlays (`cardsLocal`, `playersLocal`, `zonesLocal`, `soulsLocal`). Flat (no-history) tables mirror directly: `soulPrivatesLocal: Map<cardId, SoulPrivate>` and `playerProfilesLocal: Map<playerId, PlayerProfile>` — populated by side-channel `registerTableHandlers` calls and read by `getSoulBlueprintCapacity` / `getPlayerBlueprintCapacity` (capacity readouts in panel title bars + drag-drop cap pre-check). Also owns `chatMessages: AppendTable<ChatMessage>` (flat, non-versioned). `mirrorCard` (cards-specific) preserves position fields from local when both sides say inventory-loose; `mirror` (generic) just copies through. Exposes `setLocalCard(id, row)` for client-driven writes, `subscribeLocalCard` / `subscribeLocalCardKey` / `subscribeLocalSoulKey` for downstream listeners. `promote(now)` fans out across all `ValidAtTable`s.
 - `data/AppendTable.ts`: flat local mirror for non-versioned tables keyed by a single u64. Designed for `chat_messages` where the PK (`sent_at`) is a packed `[time_ms | seq]` bigint that sorts chronologically. No `ValidAt` version history — `rows` is the live table. `sorted()` returns rows in ascending PK order (O(n log n)). `insert` / `update` / `delete` are arrow methods for direct SDK callback binding.
 - `data/ValidAtTable.ts`: generic per-table mirror keyed by packed u64 `(high48 = valid_at ms, low16 = sequence)`. Holds `server: Map<ValidAt, T>` (every row we believe the server has) and `current: Map<number, T>` (the row currently valid for each id). Constructor takes `keyOf(row): ValidAt` (e.g. `(r) => r.validAt`) AND `idOf(row): number` (the row's logical id column, e.g. `r.cardId` / `r.playerId` / `r.zoneId`) — the id is read from the row column, not decoded from the PK. `insert` / `update` / `delete` are arrow methods so they pass as callbacks without rebinding. `subscribe` / `subscribeKey` fire from inside `promote(now)` based on the diff between old and new `current`.
 - `data/packing.ts`: `ValidAt = bigint`; `packValidAt(validAtMs, sequence)` / `validAtOf` for the `(time_ms << 16) | sequence` PK layout. Also owns `ZoneId` packing (`packZoneId(macroZone, layer)` + `unpackZoneId`), `WORLD_LAYER`, `macroZone` packing (`packMacroZone(zoneQ, zoneR)` + `unpackMacroZone`, `ZONE_SIZE`), and `microZone` packing (`packMicroZone(localQ, localR, stackedState)` + `unpackMicroZone`). All server-protocol bit layouts live here in one file.
-- `player/PlayerManager.ts`: owns `claimOrLogin(name)`, holds the active player, exposes `on(listener)` / `getPlayer()`. Fires the `claim_or_login` reducer first; on success, installs a name-scoped `subscribePlayerByName(name)` subscription so the caller's own `Player` row arrives via the same fan-out path as any other table mutation, and `waitForPlayer` (a one-shot `data.players.subscribe` listener) resolves once `promote()` surfaces it in `current`. Same-name re-entry is idempotent; different-name re-entry throws — callers must `dispose()` first. The unfiltered `subscribePlayers()` is gone.
-- `player/SoulManager.ts`: tracks the local player's active soul. `setActiveSoul(cardId)` installs per-id `subscribeSoul` + `subscribeCard` subscriptions and notifies `(soul: Soul | null)` listeners. Listens to `PlayerManager` for player-id transitions to clear the active soul on logout. `CharacterSelectScene` is the sole caller of `setActiveSoul`. Lives on `ctx.souls` (bootstrap-scoped). Cleared to `null` on `setActiveSoul(0)` or player change.
+- `player/PlayerManager.ts`: owns `claimOrLogin(name)`, holds the active player, exposes `on(listener)` / `getPlayer()` / `isLoggedIn()`. **Installs the name-scoped `subscribePlayerByName(name)` subscription BEFORE calling the reducer** — the subscription scope must be live when the server processes `claim_or_login` so the resulting player-row write is delivered to this client as a `Reducer`-tagged transactionUpdate (which feeds `noteServerTime` and seeds the offset window). Reversing the order — call-then-subscribe — would deliver the row via initial subscription instead and the offset window would stay empty, causing every subsequent reducer to fail the grace check. `waitForPlayer` (a one-shot `data.players.subscribe` listener) resolves once `promote()` surfaces the row in `current`. Same-name re-entry is idempotent; different-name re-entry throws — callers must `dispose()` first.
+- `player/SoulManager.ts`: tracks the local player's active soul. `setActiveSoul(cardId)` installs per-id `subscribeSoul` + `subscribeCard` subscriptions and notifies `(soul: Soul | null)` listeners. Listens to `PlayerManager` for player-id transitions to clear the active soul on logout. `MainScene` is the sole caller of `setActiveSoul`. Lives on `ctx.souls` (bootstrap-scoped). Cleared to `null` on `setActiveSoul(0)` or player change.
 - `spacetime/bindings/<module>/`: **generated** per SpacetimeDB module by `../../spacetime/server/generate-bindings.sh` (driven by `bin/st build`). Subdirs today: `bindings/shard/` for gameplay, `bindings/chat/` for world chat. Never edit by hand; re-run whenever the corresponding server schema changes.
 
 ## Wiring (main.ts)
 ```
-ConnectionManager
+ConnectionRegistry (shard + chat)
   ├── (logging listener for connect/disconnect telemetry)
-  ↓ (passed to)
-DataManager
-  ├── new SubscriptionManager(connection)
-  │     ├── ConnectionManager.addListener  (rebinds row handlers + reissues subs on connect)
+ReducerManager(connections)             // first — needed by listeners below
+ConnectionRegistry.shard.addListener:
+  onConnected: log
+DataManager(connections, reducers, definitions)
+  ├── new SubscriptionManager(connections.shard, { onReducerEvent })
+  │     ├── onReducerEvent → reducers.noteServerTime  (seeds offset window)
+  │     ├── ConnectionManager.addListener            (rebinds row handlers + reissues subs on connect)
   │     └── SubscriptionManager.registerTableHandlers
-  │           (cards/players/zones → ValidAtTable.insert/update/delete)
-  ├── ValidAtTable<Card> / <Player> / <Zone>
-  └── cards.subscribe → mirrorCard → cardsLocal + fireCardLocal
+  │           (cards/players/zones/souls → ValidAtTable.insert/update/delete)
+  ├── ChatSubscriptionManager(connections.chat)
+  ├── ValidAtTable<Card> / <Player> / <Zone> / <Soul>  + AppendTable<ChatMessage>
+  └── cards.subscribe   → mirrorCard → cardsLocal + fireCardLocal
       players.subscribe → mirror(playersLocal)
-      zones.subscribe → mirror(zonesLocal)
+      souls.subscribe   → mirrorSoul(soulsLocal)
+      zones.subscribe   → mirror(zonesLocal)
 
-ReducerManager(connection)  // peer of DataManager
-ZoneManager.onAdded("active", zoneId => data.subscriptions.subscribeCards(zoneId))
-app.ticker.add(() => data.promote(Date.now() / 1000))
+PlayerManager(reducers, data)            // takes reducers for claimOrLogin routing
+ConnectionRegistry.shard.addListener:
+  onConnected (reconnect re-sync): if playerSession.isLoggedIn() → reducers.setLastLogin()
+ZoneManager.onAdded("active", zoneId => subscribeZone(zoneId))
+app.ticker.add(() => data.promote())     // reads serverNowMs() internally
 ```
-Construction order: `ConnectionManager` → `ReducerManager` → `DataManager` (which constructs SubscriptionManager internally). `main.ts` registers a logging listener directly on `ConnectionManager.addListener` for telemetry and wires the per-frame promote + the ZoneManager → subscribeCards bridge.
+
+Construction order: `ConnectionRegistry` → `ReducerManager` → listeners → `DataManager` → `PlayerManager`. `ReducerManager` is built *before* the listeners so its `noteServerTime` is callable from the `onReducerEvent` callback `DataManager` will wire into `SubscriptionManager`.
+
+**`data.promote()` takes no arguments** — it reads `serverNowMs()` from `ReducerManager` internally. The previous `Date.now()/1000` API is gone; promote-gating runs in unix milliseconds against `serverNowMs()`'s buffered estimate.
 
 ## Subscription helpers
 | Method | SQL filter | Tables touched |
@@ -47,6 +57,7 @@ Construction order: `ConnectionManager` → `ReducerManager` → `DataManager` (
 | `subscribeWorldZone(macroZone)` | `WHERE macro_zone = X` | `zones` + `cards` (`surface == WORLD_LAYER`) |
 | `subscribeWorldPlayers(macroZone)` | `WHERE macro_zone = X AND surface = WORLD_LAYER` | `players` (only those whose soul is in this chunk) |
 | `subscribeOwnedCards(ownerId)` | `WHERE owner_id = X` | `cards` |
+| `subscribePlayerDimension(playerId)` | `WHERE owner_id = X AND surface = PLAYER_DIMENSION_LAYER` | `zones` + `cards` + `souls` — local player's private 2×2-chunk pocket dim. Install once on login |
 | `subscribeSoul(cardId)` | `WHERE card_id = X` | `souls` |
 | `subscribeCard(cardId)` | `WHERE card_id = X` | `cards` (single card by id — soul-card bootstrap) |
 | `subscribeChat(thresholdPacked)` | `WHERE sent_at >= X` | `chat_messages` |
@@ -59,7 +70,7 @@ These build SQL only; SDK row events fan out via `registerTableHandlers`. World/
 - **Server tier read**: `data.cards.current.get(id)` / `data.cards.current.values()`. Strictly server-derived state — pure mirror of what the server believes is currently valid. **Reserved for plumbing** (`mirrorCard`, `promote`, the SDK fan-out). Game code does NOT read this — see "Tier-rule pitfall" below.
 - **Local tier read**: `data.cardsLocal.get(id)` / `data.cardsLocal.values()`. What game code displays. Mirrors server tier by default; client-driven mutations (drag-drop) override fields per the cards-specific rule.
 - **Client write**: `data.setLocalCard(id, row)` — writes the new row into `cardsLocal`, fires the local-cards listeners. Server tier is left untouched.
-- **Server arrival**: SDK row event → `SubscriptionManager.fanOut` → `ValidAtTable.insert/update/delete` (writes `server`) → `promote(now)` (writes `current`, fires `ValidAtTable.subscribe`) → `mirrorCard` (writes `cardsLocal` with the inventory-loose preservation rule applied) → `fireCardLocal` (notifies `Card.onDataChange`, etc.).
+- **Server arrival**: SDK row event → `SubscriptionManager.fanOut` (and `captureReducerTimestamp` if the event is `Reducer`-tagged, feeding `noteServerTime`) → `ValidAtTable.insert/update/delete` (writes `server`) → next-frame `promote()` reads `reducers.serverNowMs()` and gates rows whose `valid_at_time <= serverNowMs()` into `current` (fires `ValidAtTable.subscribe`) → `mirrorCard` (writes `cardsLocal` with the inventory-loose preservation rule applied) → `fireCardLocal` (notifies `Card.onDataChange`, etc.).
 
 ### Tier-rule pitfall (load-bearing)
 Reading `data.cards.current` from game code looks fine — the row exists, the fields are populated — but for any inventory-loose card the server's `microLocation` is **always 0** (the server doesn't track inventory pixel coords; that's exactly what the `mirrorCard` preserve rule exists for). So `decodeLooseXY(currentRow.microLocation)` returns `(0, 0)` regardless of where the player actually placed the card. Symptoms when this rule is broken: surviving children of a spliced card snap to (0,0); orphan-fallback paths reposition cards to the corner; chain-walking helpers (`rootOf`, `validatedSlot`, `flipChain`) get the wrong parent during a drag because the server tier hasn't been told yet. Anything that needs to know "where the player can see this card right now" reads `cardsLocal`. The only legitimate `data.cards.*` consumers are `mirrorCard` itself, `promote(now)`, and the `subscribeCards` SQL helpers.
@@ -78,14 +89,16 @@ When the server pushes an updated card row, `mirrorCard` checks:
 
 If all true → **position fields preserved from local** (`macroZone`, `microZone`, `microLocation`, `surface`); other fields (`flags`, `packedDefinition`, `ownerId`, `validAt`, `cardId`) merge from server. Otherwise → server row replaces local in full (e.g. card transitions out of inventory, gets stacked, dies). Server is always authoritative for everything except inventory pixel placement, which is a client concern.
 
-### Stack states (4 values in `microZone` low 2 bits)
+### Stack states (3 active + 1 reserved, low 2 bits of `microZone`)
 
 | state | name        | `microLocation` semantics                     | who writes it                              |
 | ----- | ----------- | --------------------------------------------- | ------------------------------------------ |
-| 0     | `Free`      | encoded `(x, y)` loose XY                     | client (drag-drop) + server (release)      |
+| 0     | `Free`      | encoded `(x, y)` loose XY                     | client (drag-drop) + server (release / world-tile cards) |
 | 1     | `Slot`      | **immediate parent's** card_id                | **server only** (`propose_action`)         |
-| 2     | `OnRoot`    | chain root's card_id                          | client (drag-drop) + server (rooted recipes) |
-| 3     | `OnHex`     | parent hex card_id                            | server (hex anchoring)                     |
+| 2     | `OnRoot`    | chain root's card_id                          | client (drag-drop) + server (rooted recipes / `place_card`) |
+| 3     | (reserved)  | — (was legacy `OnHex`)                        | nobody; reading panics on the server (`StackedState::from_u2(3)`) |
+
+Hex / tile cards are *just* cards. A loose tile card is `Free` at the world surface; a tile bound to a recipe ends up `OnRoot` with `direction = HEX` (0) under the chain root. **`chain_stitch` rewrites a recipe-bound tile-card's `micro_zone` from the Free `(q, r)` layout to the OnRoot stack layout** — readers that need the tile-card's hex must parent-walk to its `Free` ancestor (see [`LayoutWorld.resolveTileCardHex`](../game/world/LayoutWorld.ts) and the matching `cards::tile_full_view` on the server).
 
 `Slot` rows (state-1) are **server-WRITTEN, client-MAINTAINED**. The server emits Slot rows from `propose_action` and clears them in `action_completion` — `is_stack_layout` returns false for them so the mirror's preserve gate doesn't fire on the position fields. But the server has **no view of the local chain** beyond what the client passed into `propose_action`, so it can't run client-side splice or recovery: when a Slot card's parent dies, or arrives orphaned at the mirror, the client must release it. Two recovery paths cover this:
 
@@ -94,7 +107,7 @@ If all true → **position fields preserved from local** (`macroZone`, `microZon
 
 `OnRoot` (state-2) carries `position` and `direction` in `microZone`; `Slot` (state-1) carries only `direction` (position is implicit via parent-pointer walk).
 
-The "server is forcing this position" signal lives in `flags` bit 11 (`force_position`). It's set on every row that gets spatial fields rewritten by `propose_action` and cleared by `action_completion`'s release path.
+The "server is forcing this position" signal lives in `flags` as the `pos_need` (required — splice wins the slot, evict on overflow) / `pos_want` (advisory — stack on top of conflict, evict on overflow) bit pair. Set on every row that gets spatial fields rewritten by `propose_action` (`pos_need` today; recipes opting into the advisory path will set `pos_want`) and cleared by `action_completion`'s release path.
 
 ### Dead-card extension (`LocalCard.dead`)
 `LocalCard = Card & { dead?: 1 | 2 }`. The `dead` field is a client-only marker, not part of the SDK row:
@@ -117,7 +130,7 @@ Because the server marks death via UPDATE (not DELETE) so the row carries `valid
 - **Server tier is read-only.** Never call `data.cards.insert(...)` / `data.cards.update(...)` outside the SubscriptionManager's bound row handlers. To mutate displayed state, write to the local tier via `setLocalCard`.
 - **Game code reads from `cardsLocal`.** `data.cards.current` is the server-derived snapshot; consumers that should respect inventory-local position go through the overlay.
 - **Subscribe through DataManager's local channel**, not ValidAtTable directly. `Card` and `CardManager` use `data.subscribeLocalCardKey(id, listener)` and `data.subscribeLocalCard(listener)` so they react to BOTH server-driven mirror events AND client-driven overlay writes through the same path.
-- **Row keys are packed u64.** Each table's primary key on the server is `validAt: u64` whose high 32 bits hold the row's id and low 32 bits hold the absolute-second unix timestamp at which the row becomes valid. The bindings expose this directly as `row.validAt` (a `bigint`). Multiple rows per id can coexist; `promote(now)` collapses them to a single `current` row per id.
+- **Row keys are packed u64.** Each table's primary key on the server is `validAt: u64` packed as `(time_ms: u48 << 16) | sequence: u16`. The id column is a separate btree-indexed field. The bindings expose this directly as `row.validAt` (a `bigint`). Multiple rows per id can coexist; `promote()` collapses them to a single `current` row per id by selecting max `valid_at_time <= serverNowMs()`.
 - **One SDK callback per (table, event), bound on every connect.** `bindHandlers(conn)` runs from the `onConnected` listener inside `SubscriptionManager`. Each SDK callback fans out to every registered handler in the order they registered. Per-handler `try/catch` so one bad handler can't break the others. Old bindings are GC'd with the old connection — no manual `removeOnInsert` needed.
 - **Subscription registry.** Each subscription has a `name` (the table-ish slot) and a `scopeKey` (e.g. `"zone:42"`). `installSubscription(name, def)` dedups same-name+same-scope, swaps on scope change, opens fresh on new name. In-flight subscriptions share a `Promise<void>` so concurrent callers don't double-issue.
 - **Reconnect re-issues every active subscription.** On `onDisconnect`, every subscription's handle is nulled (no row-store wipe — the registry survives). On the next `onConnected`, SDK row handlers are re-bound and `reissueAllSubscriptions` re-runs `subscribeRaw` for each entry in parallel.
@@ -138,4 +151,4 @@ Because the server marks death via UPDATE (not DELETE) so the row carries `valid
 ## Stripped / not yet wired
 - **No server-side actions table.** The retired `actions` / `magnetic_actions` tables are gone. Recipe outcomes are observed via flag changes on `cards` rows (`slot_hold` / `dead`). Lifecycle resolution (magnetic anchors + on_create decay) is client-driven via [`LifecycleResolutionManager`](../game/lifecycle/LifecycleResolutionManager.ts). See [docs/LIFECYCLE_REWRITE.md](../../../docs/LIFECYCLE_REWRITE.md).
 - **World zone subscriptions are not yet driven by viewport changes.** `subscribeWorldZone` / `subscribeWorldPlayers` exist and build correct SQL, but the call from `ZoneManager.onAnchorChange("viewport", …)` into `DataManager.subscriptions.subscribeWorldZone(…)` is not yet wired in `main.ts`. World tile data arrives only via manually-triggered zone subscriptions today.
-- **No display buffer.** `promote(now)` accepts any `now`, so a client-side latency cushion can be added at the call site by passing `wallClock - bufferSeconds` — but `main.ts` currently uses raw `Date.now() / 1000`.
+- **Rate-of-drift tracking on the offset window.** Not implemented. The window picks a max-offset anchor and interpolates linearly via `performance.now()`. If sustained server-clock drag during a long wait becomes a problem in real conditions, the next step is median-of-pairs rate estimation across the window.

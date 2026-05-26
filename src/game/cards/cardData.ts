@@ -20,26 +20,30 @@
  *       bits 2-4 (u3): localR
  *       bits 5-7 (u3): localQ
  *
- * `force_position` (the "server is asserting this row's position
- * verbatim" signal) used to live in `microZone` bit 2 of the stack
- * layout. It now lives in `flags` (`force_position` at bit 11), freeing
- * `microZone` bit 2 to encode chain direction. Bit allocations are
- * pinned in `content/cards/flags.json`.
+ * The "server is asserting this row's position" signal used to live
+ * in `microZone` bit 2 of the stack layout. It now lives in `flags`
+ * as the `pos_need` (required) / `pos_want` (advisory) bit pair,
+ * freeing `microZone` bit 2 to encode chain direction. Bit
+ * allocations are pinned in `content/cards/flags.json`.
  *
  * `microLocation` (u32) interpretation:
  *   - STACKED_LOOSE:    packed (x: u16, y: u16) loose XY
  *   - STACKED_SLOT:     IMMEDIATE parent's card_id (which can be a Slot,
- *                       OnRoot, Free, or OnHex card). Server-only writes.
+ *                       OnRoot, or Free card). Server-only writes.
  *   - STACKED_ON_ROOT:  ROOT card_id of the rect chain (chain order
  *                       comes from `microZone.position` + `microZone.direction`)
- *   - STACKED_ON_HEX:   parent hex card_id (legacy parent-pointer walk)
+ *   - STACKED_DEFERRED: HOST card_id (or 0 if no host) — anchor for
+ *                       mirror-time resolution. `microZone` carries a
+ *                       fallback (q, r) used when host can't be
+ *                       resolved. Recipe outputs like `stack.N.create`.
  *
- * Rect chains use a mix of states: the chain root stays in state 0 (or
- * state 3 if mounted on hex); cards stacked via drag-drop are state 2
- * (OnRoot); recipe slots above the actor are state 1 (Slot, server-
- * authoritative). Hex chains keep parent-pointer walking via state 3.
- * Rect-on-hex must be a leaf. See docs/STACK_LAYOUT_MIGRATION.md for
- * migration history.
+ * Rect chains use a mix of states: the chain root stays in state 0;
+ * cards stacked via drag-drop are state 2 (OnRoot); recipe slots above
+ * the actor are state 1 (Slot, server-authoritative); recipe outputs
+ * targeting positions that depend on chain state at write-time emit
+ * state 3 (Deferred), resolved client-side at mirror time. Rect-on-hex
+ * mounts use state 2 (OnRoot) with direction = HEX. See
+ * docs/STACK_LAYOUT_MIGRATION.md for migration history.
  */
 
 const STACKED_STATE_MASK = 0b11;
@@ -52,12 +56,43 @@ export const STACKED_LOOSE = 0;
  *  (`propose_action`); the client never writes Slot rows. */
 export const STACKED_SLOT = 1;
 export const STACKED_ON_ROOT = 2;
-/** **Retired** in the unified card model — value 3 is reserved.
- *  Hex cards are no longer special; they sit as `STACKED_LOOSE` at
- *  world positions like any other card. Code paths that still read
- *  state 3 are vestigial — they won't see any rows with this value
- *  from a server using the new packing. */
-export const STACKED_ON_HEX = 3;
+/** **Deferred placement, anchored to host.** The row carries
+ *  `microLocation = host_card_id` (or `0` if no host) and `microZone`
+ *  encodes a fallback `(q, r)` per the legacy `[localQ:u3 |
+ *  localR:u3 | state:u2]` layout. Resolution runs at mirror-time
+ *  via `CardManager.appendAtChainLeaf`: walk host's chain to its
+ *  root, pick the chain's growth direction (Top children present →
+ *  Top, Bottom children present → Bottom, both → Top, neither → try
+ *  Top then Bottom), walk back to the leaf in that direction, append
+ *  as new leaf at state 1. On any tier rejection (host gone,
+ *  type-incompatible, drop-locked, etc.) the cascade falls through
+ *  to (q, r) loose → owner inventory → free (q, r) in macroZone →
+ *  log-and-place-loose worst case.
+ *
+ *  Used by recipe outputs like `stack.N.create: <key>` where the
+ *  intended position depends on chain state at write-time. Resolves
+ *  the propose-vs-commit-vs-mirror staleness problem by storing
+ *  *intent* (host_id + fallback q/r) rather than a captured
+ *  position that may go stale.
+ *
+ *  Server-side: a follower index (`cards::state_3_followers`) keeps
+ *  every deferred row's `(surface, macroZone)` in lockstep with its
+ *  host so subscription gaps don't strand cards on the wrong zone.
+ *  Host destruction clears `microLocation = 0`; the client cascade
+ *  then falls through to the (q, r) fallback.
+ *
+ *  Pre-unified-card-model this value was `STACKED_ON_HEX` (hex cards
+ *  were their own state); that semantic was retired and the value
+ *  reserved, freeing it for this repurposing. */
+export const STACKED_DEFERRED = 3;
+
+/** Maximum chain length the splice + eviction primitive will permit
+ *  before evicting the topmost card via the
+ *  inventory→loose→nearby-tile cascade. Matches the server-side
+ *  `SOUL_STACK_MAX_DEPTH = 16` in
+ *  `spacetime/server/modules/shard/src/recipe_eval.rs` so a chain that
+ *  fits the placement layer can't be rejected later by recipe-eval. */
+export const MAX_CHAIN_DEPTH = 16;
 
 /** Direction values for the stack layout (2 bits — values 0, 1, 2
  *  are valid; value 3 reserved).

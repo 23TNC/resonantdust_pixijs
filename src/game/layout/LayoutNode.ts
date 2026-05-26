@@ -96,6 +96,13 @@ export class LayoutNode {
   }
 
   hitTestLayout(parentX: number, parentY: number): LayoutNode | null {
+    // Invisible Pixi containers don't render, so they shouldn't
+    // catch hits either — otherwise a minimized `PixiPanel`'s
+    // (still-bounded) content keeps intercepting clicks and blocks
+    // input that should fall through to the world / canvas
+    // beneath. Pixi visibility cascades to children at render time;
+    // we mirror that here for hit-testing.
+    if (!this.container.visible) return null;
     const localX = parentX - this._x;
     const localY = parentY - this._y;
     if (!this.intersects(localX, localY)) return null;
@@ -122,6 +129,22 @@ export class LayoutNode {
     this.container.removeChild(child.container);
     child.parent = null;
     this.invalidate();
+  }
+
+  /** Move `child` to the end of this node's children — making it the
+   *  last-rendered (visually on top) and the first to be returned by
+   *  reverse-order hit-testing. No-op if the child isn't ours or is
+   *  already last. Both the LayoutNode order (used by hit-test) and
+   *  the Pixi container order (used by render) move in lockstep, so
+   *  the user can't get into a state where one panel renders on top
+   *  but a different one catches clicks. */
+  bringToFront(child: LayoutNode): void {
+    const index = this.children.indexOf(child);
+    if (index < 0) return;
+    if (index === this.children.length - 1) return;
+    this.children.splice(index, 1);
+    this.children.push(child);
+    this.container.setChildIndex(child.container, this.container.children.length - 1);
   }
 
   destroy(): void {

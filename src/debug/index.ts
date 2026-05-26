@@ -7,18 +7,25 @@
  * Edit `config` here to toggle subsystems.
  */
 const config: readonly (readonly [string, number])[] = [
-  ["actions",     0],
-  ["spacetime",   0],
-  ["zone",        0],
-  ["vite",        0],
-  ["definitions", 0],
-  ["layout",      0],
-  ["particles",   0],
-  ["cards",       0],
-  ["splice",      0],
+  ["actions",     5],
+  ["spacetime",   3],
+  ["zone",        5],
+  ["vite",        5],
+  ["definitions", 5],
+  ["layout",      5],
+  ["particles",   5],
+  ["cards",       5],
+  ["splice",      5],
   ["drag",        0],
-  ["chat",        0],
-  ["objects",     0],
+  ["chat",        5],
+  ["objects",     5],
+  // PixiJS warnings funneled in via `installPixiWarnInterceptor`.
+  // Priority `1` silences expected chatter (`getCardArt`'s lazy-
+  // load path always logs a Pixi "asset not found" warn for the
+  // first frame after a card mounts, before the load resolves —
+  // it's not actionable). Drop to `0` if you're chasing a Pixi
+  // bug and want every warn to surface.
+  ["pixi",        1],
 ] as const;
 
 function shouldPrint(tags: string[], level: number): boolean {
@@ -30,9 +37,49 @@ function shouldPrint(tags: string[], level: number): boolean {
 
 export const debug = {
   log(tags: string[], message: string, level = 0): void {
-    if (shouldPrint(tags, level)) console.debug(message);
+    if (shouldPrint(tags, level)) console.debug(`[L${level}] ${message}`);
   },
   warn(tags: string[], message: string, level = 0): void {
-    if (shouldPrint(tags, level)) console.warn(message);
+    if (shouldPrint(tags, level)) console.warn(`[L${level}] ${message}`);
   },
 };
+
+/** PixiJS funnels every internal warning through
+ *  `console.warn("PixiJS Warning: ", ...args)` (see
+ *  `pixi.js/utils/logging/warn`). There's no Pixi-side hook for a
+ *  custom logger, so we monkey-patch `console.warn` once at startup
+ *  and reroute anything that starts with the `"PixiJS Warning: "`
+ *  marker through `debug.warn(["pixi"], …)`. Toggle the `"pixi"`
+ *  tag's priority in `config` above to gate visibility. Anything
+ *  that isn't a Pixi warning passes through unchanged.
+ *
+ *  Idempotent — calling twice is a no-op so test harnesses (or a
+ *  future HMR reload) don't stack interceptors. */
+const PIXI_WARN_PREFIX = "PixiJS Warning:";
+let pixiWarnInterceptorInstalled = false;
+
+export function installPixiWarnInterceptor(): void {
+  if (pixiWarnInterceptorInstalled) return;
+  pixiWarnInterceptorInstalled = true;
+  const original = console.warn.bind(console);
+  console.warn = (...args: unknown[]): void => {
+    const first = args[0];
+    if (typeof first === "string" && first.startsWith(PIXI_WARN_PREFIX)) {
+      // Pixi calls with `("PixiJS Warning: ", ...rest)`, so the
+      // marker arrives as its own arg and the real payload is the
+      // rest. Stringify everything for the tag system; debug.warn
+      // takes a single message line.
+      const body = args.slice(1).map(stringifyArg).join(" ").trim();
+      debug.warn(["pixi"], `[pixi] ${body}`);
+      return;
+    }
+    original(...args);
+  };
+}
+
+function stringifyArg(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (v instanceof Error) return v.stack ?? v.message;
+  try { return JSON.stringify(v); }
+  catch { return String(v); }
+}

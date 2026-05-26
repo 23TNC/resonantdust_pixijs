@@ -15,4 +15,5 @@ export default __t.row({
   playerId: __t.u32().name("player_id"),
   name: __t.string(),
   lastLoginSecs: __t.u32().name("last_login_secs"),
+  flags: __t.u32(),
 });

@@ -13,4 +13,5 @@ import {
 export default __t.row({
   cardId: __t.u32().primaryKey().name("card_id"),
   blueprints0: __t.u64().name("blueprints_0"),
+  activeBlueprints: __t.u8().name("active_blueprints"),
 });

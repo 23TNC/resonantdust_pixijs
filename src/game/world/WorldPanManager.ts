@@ -1,4 +1,5 @@
 import type { GameContext } from "../../GameContext";
+import { WORLD_LAYER } from "../../server/data/packing";
 import { WORLD_HEX_RADIUS } from "./hexSize";
 import { LayoutWorld } from "./LayoutWorld";
 
@@ -61,10 +62,32 @@ export class WorldPanManager {
   private readonly unsubDragStart: () => void;
   private readonly unsubDragStop: () => void;
 
+  /** ZoneManager anchor name this pan controller drives. Singleton
+   *  callers pass `"viewport"`; per-panel callers pass
+   *  `"viewport:<panelId>"`. */
+  readonly viewportAnchorName: string;
+
+  /** Surface the anchor is pinned to. World viewports start at
+   *  `WORLD_LAYER` (the default); player-dim viewports start at
+   *  `PLAYER_DIMENSION_LAYER`. Threaded into every `setAnchor`
+   *  call so the anchor's surface stays stable across drag frames
+   *  — defaulting `setAnchor`'s `surface` arg would clobber a
+   *  dim-anchor's surface back to world on the next pan tick.
+   *
+   *  Mutable via [`setSurface`] so a panel can be re-pointed at a
+   *  different surface (`GameViewPanel.focusAt` calls both
+   *  `LayoutWorld.setSurface` and `WorldPanManager.setSurface` so
+   *  the next pan frame doesn't reset the just-changed surface). */
+  surface: number;
+
   constructor(
     private readonly ctx: GameContext,
     private readonly worldView: LayoutWorld,
+    viewportAnchorName: string = "viewport",
+    surface: number = WORLD_LAYER,
   ) {
+    this.viewportAnchorName = viewportAnchorName;
+    this.surface = surface;
     if (!ctx.input) {
       throw new Error("[WorldPanManager] ctx.input is null — InputManager must exist");
     }
@@ -79,13 +102,18 @@ export class WorldPanManager {
       // LayoutWorld, so this branch correctly stays out of DragManager's
       // way.
       if (data.hit !== this.worldView) return;
+      // No viewport anchor set → can't compute a pan delta. Happens
+      // briefly between scene-enter and the soul-row-arrived setAnchor;
+      // ignoring the drag is fine, the user can try again once the
+      // world has positioned itself.
+      const anchor = ctx.zones.getAnchor(this.viewportAnchorName);
+      if (!anchor) return;
       this.active = true;
       // Drag wins over an in-flight recenter tween — the player's
       // active grab takes precedence over the snap-back animation.
       this.tween = null;
       this.startPointerX = data.x;
       this.startPointerY = data.y;
-      const anchor = ctx.zones.viewportAnchor;
       this.startViewQ = anchor.q;
       this.startViewR = anchor.r;
     });
@@ -102,11 +130,30 @@ export class WorldPanManager {
    *  in-flight tween. Cancels itself if a pan-drag starts mid-snap
    *  (`active = true` short-circuits the tween branch in `update`).
    *
-   *  Call site: `GameScene`'s Space-key handler, which resolves the
-   *  soul's current hex from `ctx.souls.getSoul()` and passes it
-   *  here. */
+   *  Call sites: `GameScene`'s Space-key handler (re-center after
+   *  pan) and the initial scene-enter soul-pan (first frame of the
+   *  game scene). When no viewport anchor has been set yet — typical
+   *  on the very first call after entering the scene — there's
+   *  nothing to lerp *from*, so we set the anchor directly instead
+   *  of queuing a tween. The next call (after the user has panned
+   *  or pressed Space again) will have an anchor and tween smoothly. */
   tweenTo(q: number, r: number): void {
+    if (!this.ctx.zones.getAnchor(this.viewportAnchorName)) {
+      this.ctx.zones.setAnchor(this.viewportAnchorName, q, r, this.surface);
+      return;
+    }
     this.tween = { targetQ: q, targetR: r };
+  }
+
+  /** Re-point this pan controller's anchor at a different
+   *  `surface`. No state churn beyond the field write — every
+   *  subsequent `setAnchor` call uses the new surface, so the next
+   *  drag / tween tick re-anchors on the new layer. Pair with
+   *  [`LayoutWorld.setSurface`] so the view re-registers its
+   *  worldCardSurface + re-hydrates tiles for the new layer too;
+   *  `GameViewPanel.focusAt` packages both. */
+  setSurface(surface: number): void {
+    this.surface = surface;
   }
 
   /** Called once per frame by `GameScene.update`. Three branches:
@@ -128,27 +175,43 @@ export class WorldPanManager {
       // anchor (which stays fixed under the cursor's start point)
       // shifts opposite to the cursor's pixel drag.
       this.ctx.zones.setAnchor(
-        "viewport",
+        this.viewportAnchorName,
         this.startViewQ - dq,
         this.startViewR - dr,
+        this.surface,
       );
       return;
     }
     if (this.tween !== null) {
-      const anchor = this.ctx.zones.viewportAnchor;
+      const anchor = this.ctx.zones.getAnchor(this.viewportAnchorName) ?? null;
+      // Belt-and-suspenders: `tweenTo` short-circuits to a direct
+      // setAnchor when no anchor is set, so this branch should
+      // only run with a live anchor. Bail safely if something
+      // cleared the anchor mid-tween (no current call path does
+      // this, but the cost is one null-check).
+      if (anchor === null) {
+        this.tween = null;
+        return;
+      }
       const dq = this.tween.targetQ - anchor.q;
       const dr = this.tween.targetR - anchor.r;
       if (Math.hypot(dq, dr) < TWEEN_SNAP_HEX) {
         // Snap to the exact target and end the tween. Without the
         // snap the exponential lerp would asymptote forever.
-        this.ctx.zones.setAnchor("viewport", this.tween.targetQ, this.tween.targetR);
+        this.ctx.zones.setAnchor(
+          this.viewportAnchorName,
+          this.tween.targetQ,
+          this.tween.targetR,
+          this.surface,
+        );
         this.tween = null;
         return;
       }
       this.ctx.zones.setAnchor(
-        "viewport",
+        this.viewportAnchorName,
         anchor.q + dq * TWEEN_LERP,
         anchor.r + dr * TWEEN_LERP,
+        this.surface,
       );
     }
   }

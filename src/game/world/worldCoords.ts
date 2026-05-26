@@ -16,6 +16,7 @@ export const TILE_SIZE = 80;
  *  `server/data/packing`. Re-exported here for game-code callers that
  *  already import other world-coord helpers from this module. */
 export { WORLD_LAYER } from "../../server/data/packing";
+import { PLAYER_DIMENSION_LAYER } from "../../server/data/packing";
 
 // Server packs macro_zone as: ((zone_q as i16 as u16) << 16) | (zone_r as i16 as u16)
 // where zone_q/zone_r are the chunk indices (signed, not biased).
@@ -207,7 +208,13 @@ export function getZoneTileSlot(
   }
   for (const zone of zonesLocal.values()) {
     if (zone.macroZone !== macroZone) continue;
-    if (zone.surface < 64 /* WORLD_LAYER */) continue;
+    // Skip surfaces with no tile bitfield (inventory layers). Admits
+    // PLAYER_DIMENSION_LAYER (62), MINI_ZONE_LAYER (63), WORLD_LAYER
+    // (64) — anything that backs hex tiles. Mirrors the server's
+    // `SYNTHETIC_HEX_MIN_SURFACE = 32` (we use the tighter
+    // dim-and-above threshold here since those are the only
+    // tile-bearing surfaces today).
+    if (zone.surface < PLAYER_DIMENSION_LAYER) continue;
     const typeId = (zone.packedDefinition >> 4) & 0xF;
     const slot = tileAt(zoneTilesArray(zone), localR * 8 + localQ);
     if (slot.defId === 0) return { packed: 0, stock0: 0, stock1: 0 };

@@ -1,19 +1,42 @@
 import { debug } from "../../debug";
 import type { GameContext } from "../../GameContext";
-import { getStackedState, STACKED_LOOSE, STACKED_ON_HEX } from "../cards/cardData";
+import { getStackedState, STACKED_LOOSE } from "../cards/cardData";
 import {
   STACK_DIRECTION_DOWN,
   STACK_DIRECTION_HEX,
   STACK_DIRECTION_UP,
 } from "../cards/cardData";
-import { WORLD_LAYER } from "../../server/data/packing";
+import { PLAYER_DIMENSION_LAYER } from "../../server/data/packing";
+import type { LocalCard } from "../../server/data/DataManager";
 import { getZoneTileSlot } from "../world/worldCoords";
 import type { MatchResult } from "./recipeMatcher";
+import { isSlotHeld } from "./chainState";
 
 /** Default fire-after-match delay. Matches stay queued for this long
  *  before being submitted to the server, giving the player a window
  *  to break the chain (drag a card off, etc.) and abort. */
 const DEFAULT_DELAY_MS = 5000;
+
+/** Max retries after `time_drift:client_ahead_by` rejections. The
+ *  retry mechanism waits for the server's clock to catch up to the
+ *  row's `valid_at`; cap exists to bound runaway loops when the
+ *  client's clock is catastrophically off (broken NTP, etc.). After
+ *  this many retries the entry is dropped and the player would have
+ *  to re-trigger the action. */
+const MAX_TIME_DRIFT_RETRIES = 3;
+
+/** Padding added on top of the server-reported "ahead by N ms" gap
+ *  when scheduling a retry. Absorbs the round-trip back to the
+ *  server plus the time-to-effective-now math, so the retry lands
+ *  comfortably past the boundary that triggered the rejection. */
+const TIME_DRIFT_RETRY_PAD_MS = 250;
+
+/** Regex matching the server's `time_drift:` rejection prefix from
+ *  [`cards::effective_now_ms`]. Captures direction (`ahead`/`behind`)
+ *  and the gap in milliseconds. See
+ *  [time_sync.rs](../../server/spacetime/bindings/shard) /
+ *  [cards.rs](../../../../spacetime/server/modules/shard/src/cards.rs). */
+const TIME_DRIFT_RE = /time_drift:client_(ahead|behind)_by=(\d+)/;
 
 export interface ActionManagerOptions {
   /** Milliseconds to wait after a match is queued before submitting
@@ -81,6 +104,11 @@ export interface QueuedAction {
    *  flicker-relocating. `progressFor(cardId)` returns the fraction
    *  iff `cardId === progressAnchor`. */
   progressAnchor: number;
+  /** Number of times this action has already been retried after a
+   *  `time_drift:client_ahead_by` rejection from the server. Capped
+   *  at `MAX_TIME_DRIFT_RETRIES` to prevent infinite loops if the
+   *  client's clock is catastrophically out of sync. */
+  retryCount: number;
 }
 
 /**
@@ -103,6 +131,13 @@ export class ActionManager {
   private readonly delayMs: number;
   private readonly unsubStackChange: () => void;
   private readonly unsubData: () => void;
+  /** Client-side prediction sets. Bridges the round-trip window between
+   *  proposeAction dispatch and the server's `slot_hold` /
+   *  `position_hold_count` writes — readers consult these via
+   *  [`isSlotHeld`] / [`isPositionHeld`] in `chainState.ts`. Server is
+   *  authoritative; entries clear at the round-trip response. */
+  private readonly predSlotHold = new Set<number>();
+  private readonly predPositionHold = new Set<number>();
 
   constructor(
     private readonly ctx: GameContext,
@@ -149,7 +184,12 @@ export class ActionManager {
       // freshly-magnetic cards don't begin their inner recipe pull.
       if (change.kind === "added") {
         const state = getStackedState(change.row.microZone);
-        const isRoot = state === STACKED_LOOSE || state === STACKED_ON_HEX;
+        // `STACKED_LOOSE` is the only true root state in the unified
+        // model. Value 3 (formerly `STACKED_ON_HEX`, now repurposed
+        // as `STACKED_DEFERRED`) is transient — mirror resolution
+        // converts it to state 1/2 before any chain logic sees it,
+        // so we don't treat it as a root here.
+        const isRoot = state === STACKED_LOOSE;
         if (isRoot && change.row.dead !== 2) {
           this.evaluateRoot(change.key);
         }
@@ -157,8 +197,8 @@ export class ActionManager {
       }
       // `updated` covers every other row mutation: dead-bit flips
       // (`dead === 1` after server marks the card destroyed),
-      // server-forced position writes (FLAG_FORCE_POSITION from
-      // another action's chain_stitch), slot_hold acquisition by
+      // server-forced position writes (FLAG_POS_NEED / FLAG_POS_WANT
+      // from another action's chain_stitch), slot_hold acquisition by
       // a concurrent recipe, magnetic-flag flips, ownership changes,
       // packed_definition shifts, etc. Any of these can invalidate
       // an outstanding queue.
@@ -184,12 +224,12 @@ export class ActionManager {
 
     // Initial scan: every unchained root currently in cardsLocal gets
     // a fresh evaluation. Stacked (non-root) cards are reached
-    // transitively via their root. Loose AND on-hex are both root
-    // shapes; the latter remains until Phase 10.4's drag-drop
-    // migration retires state-3 client-side.
+    // transitively via their root. Only `STACKED_LOOSE` is a real
+    // root state in the unified model — state 3 (`STACKED_DEFERRED`)
+    // is transient and resolved by `mirrorCard` before reaching here.
     for (const row of ctx.data.cardsLocal.values()) {
       const state = getStackedState(row.microZone);
-      if (state === STACKED_LOOSE || state === STACKED_ON_HEX) {
+      if (state === STACKED_LOOSE) {
         this.evaluateRoot(row.cardId);
       }
     }
@@ -201,6 +241,20 @@ export class ActionManager {
     for (const handle of this.timers.values()) clearTimeout(handle);
     this.timers.clear();
     this.queue.clear();
+    this.predSlotHold.clear();
+    this.predPositionHold.clear();
+  }
+
+  /** True if `cardId` is currently being predicted as slot-held by a
+   *  proposeAction dispatch awaiting round-trip. Read site for
+   *  [`isSlotHeld`] in `chainState.ts`. */
+  isSlotHeldPrediction(cardId: number): boolean {
+    return this.predSlotHold.has(cardId);
+  }
+
+  /** Companion to [`isSlotHeldPrediction`]. */
+  isPositionHeldPrediction(cardId: number): boolean {
+    return this.predPositionHold.has(cardId);
   }
 
   /** Snapshot iterator over currently queued actions. */
@@ -261,13 +315,12 @@ export class ActionManager {
 
     // Root must be unchained — chain-stitched cards aren't roots,
     // and we don't match against in-progress chains. `STACKED_LOOSE`
-    // is the canonical case. `STACKED_ON_HEX` (state 3) is also
-    // accepted because Phase 10.4 hasn't migrated world-tile drops
-    // yet — dropping a card on a world tile still writes state-3
-    // locally; the card is conceptually loose on the tile and should
-    // be evaluated for tile-anchored recipes like `cut_tree`. Match-
-    // side, the synthetic-tile lookup below treats the tile under
-    // the card as branch-0 of the chain.
+    // is the only root state in the unified model. Value 3 (formerly
+    // `STACKED_ON_HEX`, now repurposed as `STACKED_DEFERRED`) is
+    // transient — mirror resolution writes a concrete state 1/2 row
+    // before any recipe matcher sees it, so deferred rows never reach
+    // this evaluator as roots. Match-side, the synthetic-tile lookup
+    // below treats the tile under a card as branch-0 of the chain.
     //
     // Use `dropForRoot` (not `dropForCard`) — the card still EXISTS
     // (just stack-chained somewhere), it isn't removed. `dropForCard`
@@ -280,7 +333,7 @@ export class ActionManager {
     // on it), `evaluateRoot(axe)` lands here — and pre-fix would
     // nuke every cut_tree queue that depends on the axe.
     const rootState = getStackedState(rootRow.microZone);
-    if (rootState !== STACKED_LOOSE && rootState !== STACKED_ON_HEX) {
+    if (rootState !== STACKED_LOOSE) {
       this.dropForRoot(looseRootId, "no longer a loose root");
       return;
     }
@@ -295,7 +348,7 @@ export class ActionManager {
     // by the server's `card N is already claimed by another in-flight
     // action` check). The gate clears naturally when the recipe
     // completes (`action_completion::apply` releases `slot_hold`).
-    if (this.ctx.definitions.isSlotHeld(rootRow.flags)) {
+    if (isSlotHeld(this.ctx, rootRow.cardId, rootRow.flagsState, rootRow.flagsBk)) {
       return;
     }
 
@@ -316,7 +369,7 @@ export class ActionManager {
     //     duplicate the server rejects.
     // Both collapse into "magnetic-card chains are off-limits to
     // ActionManager until the magnetic flag clears."
-    if (this.ctx.definitions.hasCardFlag(rootRow.flags, "magnetic")) {
+    if (this.ctx.definitions.hasCardFlag(rootRow.flagsState, rootRow.flagsBk, "magnetic")) {
       const existing = this.queue.get(looseRootId);
       if (existing && !existing.submitted) {
         this.dropForRoot(looseRootId, "root is magnetic — owned by LifecycleResolutionManager");
@@ -335,26 +388,61 @@ export class ActionManager {
       .buildChain(looseRootId, STACK_DIRECTION_DOWN)
       .map((c) => c.cardId);
 
-    // Synthetic-tile binding: when root sits on a world surface
-    // and branch 0 has no card, resolve the tile from
-    // `zonesLocal` so recipes referencing `slot.0.0.aspect.X.min`
-    // can match against the underlying tile.
+    // Synthetic-tile binding: when root sits on a tile-bearing
+    // surface and branch 0 has no card, resolve the tile data so
+    // recipes referencing `slot.0.0.aspect.X.min` (alias `Hex.0`)
+    // can match. Card-priority lookup: a promoted tile-card at the
+    // hex (possibly orphaned — microLocation points to a moved /
+    // lifted root) wins over the Zone slot. Falls back to
+    // `zonesLocal` when no tile-card resolves. See
+    // `docs/TILE_AS_CARD.md`.
+    //
+    // Threshold gates inventory layers (1, 2) out — those have no
+    // tile bitfield — while admitting `PLAYER_DIMENSION_LAYER` (62),
+    // `MINI_ZONE_LAYER` (63), and `WORLD_LAYER` (64). Mirrors the
+    // server's `SYNTHETIC_HEX_MIN_SURFACE` (32 — chosen with
+    // headroom for future tile-bearing surfaces).
     let syntheticTile: { packedDef: number; stock0: number; stock1: number } | null = null;
-    if (rootRow.surface >= WORLD_LAYER && branchHex.length === 0) {
+    if (rootRow.surface >= PLAYER_DIMENSION_LAYER && branchHex.length === 0) {
       const localQ = (rootRow.microZone >> 5) & 0x7;
       const localR = (rootRow.microZone >> 2) & 0x7;
-      const slot = getZoneTileSlot(
-        this.ctx.data.zonesLocal,
+      const tileCardRow = findFreeTileCardAt(
+        this.ctx.data.cardsLocal,
+        rootRow.surface,
         rootRow.macroZone,
         localQ,
         localR,
       );
-      if (slot.packed !== 0) {
+      if (tileCardRow !== null) {
         syntheticTile = {
-          packedDef: slot.packed,
-          stock0: slot.stock0,
-          stock1: slot.stock1,
+          packedDef: tileCardRow.packedDefinition,
+          stock0:
+            this.ctx.definitions.cardFlagFieldValueIn(
+              "cards_bk",
+              tileCardRow.flagsBk,
+              "tile_stock_0",
+            ) ?? 0,
+          stock1:
+            this.ctx.definitions.cardFlagFieldValueIn(
+              "cards_bk",
+              tileCardRow.flagsBk,
+              "tile_stock_1",
+            ) ?? 0,
         };
+      } else {
+        const slot = getZoneTileSlot(
+          this.ctx.data.zonesLocal,
+          rootRow.macroZone,
+          localQ,
+          localR,
+        );
+        if (slot.packed !== 0) {
+          syntheticTile = {
+            packedDef: slot.packed,
+            stock0: slot.stock0,
+            stock1: slot.stock1,
+          };
+        }
       }
     }
 
@@ -372,6 +460,22 @@ export class ActionManager {
         // fail naturally for paths that resolve to a dead card —
         // queues referencing the dead card drop on the next recheck.
         if ((row.dead ?? 0) > 0) return null;
+        // Treat slot-held cards as absent. A card with the server-
+        // set `slot_hold` bit (or the client-prediction equivalent)
+        // is claimed by an in-flight action; binding it to a new
+        // action would hit the server's `card N is already claimed
+        // by another in-flight action` rejection.
+        //
+        // The root-slot-held gate above prevents the chain ROOT from
+        // re-matching, but for slot-held *children* the gate doesn't
+        // fire — they were entered via `buildChain`, not as the
+        // matcher's root. Without this filter, post-accept server
+        // pushes (releasing predict_slot_hold, landing server
+        // slot_hold) re-trigger `evaluateRoot`, the matcher sees the
+        // claimed children as available bindings, and we propose the
+        // same recipe twice. See the post-corpus_b.2-accept rejection
+        // for the canonical trace.
+        if (isSlotHeld(this.ctx, row.cardId, row.flagsState, row.flagsBk)) return null;
         return {
           cardId: row.cardId,
           packedDefinition: row.packedDefinition,
@@ -419,10 +523,12 @@ export class ActionManager {
       // Submitted entry is committed — leave it alone.
       return;
     }
-    // Strip the legacy state-3 (OnHex) bits from `microZone` before
-    // capturing it in the queue (server's `from_u2` panics on state
-    // 3). World-tile drops still write state-3 locally; chain_stitch
-    // reads q/r from bits 2..=7 and writes state=Free.
+    // Strip the state bits from `microZone` before capturing it in
+    // the queue. The server's `chain_stitch` reads q/r from bits 2..=7
+    // and writes state=Free for the root; we don't need the local
+    // state bits on the wire. (Pre-rename this stripped "the legacy
+    // state-3 OnHex bits"; with state 3 now actively used as
+    // `Deferred`, the strip is just generic state-bit hygiene.)
     const microZoneForWire = rootRow.microZone & ~0x3;
     if (
       existing !== undefined &&
@@ -472,6 +578,7 @@ export class ActionManager {
       scheduledAt: 0,
       progressAnchor,
       delayMs,
+      retryCount: 0,
     };
     this.queue.set(rootRow.cardId, entry);
     this.scheduleTimer(rootRow.cardId);
@@ -498,7 +605,7 @@ export class ActionManager {
     debug.log(
       ["actions"],
       `[ActionManager] dropped root ${rootId}: ${why}`,
-      4,
+      2,
     );
   }
 
@@ -582,6 +689,19 @@ export class ActionManager {
     this.evaluateRoot(rootId);
     const action = this.queue.get(rootId);
     if (!action || action.submitted) return;
+    // Pre-flight gate: if this root is currently being predicted as
+    // slot-held by an in-flight propose round-trip we dispatched, the
+    // server's `validate_bindings` will reject this one too. Skip the
+    // round trip entirely — the existing `evaluateRoot` slot-held gate
+    // catches server-acknowledged holds, but not predictions, since
+    // predictions live in this manager's sidecar (not in `Card.flags`).
+    // Drop the queue entry so a future chain mutation can re-evaluate
+    // cleanly after the in-flight action completes.
+    if (this.predSlotHold.has(rootId)) {
+      this.queue.delete(rootId);
+      this.ctx.cards?.get(action.progressAnchor)?.layoutCard.invalidate();
+      return;
+    }
     action.submitted = true;
     // `progressFor` returns null for submitted entries — force the
     // anchor card to re-layout so the bar clears immediately rather
@@ -591,7 +711,7 @@ export class ActionManager {
     debug.log(
       ["actions"],
       `[ActionManager] proposeAction recipe=${action.recipeId} root=${rootId} bindings=${JSON.stringify(action.bindings)}`,
-      2,
+      4,
     );
 
     // Stamp `predict_slot_hold` / `predict_position_hold` on every card
@@ -634,38 +754,67 @@ export class ActionManager {
         debug.log(
           ["actions"],
           `[ActionManager] proposeAction accepted: recipe=${action.recipeId} root=${rootId}`,
-          2,
+          3,
         );
         cleanup();
       })
       .catch((err: unknown) => {
+        const errStr = String(err);
+        // `time_drift:client_ahead_by=N` means the client's clock estimate
+        // overshot the server's; the row this action depends on exists in
+        // the future of the server's wall-clock. Wait N ms for the server
+        // to catch up, then re-evaluate and resubmit. Capped at
+        // `MAX_TIME_DRIFT_RETRIES` to keep a catastrophically-skewed
+        // client from looping forever.
+        const drift = TIME_DRIFT_RE.exec(errStr);
+        if (
+          drift &&
+          drift[1] === "ahead" &&
+          action.retryCount < MAX_TIME_DRIFT_RETRIES
+        ) {
+          const gapMs = Number.parseInt(drift[2], 10);
+          const delayMs = gapMs + TIME_DRIFT_RETRY_PAD_MS;
+          debug.log(
+            ["actions"],
+            `[ActionManager] proposeAction time-drift rejected: recipe=${action.recipeId} root=${rootId} ahead_by=${gapMs}ms retry=${action.retryCount + 1}/${MAX_TIME_DRIFT_RETRIES} in ${delayMs}ms`,
+            4,
+          );
+          this.clearPredictedHolds(action);
+          action.submitted = false;
+          action.retryCount += 1;
+          // Re-fire after the server should have caught up. `fireAction`
+          // re-runs `evaluateRoot` at the top so a chain mutation between
+          // submit and retry (card died, slot_hold acquired, root moved)
+          // drops the entry cleanly rather than resubmitting stale state.
+          const handle = setTimeout(() => {
+            this.timers.delete(rootId);
+            this.fireAction(rootId);
+          }, delayMs);
+          this.timers.set(rootId, handle);
+          return;
+        }
         debug.log(
           ["actions"],
-          `[ActionManager] proposeAction rejected: recipe=${action.recipeId} root=${rootId} err=${String(err)}`,
-          2,
+          `[ActionManager] proposeAction rejected: recipe=${action.recipeId} root=${rootId} err=${errStr}`,
+          4,
         );
         cleanup();
       });
   }
 
-  /** Walk the recipe's iterators + root anchor and stamp
-   *  `predict_slot_hold` / `predict_position_hold` on each binding's
-   *  local card row according to the iterator's tokens (the parser's
-   *  per-statement `borrow` / `share` / `claim` / `use` prefixes
-   *  aggregated into `Iterator.slotHold` / `positionHold`). Root gets
-   *  the union of `recipe.rootSlotHold`/`rootPositionHold` and any
-   *  promotion path (root appearing in an iterator's bindings inherits
-   *  that iter's tokens). Mirrors `apply_locks` in
+  /** Walk the recipe's iterators + root anchor and add `cardId`s to
+   *  the prediction sets according to the iterator's tokens (the
+   *  parser's per-statement `borrow` / `share` / `claim` / `use`
+   *  prefixes aggregated into `Iterator.slotHold` / `positionHold`).
+   *  Root gets the union of `recipe.rootSlotHold`/`rootPositionHold`
+   *  and any promotion path (root appearing in an iterator's
+   *  bindings inherits that iter's tokens). Mirrors `apply_locks` in
    *  `spacetime/server/modules/shard/src/actions.rs` so the client
    *  prediction matches the server's eventual flag writes. */
   private applyPredictedHolds(action: QueuedAction): void {
     const recipe = this.ctx.definitions.recipeById(action.recipeId);
     if (recipe === null) return;
-    const slotMask = this.ctx.definitions.cardFlagMask("predict_slot_hold");
-    const posMask = this.ctx.definitions.cardFlagMask("predict_position_hold");
-    if (slotMask === 0 && posMask === 0) return;
 
-    // Root locks: explicit anchor tokens unioned with promotion paths.
     let rootSlot = recipe.anchors.root && recipe.rootSlotHold;
     let rootPos = recipe.anchors.root && recipe.rootPositionHold;
     const rootId = action.looseRootId;
@@ -676,65 +825,123 @@ export class ActionManager {
       if (it.positionHold) rootPos = true;
     });
     if (rootId !== 0 && (rootSlot || rootPos)) {
-      this.orPredictBits(
-        rootId,
-        (rootSlot ? slotMask : 0) | (rootPos ? posMask : 0),
-      );
+      this.setPrediction(rootId, rootSlot, rootPos);
     }
 
     recipe.iterators.forEach((it, iterId) => {
       if (!it.slotHold && !it.positionHold) return;
       const row = action.bindings[iterId];
       if (!row) return;
-      const mask =
-        (it.slotHold ? slotMask : 0) | (it.positionHold ? posMask : 0);
-      if (mask === 0) return;
       for (const cardId of row) {
         if (cardId === 0 || cardId === rootId) continue;
-        this.orPredictBits(cardId, mask);
+        this.setPrediction(cardId, it.slotHold, it.positionHold);
       }
     });
   }
 
-  /** Companion to `applyPredictedHolds` — clears the same bits on the
-   *  same set of cards. Walks recipe + bindings + root identically so
-   *  we don't have to snapshot the touched-card set at fire time. */
+  /** Companion to `applyPredictedHolds` — clears the same predictions
+   *  on the same set of cards. Walks recipe + bindings + root
+   *  identically so we don't have to snapshot the touched-card set at
+   *  fire time. */
   private clearPredictedHolds(action: QueuedAction): void {
-    const recipe = this.ctx.definitions.recipeById(action.recipeId);
-    if (recipe === null) return;
-    const slotMask = this.ctx.definitions.cardFlagMask("predict_slot_hold");
-    const posMask = this.ctx.definitions.cardFlagMask("predict_position_hold");
-    const fullMask = slotMask | posMask;
-    if (fullMask === 0) return;
-
     const rootId = action.looseRootId;
-    if (rootId !== 0) this.clearPredictBits(rootId, fullMask);
+    if (rootId !== 0) this.clearPrediction(rootId);
     for (const row of action.bindings) {
       for (const cardId of row) {
         if (cardId === 0 || cardId === rootId) continue;
-        this.clearPredictBits(cardId, fullMask);
+        this.clearPrediction(cardId);
       }
     }
   }
 
-  /** OR `mask` into `cardId`'s local-row flags. Skipped if the row
-   *  isn't in `cardsLocal` (server deletion / subscription gap) or if
-   *  the bits are already set. */
-  private orPredictBits(cardId: number, mask: number): void {
-    const row = this.ctx.data.cardsLocal.get(cardId);
-    if (!row) return;
-    if ((row.flags & mask) === mask) return;
-    this.ctx.data.setLocalCard(cardId, { ...row, flags: row.flags | mask });
+  /** Add `cardId` to the slot/position prediction sets (whichever the
+   *  recipe declares) and re-fire the card's local-row listeners so
+   *  consumers re-consult the merged held-state via
+   *  [`isSlotHeld`] / [`isPositionHeld`]. No-op if the requested
+   *  predictions are already present. */
+  private setPrediction(cardId: number, slot: boolean, pos: boolean): void {
+    const wasSlot = this.predSlotHold.has(cardId);
+    const wasPos = this.predPositionHold.has(cardId);
+    const wantSlot = wasSlot || slot;
+    const wantPos = wasPos || pos;
+    if (wantSlot === wasSlot && wantPos === wasPos) return;
+    if (wantSlot) this.predSlotHold.add(cardId);
+    if (wantPos) this.predPositionHold.add(cardId);
+    this.notifyCard(cardId);
   }
 
-  /** Clear `mask` bits from `cardId`'s local-row flags. Skipped if the
-   *  row isn't present or if the bits are already clear. */
-  private clearPredictBits(cardId: number, mask: number): void {
+  /** Remove `cardId` from both prediction sets and re-fire its
+   *  local-row listeners. No-op if nothing was set. */
+  private clearPrediction(cardId: number): void {
+    const had = this.predSlotHold.delete(cardId);
+    const had2 = this.predPositionHold.delete(cardId);
+    if (!had && !had2) return;
+    this.notifyCard(cardId);
+  }
+
+  /** Re-fire the local-row listeners for `cardId` so subscribers
+   *  re-evaluate against the updated prediction sets. The row's flags
+   *  are unchanged — predictions live in this manager's sets, not in
+   *  `Card.flags`. `setLocalCard` requires a fresh row reference to
+   *  treat the call as an update; a shallow clone is the cheapest way
+   *  to get one. */
+  private notifyCard(cardId: number): void {
     const row = this.ctx.data.cardsLocal.get(cardId);
     if (!row) return;
-    if ((row.flags & mask) === 0) return;
-    this.ctx.data.setLocalCard(cardId, { ...row, flags: row.flags & ~mask });
+    this.ctx.data.setLocalCard(cardId, { ...row });
   }
+}
+
+/** Find a tile-card (`card_type == 7`) whose hex resolves to
+ *  `(surface, macroZone, q, r)` (q/r as local within-zone coords).
+ *
+ *  Tile-cards may be in any stacked state — `chain_stitch` repacks
+ *  `microZone` to `[position:4 | direction:2 | state:2]` when a
+ *  recipe binds the tile, losing the original (q, r) bits. To find
+ *  the card by hex we walk the parent-pointer chain to the first
+ *  Free ancestor and read (q, r) from THAT card. Orphans (Free
+ *  ancestor reaped before the tile-card demoted) return `null` and
+ *  the caller falls back to zone data — staleness resolves on the
+ *  next server write. See [docs/TILE_AS_CARD.md](../../../../docs/TILE_AS_CARD.md). */
+function findFreeTileCardAt(
+  cardsLocal: Map<number, LocalCard>,
+  surface: number,
+  macroZone: number,
+  q: number,
+  r: number,
+): LocalCard | null {
+  const TILE_CARD_TYPE = 7;
+  for (const row of cardsLocal.values()) {
+    if (row.surface !== surface) continue;
+    if (row.macroZone !== macroZone) continue;
+    const cardType = (row.packedDefinition >> 12) & 0xf;
+    if (cardType !== TILE_CARD_TYPE) continue;
+    const hex = resolveTileCardHex(cardsLocal, row);
+    if (hex === null) continue;
+    if (hex.q !== q || hex.r !== r) continue;
+    return row;
+  }
+  return null;
+}
+
+/** Walk a tile-card's chain to the first Free ancestor and return
+ *  its `microZone`-encoded (q, r). Mirrors
+ *  `LayoutWorld.resolveTileCardHex`. */
+function resolveTileCardHex(
+  cardsLocal: Map<number, LocalCard>,
+  row: LocalCard,
+): { q: number; r: number } | null {
+  let cur: LocalCard | undefined = row;
+  for (let depth = 0; depth < 32 && cur !== undefined; depth++) {
+    if (getStackedState(cur.microZone) === STACKED_LOOSE) {
+      return {
+        q: (cur.microZone >> 5) & 0x7,
+        r: (cur.microZone >> 2) & 0x7,
+      };
+    }
+    cur = cardsLocal.get(cur.microLocation);
+  }
+  return null;
 }
 
 /** Bindings array equality — same lengths, same card_ids in same

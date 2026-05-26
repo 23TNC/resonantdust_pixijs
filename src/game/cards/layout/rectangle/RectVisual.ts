@@ -1,5 +1,6 @@
-import { Container, Graphics, Text } from "pixi.js";
+import { Container, Graphics, Text, type Texture } from "pixi.js";
 import type { CardDefinition } from "../../../definitions/DefinitionManager";
+import { coverMatrix } from "../../../../assets/textures/coverFit";
 import {
   RECT_CARD_HEIGHT,
   RECT_CARD_TITLE_HEIGHT,
@@ -67,6 +68,7 @@ export class RectCardVisual extends Container {
     definition: CardDefinition | null,
     titlePosition: RectCardTitlePosition = "top",
     label?: string,
+    bodyTexture?: Texture | null,
   ): void {
     // style[0] = background fill, style[1] = title bar fill, style[2] = text
     // (and outline). FALLBACK_STYLE follows the same ordering.
@@ -77,7 +79,24 @@ export class RectCardVisual extends Container {
     const titleY = titlePosition === "top" ? 0 : h - RECT_CARD_TITLE_HEIGHT;
 
     this.body.clear();
-    this.body.rect(0, 0, w, h).fill({ color: background });
+    // `def.texture` (when set AND loaded) covers the body via a
+    // uniform-scaled matrix fill — `style[0]` is the fallback when no
+    // texture ref is declared OR the chosen URL is still loading. The
+    // caller resolves the Texture via `LodTextureManager.get` so
+    // the lazy-load + atlas cache flow is unchanged.
+    if (bodyTexture) {
+      // `textureSpace: "global"` — see HexVisual for why. The matrix
+      // is in pixel units; Pixi's default `"local"` mode would
+      // pre-normalise rect bounds to (0,1) and our cover-fit math
+      // would collapse.
+      this.body.rect(0, 0, w, h).fill({
+        texture: bodyTexture,
+        matrix: coverMatrix(bodyTexture, w, h),
+        textureSpace: "global",
+      });
+    } else {
+      this.body.rect(0, 0, w, h).fill({ color: background });
+    }
 
     this.titleBar.clear();
     this.titleBar.rect(0, titleY, w, RECT_CARD_TITLE_HEIGHT).fill({ color: titleBar });

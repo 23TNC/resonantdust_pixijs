@@ -1,8 +1,7 @@
 import type { GameContext } from "../../GameContext";
-import { CharacterSelectScene } from "../select/CharacterSelectScene";
+import { MainScene } from "../main/MainScene";
 import { Scene } from "../Scene";
 import { FormOverlay } from "./FormOverlay";
-import { TitleBar } from "../../game/titlebar/TitleBar";
 
 type Mode = "login" | "create";
 
@@ -38,7 +37,10 @@ function attachEnterHandler(input: HTMLInputElement, onSubmit: () => void): void
  * overlay.
  */
 export class LoginScene extends Scene {
-  private overlay = new FormOverlay();
+  // Built on first `onEnter` so we can hand the scene's
+  // `uiEditMode` through to `DomPanel` — without it, clicking
+  // the form in UI edit mode wouldn't open the settings popup.
+  private overlay!: FormOverlay;
   private mode: Mode = "login";
   private busy = false;
   /** Username carried across mode switches and a successful create
@@ -48,44 +50,31 @@ export class LoginScene extends Scene {
   // gate this on `import.meta.env.DEV` once we have a release
   // build to differentiate.
   private rememberedUsername = "Player1";
-  private titleBar!: TitleBar;
   private ctxRef: GameContext | null = null;
 
   onEnter(ctx: GameContext): void {
     this.ctxRef = ctx;
-    this.titleBar = new TitleBar("");
-    this.root.addChild(this.titleBar.container);
-
+    this.overlay = new FormOverlay(ctx.uiEditMode);
     this.overlay.mount();
-    // Center the form in the space below the title bar. The panel uses
-    // `top: 50%; transform: translate(-50%, -50%)` to center itself in
-    // the host element — shifting top by half the bar height moves the
-    // center point down into the remaining content area.
-    this.overlay.panel.style.top = `calc(50% + ${TitleBar.HEIGHT / 2}px)`;
-
     this.render(ctx);
-
-    // Apply initial bounds so the TitleBar draws on the first frame
-    // before SceneManager fires onResize (which runs after onEnter).
-    this.titleBar.setBounds(0, 0, this.width || window.innerWidth, TitleBar.HEIGHT);
-    this.titleBar.layoutIfDirty();
   }
 
   onExit(): void {
     this.ctxRef = null;
-    this.titleBar.destroy();
     this.overlay.unmount();
   }
 
-  onResize(width: number, _height: number): void {
-    this.titleBar.setBounds(0, 0, width, TitleBar.HEIGHT);
-    this.titleBar.layoutIfDirty();
+  onResize(_width: number, _height: number): void {
+    // No Pixi surface to reflow — the form overlay positions itself
+    // via CSS (`top: 50%; transform: translate(-50%, -50%)`) against
+    // the host element.
   }
 
   update(deltaMS: number): void {
-    const drawCalls = this.ctxRef?.drawCallCounter.readAndReset() ?? 0;
-    this.titleBar.updateStats(deltaMS, drawCalls);
-    this.titleBar.layoutIfDirty();
+    if (this.ctxRef) {
+      const drawCalls = this.ctxRef.drawCallCounter.readAndReset();
+      this.ctxRef.debugPanel.setStats(deltaMS, drawCalls);
+    }
   }
 
   private render(ctx: GameContext): void {
@@ -151,7 +140,7 @@ export class LoginScene extends Scene {
       await ctx.playerSession.claimOrLogin(username);
       // SceneManager.change is fire-and-forget here — once it
       // succeeds, this scene's `onExit` will unmount the overlay.
-      ctx.scenes.change(new CharacterSelectScene()).catch((err) => {
+      ctx.scenes.change(new MainScene()).catch((err) => {
         console.error("[LoginScene] scene change failed", err);
       });
     } catch (err) {
@@ -195,7 +184,7 @@ export class LoginScene extends Scene {
       // Disconnect immediately so the next claimOrLogin (from the
       // Login button) re-establishes the session — keeps the "log
       // out then back in" narrative honest. If reconnecting feels
-      // jarring we can skip straight to GameScene instead.
+      // jarring we can skip straight to MainScene's play mode instead.
       this.rememberedUsername = username;
       this.mode = "login";
       this.busy = false;

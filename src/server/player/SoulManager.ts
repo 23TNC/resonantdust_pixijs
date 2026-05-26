@@ -1,41 +1,37 @@
 import type { Soul } from "../spacetime/bindings/types";
-import type { DataManager } from "../data/DataManager";
+import type { DataManager, LocalCard } from "../data/DataManager";
 import type { PlayerManager } from "./PlayerManager";
+import type { ZoneManager } from "../../game/zones/ZoneManager";
+
+// `is_owned_by_player` is bit 4 of `cards_state` post unified-hold-counts rework.
+const FLAG_OWNED_BY_PLAYER = 1 << 4;
 
 /**
- * Tracks the local player's *active soul* — the in-world avatar
- * carrying positional state plus per-soul stat / fatigue / injury
- * counts.
+ * Tracks the local player's *active soul* — a legacy singleton
+ * concept retained for consumers that still expect "the one soul
+ * the player is controlling": `BlueprintsPanel`, `DragManager`,
+ * `dropResolver`, `CardManager`'s soul-bucket fallback. In the
+ * unified PanelManager model, "active" maps to the soul of the
+ * currently-focused `GameViewPanel`; `MainScene.handlePlay` keeps
+ * this manager in sync by calling `setActiveSoul(soulCardId)`
+ * whenever a game-view panel is opened.
  *
- * Source of the active-soul id: `CharacterSelectScene.handlePlay`
- * calls `setActiveSoul(cardId)` with the soul the user picked. There
- * is no server-side "currently controlled soul" — `Player` rows
- * carry only identity (id + name); each reducer that needs a soul
- * takes one explicitly, and the client-side active soul is purely
- * a UI-layer construct.
+ * `setActiveSoul(id)` installs `subscribeSoul(id)` +
+ * `subscribeCard(id)` + `subscribeSoulPrivate(id)` so the soul row
+ * arrives in `soulsLocal` and listeners (`on(cb)`) get notified.
+ * `GameViewPanel` independently installs the same subs (deduped at
+ * `SubscriptionBase`) so per-panel queries keep working even when
+ * the singleton "active" pointer is stale.
  *
- * Once set, this manager installs `subscribeSoul(id)` +
- * `subscribeCard(id)`, the Soul row flows into `souls.current` /
- * `soulsLocal`, the soul card row flows into `cards.current` /
- * `cardsLocal`, and listeners get a `(soul: Soul | null) => void`
- * callback.
+ * Also owns the player-wide owned-soul inventory tracker
+ * (`startTrackingOwnedSoulInventories`) — refcounts every owned
+ * soul's inventory zone so recipes keep ticking regardless of which
+ * inventory panel is open.
  *
- * Why both subscriptions: the Soul row carries the data we *react*
- * to (position + stats); the Card row is needed for the rect-card
- * visual to render. The world-zone subscription brings both in once
- * the soul anchor is set, but until then these per-id subs are the
- * bootstrap path so we can *learn* where the soul lives.
- *
- * Listeners fire on:
- * - First soul row arrival after `setActiveSoul`.
- * - Any subsequent change to the soul row (position update, stat
- *   change, fatigue tick, etc.).
- * - Soul transitions (subsequent `setActiveSoul` calls).
- *
- * Wired up in `main.ts` after `PlayerManager` and `DataManager`.
- * The soul-tracking subscription is installed when
- * `setActiveSoul(id)` is first called with a non-zero id, and torn
- * down on `dispose` or `setActiveSoul(0)`.
+ * Future consolidation: consumers of `getSoul` / `getSoulId` /
+ * `on` migrate to query `ctx.panels.focused("gameview")`'s soul
+ * directly; this manager then sheds the singleton API and keeps
+ * only the player-wide tracker.
  */
 export class SoulManager {
   /** Current soul `card_id` we're subscribed to, or `null` if no
@@ -51,9 +47,19 @@ export class SoulManager {
   private disposed = false;
   private lastSeenPlayerId: number | null = null;
 
+  /** Refcounted inventory-zone holders for every soul currently owned
+   *  by the local player, while
+   *  `startTrackingOwnedSoulInventories()` is in effect. Keeps every
+   *  soul's recipes processing on this client even when its inventory
+   *  panel isn't open — view-panel `ensureInventory` calls stack on
+   *  top of these via `ZoneManager` refcounts. */
+  private readonly ownedSoulInventoryReleases = new Map<number, () => void>();
+  private unsubOwnedSoulCards: (() => void) | null = null;
+
   constructor(
     private readonly players: PlayerManager,
     private readonly data: DataManager,
+    private readonly zones: ZoneManager,
   ) {
     // Listen for player-id transitions (login / logout / switch).
     // When the active player changes, clear the active soul so a
@@ -111,10 +117,68 @@ export class SoulManager {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.stopTrackingOwnedSoulInventories();
     this.unsubPlayer?.();
     this.unsubPlayer = null;
     this.teardownSoulSubscription();
     this.listeners.clear();
+  }
+
+  /** Begin holding an inventory-zone refcount for every soul the
+   *  local player owns. Must be called AFTER
+   *  `subscribeOwnedCards(playerId)` — soul rows arrive via that
+   *  subscription, and we both walk `cardsLocal` once for what's
+   *  already there and listen for live add/remove. Balanced by
+   *  `stopTrackingOwnedSoulInventories`. Second call is a no-op. */
+  startTrackingOwnedSoulInventories(): void {
+    if (this.disposed || this.unsubOwnedSoulCards) return;
+    const playerId = this.lastSeenPlayerId;
+    if (playerId === null) return;
+
+    for (const row of this.data.cardsLocal.values()) {
+      if (this.isOwnedSoul(row, playerId)) {
+        this.holdInventory(row.cardId);
+      }
+    }
+
+    this.unsubOwnedSoulCards = this.data.subscribeLocalCard((change) => {
+      const pid = this.lastSeenPlayerId;
+      if (pid === null) return;
+      if (change.kind === "added") {
+        if (this.isOwnedSoul(change.row, pid)) this.holdInventory(change.key);
+      } else if (change.kind === "removed") {
+        this.releaseInventory(change.key);
+      } else {
+        const was = this.isOwnedSoul(change.oldRow, pid);
+        const is = this.isOwnedSoul(change.newRow, pid);
+        if (was && !is) this.releaseInventory(change.key);
+        else if (!was && is) this.holdInventory(change.key);
+      }
+    });
+  }
+
+  /** Drop every owned-soul inventory refcount and stop tracking. */
+  stopTrackingOwnedSoulInventories(): void {
+    this.unsubOwnedSoulCards?.();
+    this.unsubOwnedSoulCards = null;
+    for (const release of this.ownedSoulInventoryReleases.values()) release();
+    this.ownedSoulInventoryReleases.clear();
+  }
+
+  private isOwnedSoul(card: LocalCard, playerId: number): boolean {
+    return card.ownerId === playerId && (card.flagsState & FLAG_OWNED_BY_PLAYER) !== 0;
+  }
+
+  private holdInventory(soulCardId: number): void {
+    if (this.ownedSoulInventoryReleases.has(soulCardId)) return;
+    this.ownedSoulInventoryReleases.set(soulCardId, this.zones.ensureInventory(soulCardId));
+  }
+
+  private releaseInventory(soulCardId: number): void {
+    const release = this.ownedSoulInventoryReleases.get(soulCardId);
+    if (!release) return;
+    this.ownedSoulInventoryReleases.delete(soulCardId);
+    release();
   }
 
   /** Active soul transitioned (set via `setActiveSoul` or cleared by

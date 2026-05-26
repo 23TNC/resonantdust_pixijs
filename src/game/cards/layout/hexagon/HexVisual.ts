@@ -1,5 +1,6 @@
-import { Container, Graphics } from "pixi.js";
+import { Container, Graphics, type Texture } from "pixi.js";
 import type { CardDefinition } from "../../../definitions/DefinitionManager";
+import { coverMatrix } from "../../../../assets/textures/coverFit";
 
 const FALLBACK_STYLE = ["#3a3a4a", "#7a7a8a", "#0b1426"] as const;
 
@@ -46,7 +47,7 @@ export class HexCardVisual extends Container {
    * Redraw for the given definition. Safe to call every frame; only
    * re-renders the Graphics.
    */
-  draw(definition: CardDefinition | null): void {
+  draw(definition: CardDefinition | null, bodyTexture?: Texture | null): void {
     const style = definition?.style ?? FALLBACK_STYLE;
     const [primary] = style;
     const cx = this.hexWidth  / 2;
@@ -55,6 +56,23 @@ export class HexCardVisual extends Container {
     const pts = hexPoints(cx, cy, this.radius);
 
     this.bg.clear();
-    this.bg.poly(pts).fill({ color: primary });
+    // Texture-filled body uses cover-fit against the hex's bounding
+    // box; the polygon fill naturally clips the over-covered axis.
+    // Falls back to `style[0]` when `def.texture` is unset or the
+    // chosen URL hasn't loaded yet (caller refreshes on
+    // `lodTextures.onLoad`).
+    if (bodyTexture) {
+      // `textureSpace: "global"` keeps the matrix in shape-pixel
+      // space — Pixi's default `"local"` would normalise the
+      // polygon bounds to (0,1) UV before applying the matrix,
+      // collapsing our pixel-units cover-fit transform.
+      this.bg.poly(pts).fill({
+        texture: bodyTexture,
+        matrix: coverMatrix(bodyTexture, this.hexWidth, this.hexHeight),
+        textureSpace: "global",
+      });
+    } else {
+      this.bg.poly(pts).fill({ color: primary });
+    }
   }
 }

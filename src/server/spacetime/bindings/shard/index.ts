@@ -39,13 +39,16 @@ import BootstrapReducer from "./bootstrap_reducer";
 import ClaimOrLoginReducer from "./claim_or_login_reducer";
 import CreateCharacterReducer from "./create_character_reducer";
 import DeployMiniZoneReducer from "./deploy_mini_zone_reducer";
-import EquipCardReducer from "./equip_card_reducer";
+import EnterPlayerDimensionReducer from "./enter_player_dimension_reducer";
+import ExitPlayerDimensionReducer from "./exit_player_dimension_reducer";
 import GenerateForestTerrainReducer from "./generate_forest_terrain_reducer";
 import MoveSoulReducer from "./move_soul_reducer";
 import PickupMiniZoneReducer from "./pickup_mini_zone_reducer";
+import PlaceCardReducer from "./place_card_reducer";
 import ProposeActionReducer from "./propose_action_reducer";
+import RequestBlueprintReducer from "./request_blueprint_reducer";
+import RequestPlayerBlueprintReducer from "./request_player_blueprint_reducer";
 import SetLastLoginReducer from "./set_last_login_reducer";
-import UnequipCardReducer from "./unequip_card_reducer";
 
 // Import all procedure arg schemas
 
@@ -69,6 +72,9 @@ const tablesSchema = __schema({
       ] },
       { accessor: 'macro_zone', name: 'cards_macro_zone_idx_btree', algorithm: 'btree', columns: [
         'macroZone',
+      ] },
+      { accessor: 'micro_location', name: 'cards_micro_location_idx_btree', algorithm: 'btree', columns: [
+        'microLocation',
       ] },
       { accessor: 'owner_id', name: 'cards_owner_id_idx_btree', algorithm: 'btree', columns: [
         'ownerId',
@@ -143,6 +149,9 @@ const tablesSchema = __schema({
       { accessor: 'macro_zone', name: 'zones_macro_zone_idx_btree', algorithm: 'btree', columns: [
         'macroZone',
       ] },
+      { accessor: 'owner_id', name: 'zones_owner_id_idx_btree', algorithm: 'btree', columns: [
+        'ownerId',
+      ] },
       { accessor: 'valid_at', name: 'zones_valid_at_idx_btree', algorithm: 'btree', columns: [
         'validAt',
       ] },
@@ -163,13 +172,16 @@ const reducersSchema = __reducers(
   __reducerSchema("claim_or_login", ClaimOrLoginReducer),
   __reducerSchema("create_character", CreateCharacterReducer),
   __reducerSchema("deploy_mini_zone", DeployMiniZoneReducer),
-  __reducerSchema("equip_card", EquipCardReducer),
+  __reducerSchema("enter_player_dimension", EnterPlayerDimensionReducer),
+  __reducerSchema("exit_player_dimension", ExitPlayerDimensionReducer),
   __reducerSchema("generate_forest_terrain", GenerateForestTerrainReducer),
   __reducerSchema("move_soul", MoveSoulReducer),
   __reducerSchema("pickup_mini_zone", PickupMiniZoneReducer),
+  __reducerSchema("place_card", PlaceCardReducer),
   __reducerSchema("propose_action", ProposeActionReducer),
+  __reducerSchema("request_blueprint", RequestBlueprintReducer),
+  __reducerSchema("request_player_blueprint", RequestPlayerBlueprintReducer),
   __reducerSchema("set_last_login", SetLastLoginReducer),
-  __reducerSchema("unequip_card", UnequipCardReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

@@ -1,25 +1,46 @@
 import { Container, Sprite } from "pixi.js";
-import type { ObjectTextureManager } from "./textures/ObjectTextureManager";
+import type { LodTextureManager } from "./textures/LodTextureManager";
 
 /**
  * Request to place a single sprite in a managed Container. The
- * manager resolves `(object, size, seed)` to a texture via
- * ObjectTextureManager at sync time, sets the sprite's position and
+ * manager resolves `(name, desiredSize, seed)` to a Texture via
+ * `LodTextureManager` at sync time, sets the sprite's position and
  * scale, and uses `sortKey` as the sprite's zIndex so PixiJS sorts
- * the Container's children at render time.
+ * the Container's children at render time. Sprite scale is
+ * computed from `desiredSize / tex.width × scale` so the rendered
+ * pixel size matches `desiredSize × scale` regardless of which LOD
+ * bucket actually backs the Texture.
  */
 export interface ObjectSpriteRequest {
-  /** Object pack name, e.g. `"tree"`. */
-  object: string;
-  /** Pack folder size — folder is `<size>_<object>_pack/`. */
-  size: number;
-  /** Seed used to pick a specific PNG from the pack. Stable seeds
-   *  (e.g. hashed tile coordinates) give stable picks across syncs. */
+  /** Object name (e.g. `"pine"`). Matches an entry in
+   *  `content/cards/objects.json`; resolves to a `master/<name>/`
+   *  pack-folder. */
+  name: string;
+  /** Target draw size in screen px at `scale: 1.0`. Drives the
+   *  LOD picker: `LodTextureManager` resolves the smallest LOD
+   *  bucket ≥ this. Sprite scale is then
+   *  `(desiredSize / tex.width) × scale`. */
+  desiredSize: number;
+  /** Seed used to pick a specific variant from the object's pack.
+   *  Stable seeds (e.g. hashed tile coordinates) give stable picks
+   *  across syncs. Ignored when `index` is set. */
   seed: number;
+  /** Optional variant pinner — `<index>.png` exactly. Used by
+   *  card-declared centre objects that want a specific variant;
+   *  tile-decoration ring instances leave this unset and pick via
+   *  `seed`. */
+  index?: number;
+  /** Optional faction folder under the object's pack. `undefined`
+   *  resolves to `neutral/`. Used so tile centre objects on
+   *  player-owned dimensions (e.g. the alter at the pocket-
+   *  dimension centre) render in the owner's faction palette. */
+  faction?: string;
   /** Sprite position in the outer Container's coordinate space. */
   x: number;
   y: number;
-  /** Uniform scale applied to both axes. */
+  /** Per-instance scale variance multiplier (usually drawn from
+   *  the aspect's `scale.min..max`). Final sprite scale =
+   *  `(desiredSize / tex.width) × scale`. */
   scale: number;
   /** Becomes the sprite's `zIndex`; lower draws first. The outer
    *  Container has `sortableChildren = true`, so PixiJS handles the
@@ -60,14 +81,14 @@ interface ManagedState {
  * Sprites are pooled per managed Container so steady-state syncs reuse
  * allocations. Requests whose texture hasn't finished loading are
  * silently skipped on the current sync — next sync picks them up once
- * ObjectTextureManager finishes the pack load.
+ * LodTextureManager finishes the load.
  */
 export class ObjectManager {
-  private readonly objectTextures: ObjectTextureManager;
+  private readonly lodTextures: LodTextureManager;
   private readonly state = new WeakMap<Container, ManagedState>();
 
-  constructor(objectTextures: ObjectTextureManager) {
-    this.objectTextures = objectTextures;
+  constructor(lodTextures: LodTextureManager) {
+    this.lodTextures = lodTextures;
   }
 
   /** Create a new managed Container. The caller adds it to the scene;
@@ -120,8 +141,16 @@ export class ObjectManager {
     this.releaseActive(c, s);
 
     for (const req of s.pending) {
-      const tex = this.objectTextures.get(req.object, req.size, req.seed);
-      if (!tex) continue;
+      // `LodTextureManager.get` never returns null — falls through
+      // to a cached LOD substitute or the white 64×64 fallback when
+      // the ideal LOD isn't loaded yet, then upgrades via `onLoad`
+      // on subsequent syncs. Scale math compensates for the
+      // substitute's native size so the rendered px stays
+      // `desiredSize × scale` regardless of which LOD bucket
+      // backs the Texture this frame.
+      const tex = this.lodTextures.get(
+        req.name, req.desiredSize, req.seed, req.index, req.faction,
+      );
       const sp = this.acquire(s);
       sp.texture = tex;
       // Apply anchor here (not just at pool acquisition) so a pooled
@@ -129,7 +158,7 @@ export class ObjectManager {
       // inherit its previous tenant's pivot point.
       sp.anchor.set(req.anchorX, req.anchorY);
       sp.position.set(req.x, req.y);
-      sp.scale.set(req.scale);
+      sp.scale.set((req.desiredSize / tex.width) * req.scale);
       sp.zIndex = req.sortKey;
       c.addChild(sp);
       s.active.push(sp);

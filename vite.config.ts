@@ -9,7 +9,7 @@ export default defineConfig({
       '.resonantdust.com',     // allows all subdomains (recommended)
       'localhost',
       '127.0.0.1'
-    ]
+    ],
   },
   build: {
     sourcemap: false,
@@ -19,4 +19,5 @@ export default defineConfig({
       sourcemap: false,
     },
   },
+
 });

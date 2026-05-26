@@ -11,6 +11,7 @@ import {
 } from "spacetimedb";
 
 export default {
+  clientTimeMs: __t.u64(),
   recipeId: __t.u16(),
   surface: __t.u8(),
   macroZone: __t.u32(),

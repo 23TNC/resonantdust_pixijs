@@ -1,0 +1,173 @@
+Recolor this sprite into the Chord faction palette while preserving the original silhouette, readability, material separation, and lighting structure.
+
+Style requirements:
+
+* Preserve the existing low-poly / flat-shaded appearance.
+* Preserve hard edges and visible polygonal forms.
+* Do not add realism, painterly rendering, gradients, or texture noise.
+* Maintain the original sprite proportions and geometry.
+* Use a limited color palette with strong visual hierarchy.
+* Recolor only; do not redesign the object.
+
+Palette mapping:
+
+* Primary structural surfaces / ceramic armor / ancient machine casings → Ceramic Bone `#D6D0C4`
+* Secondary mechanical surfaces / joints / framework → Gunmetal `#48515C`
+* Worn machinery / exposed utility surfaces / industrial supports → Oxidized Steel `#73808A`
+* Deep interiors / vents / shadows / heavy machinery → Iron Black `#1E2228`
+* Furnaces / warning lights / heat vents / active industrial energy → Ember Orange `#D97A32`
+* Operational systems / authenticated interfaces / active chord technology → Maintenance Teal `#3FA7A3`
+
+Visual goals:
+
+* Solid 0xFF00FF background
+* Ancient industrial technology disguised as fantasy constructs.
+* Sacred-machine aesthetic rather than modern sci-fi robotics.
+* Ceramic armor and monumental infrastructure over sleek metal surfaces.
+* Preserve readable silhouettes and strong polygonal forms.
+* Neutral industrial materials with sparse luminous system accents.
+* The object should feel ancient, durable, and still operational after centuries.
+
+Avoid:
+
+* modern military styling
+* exposed circuitry
+* glossy chrome
+* clean futuristic plastics
+* excessive gradients
+* bloom
+* photorealism
+* noisy textures
+* soft blurry edges
+* overusing teal or orange across the entire sprite
+
+
+Recolor this sprite into the Resonance faction palette while preserving the original silhouette, readability, material separation, and lighting structure.
+
+Style requirements:
+
+* Preserve the existing low-poly / flat-shaded appearance.
+* Preserve hard edges and visible polygonal forms.
+* Do not add realism, painterly rendering, gradients, or texture noise.
+* Maintain the original sprite proportions and geometry.
+* Use a limited color palette with strong visual hierarchy.
+* Recolor only; do not redesign the object.
+
+Palette mapping:
+
+* Primary surfaces → Ivory White `#F4F1E8`
+* Secondary surfaces → Resonant Blue `#495FD2`
+* Sacred trim / ceremonial structures / glyphwork → Pale Gold `#E3C97B`
+* Active resonance energy / holographics / crystal illumination → Spectral Cyan `#63D4FF`
+* Psionic effects / harmonic overload / advanced resonance systems → Arc Light Violet `#9B6BFF`
+* Instability / dangerous resonance / corrupted soul activity → Astral Crimson `#B54A6E`
+
+Visual goals:
+
+* Solid 0xFF00FF background
+* Elegant, luminous, and ancient.
+* Advanced technology disguised as sacred magic.
+* Crystalline and harmonic rather than industrial.
+* Preserve readable silhouettes and strong polygonal forms.
+* Bright ivory foundations with carefully controlled vivid energy accents.
+* The object should feel spiritually active and intelligently constructed.
+
+Avoid:
+
+* industrial grime
+* muddy desaturated blues
+* excessive gradients
+* bloom
+* photorealism
+* noisy textures
+* soft blurry edges
+* rainbow coloration
+* overusing glow colors across the entire sprite
+
+
+Recolor this sprite into the Chorus faction palette while preserving the original silhouette, readability, material separation, and lighting structure.
+
+Style requirements:
+
+* Preserve the existing low-poly / flat-shaded appearance.
+* Preserve hard edges and visible polygonal forms.
+* Do not add realism, painterly rendering, gradients, or texture noise.
+* Maintain the original sprite proportions and geometry.
+* Use a limited color palette with strong visual hierarchy.
+* Recolor only; do not redesign the object.
+
+Palette mapping:
+
+* Primary surfaces → Pale Tissue `#C9B7A2`
+* Secondary surfaces → Flesh Brown `#5C3B2E`
+* Structural organic elements / foliage / adaptive growth → Rot Green `#56734D`
+* Vascular details / exposed active tissue → Vein Crimson `#8C2F39`
+* Bioluminescence / unstable growth / chemical sacs → Toxic Amber `#C89A3D`
+* Corruption / neural overgrowth / rogue influence → Infection Purple `#6A3D6E`
+
+Visual goals:
+
+* Solid 0xFF00FF background
+* Organic but unsettling.
+* Ancient biotech disguised as fantasy.
+* Flesh and growth should feel adaptive rather than clean.
+* Preserve readable silhouettes and strong polygonal forms.
+* Muted base colors with sparse vivid corruption accents.
+* The object should feel partially alive.
+
+Avoid:
+
+* neon saturation across the entire sprite
+* muddy color blending
+* excessive gradients
+* bloom
+* photorealism
+* slime aesthetics
+* excessive gore
+* noisy textures
+* soft blurry edges
+
+
+Recolor this sprite into the Neutral faction palette while preserving the original silhouette, readability, material separation, and lighting structure.
+
+Style requirements:
+
+Preserve the existing low-poly / flat-shaded appearance.
+Preserve hard edges and visible polygonal forms.
+Do not add realism, painterly rendering, gradients, or texture noise.
+Maintain the original sprite proportions and geometry.
+Use a limited color palette with strong visual hierarchy.
+Recolor only; do not redesign the object.
+
+Palette mapping:
+
+Primary structural surfaces / stonework / weathered foundations → Aged Limestone #B9B1A2
+Secondary surfaces / worn wood / utility framework → Driftwood Brown #6B5A49
+Neutral cloth / faded banners / common materials → Dust Khaki #8D846F
+Deep recesses / interiors / shadowed gaps → Charcoal Umber #2B2927
+Natural growth / moss / unmanaged overgrowth → Moss Olive #5F6B4F
+Small utility lights / embers / residual energy / lantern glow → Hearth Amber #C68A45
+
+Visual goals:
+
+* Solid 0xFF00FF background
+Practical settlements and ancient ruins rather than advanced faction identity.
+Materials should feel weathered, functional, and broadly human.
+Primitive industry and scavenged construction rather than sacred machinery or living biomass.
+Preserve readable silhouettes and strong polygonal forms.
+Muted earth tones with restrained warm highlights.
+The object should feel abandoned, reused, or maintained through necessity over generations.
+
+Avoid:
+
+highly saturated faction colors
+advanced sci-fi styling
+glowing magical overload
+glossy surfaces
+ornate ceremonial decoration
+excessive gradients
+bloom
+photorealism
+noisy textures
+soft blurry edges
+overusing amber across the entire sprite
