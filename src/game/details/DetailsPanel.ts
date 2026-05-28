@@ -3,7 +3,7 @@ import { LayoutNode } from "../layout/LayoutNode";
 import type { GameContext } from "../../GameContext";
 import type { CardDefinition } from "../definitions/DefinitionManager";
 import { NOTO_EMOJI_FAMILY } from "../../assets/fonts";
-import { unpackMacroZone, unpackMicroZone } from "../../server/data/packing";
+import { unpackMicroZone } from "../../server/data/packing";
 import localeRaw from "../../content/locales/cards/en.json";
 
 /** Surface threshold above which a card's `(macro_zone, micro_zone)`
@@ -361,10 +361,9 @@ export class DetailsPanel extends LayoutNode {
     // micro_zone packs different bits (loose xy, parent pointers),
     // so the threshold gate keeps the panel quiet for those.
     let worldHex: { q: number; r: number } | null = null;
-    if (row.surface > WORLD_SURFACE_THRESHOLD) {
-      const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
+    if (row.surface > WORLD_SURFACE_THRESHOLD && row.macro.kind === "world") {
       const { localQ, localR } = unpackMicroZone(row.microZone);
-      worldHex = { q: zoneQ + localQ, r: zoneR + localR };
+      worldHex = { q: row.macro.q + localQ, r: row.macro.r + localR };
     }
     this.showByPackedDefinition(row.packedDefinition, ctx, stockValues, worldHex);
   }

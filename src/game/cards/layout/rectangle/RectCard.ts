@@ -31,20 +31,18 @@ import { StateOverlayLayer } from "./StateOverlayLayer";
 import { WorldObjectOverlay } from "../WorldObjectOverlay";
 import {
   MINI_ZONE_LAYER,
-  PLAYER_DIMENSION_LAYER,
-  unpackMacroZone,
   WORLD_LAYER,
 } from "../../../../server/data/packing";
+import { macroOrigin } from "../../../world/worldCoords";
 
 /** True iff `surface` lays cards out on a hex grid (macroZone +
  *  microZone bit fields) rather than bucket-style xy
  *  (microLocation). Mirrors the server's `surface == WORLD_LAYER
- *  || surface == PLAYER_DIMENSION_LAYER || surface == MINI_ZONE_LAYER`
- *  conventions in `place.rs::resolve_loose_target`. */
+ *  || surface == MINI_ZONE_LAYER` conventions in
+ *  `place.rs::resolve_loose_target`. */
 function isHexGridSurface(surface: number): boolean {
   return (
     surface >= WORLD_LAYER ||
-    surface === PLAYER_DIMENSION_LAYER ||
     surface === MINI_ZONE_LAYER
   );
 }
@@ -319,15 +317,15 @@ export class LayoutRectCard extends LayoutCard {
     if (stacked === STACKED_LOOSE) {
       this.setTitlePosition("top");
       if (isHexGridSurface(row.surface)) {
-        // LOOSE on a hex-grid surface (world / player-dim / mini-
-        // zone) — the hex address lives in `macroZone` (chunk q/r)
+        // LOOSE on a hex-grid surface (world / mini-zone) — the hex
+        // address lives in `macroZone` (chunk q/r)
         // + `microZone` (local q/r bit fields, bits 2..=7 since
         // state=Free zeros the low 2 bits). `microLocation` is
         // unused here (it's 0). Position the card's centre on the
         // hex centre (subtract half-w/h to place the top-left
         // corner) so the loose card visually sits on its tile
         // rather than top-left-anchored.
-        const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
+        const { zoneQ, zoneR } = macroOrigin(row.macro);
         const q = zoneQ + ((row.microZone >> 5) & 0x7);
         const r = zoneR + ((row.microZone >> 2) & 0x7);
         const x = WORLD_HEX_RADIUS * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r);
@@ -421,7 +419,7 @@ export class LayoutRectCard extends LayoutCard {
       // anchor, not a chain parent) and is ignored for layout —
       // we don't try to render relative to the host because the
       // host might be a rect, hex, or anything else.
-      const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
+      const { zoneQ, zoneR } = macroOrigin(row.macro);
       const q = zoneQ + ((row.microZone >> 5) & 0x7);
       const r = zoneR + ((row.microZone >> 2) & 0x7);
       const x = WORLD_HEX_RADIUS * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r);

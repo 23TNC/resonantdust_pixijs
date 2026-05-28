@@ -14,7 +14,7 @@ export const Card = __t.object("Card", {
   validAt: __t.u64(),
   cardId: __t.u32(),
   surface: __t.u8(),
-  macroZone: __t.u32(),
+  macroZone: __t.u64(),
   microZone: __t.u8(),
   microLocation: __t.u32(),
   ownerId: __t.u32(),
@@ -54,7 +54,7 @@ export const Placement = __t.object("Placement", {
   parentId: __t.u32(),
   direction: __t.u8(),
   surface: __t.u8(),
-  macroZone: __t.u32(),
+  macroZone: __t.u64(),
   q: __t.u8(),
   r: __t.u8(),
   xy: __t.u32(),
@@ -78,12 +78,8 @@ export type PlayerIdCounter = __Infer<typeof PlayerIdCounter>;
 
 export const PlayerProfile = __t.object("PlayerProfile", {
   playerId: __t.u32(),
-  starterPacks: __t.u64(),
   lifecycleCount: __t.u32(),
   earliestLifecycleExpiresMs: __t.u64(),
-  blueprints0: __t.u64(),
-  blueprintInfo: __t.u8(),
-  soulInfo: __t.u8(),
 });
 export type PlayerProfile = __Infer<typeof PlayerProfile>;
 
@@ -104,7 +100,7 @@ export const Soul = __t.object("Soul", {
   cardId: __t.u32(),
   ownerId: __t.u32(),
   surface: __t.u8(),
-  macroZone: __t.u32(),
+  macroZone: __t.u64(),
   microZone: __t.u8(),
   microLocation: __t.u32(),
   stats: __t.u32(),
@@ -122,7 +118,7 @@ export type SoulPrivate = __Infer<typeof SoulPrivate>;
 
 export const TilePoint = __t.object("TilePoint", {
   surface: __t.u8(),
-  macroZone: __t.u32(),
+  macroZone: __t.u64(),
   microZone: __t.u8(),
 });
 export type TilePoint = __Infer<typeof TilePoint>;
@@ -131,7 +127,7 @@ export const Zone = __t.object("Zone", {
   validAt: __t.u64(),
   zoneId: __t.u32(),
   surface: __t.u8(),
-  macroZone: __t.u32(),
+  macroZone: __t.u64(),
   packedDefinition: __t.u8(),
   ownerId: __t.u32(),
   t0: __t.u64(),

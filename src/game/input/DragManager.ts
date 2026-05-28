@@ -8,11 +8,8 @@ import { canPickUpCard } from "../permissions";
 import { isPositionHeld } from "../actions/chainState";
 import { DragGhost } from "./DragGhost";
 import { DragHoldStore } from "./DragHoldStore";
-import { BlueprintSlot, type BlueprintScope } from "../blueprints/BlueprintSlot";
-import {
-  getPlayerBlueprintCapacity,
-  getSoulBlueprintCapacity,
-} from "../blueprints/blueprintCapacity";
+import { BlueprintSlot } from "../blueprints/BlueprintSlot";
+import { getSoulBlueprintCapacity } from "../blueprints/blueprintCapacity";
 import {
   applySourceGate,
   executeDrop,
@@ -73,14 +70,9 @@ type DragState =
   | {
       kind: "blueprint";
       ghost: DragGhost;
-      /** Stable blueprint id from `content/blueprints/id.json`
-       *  (soul scope) or `content/player_blueprints/id.json`
-       *  (player scope) — the payload sent to the matching
-       *  request_*_blueprint reducer on drop. */
+      /** Stable blueprint id from `content/blueprints/id.json` — the
+       *  payload sent to the `request_blueprint` reducer on drop. */
       blueprintId: number;
-      /** Which scope this drag belongs to. Drives the drop branch
-       *  (cap check + reducer dispatch). */
-      scope: BlueprintScope;
       offsetX: number;
       offsetY: number;
     };
@@ -172,7 +164,6 @@ export class DragManager {
         kind: "blueprint",
         ghost,
         blueprintId: data.hit.blueprintId,
-        scope: data.hit.scope,
         offsetX,
         offsetY,
       };
@@ -253,7 +244,7 @@ export class DragManager {
       return;
     }
     if (state.kind === "blueprint") {
-      this.handleBlueprintDrop(state.blueprintId, state.scope, state.ghost, up);
+      this.handleBlueprintDrop(state.blueprintId, state.ghost, up);
       return;
     }
 
@@ -369,22 +360,15 @@ export class DragManager {
 
   /** Blueprint-drag drop resolution. Destroys the ghost regardless
    *  of outcome and, when the drop lands on a hex-grid view (world
-   *  OR a player dimension), fires the scope-matching reducer:
-   *
-   *  - **soul scope**: `request_blueprint` with the active soul +
-   *    target placement. Server validates soul ownership +
-   *    `SoulPrivate.blueprints_0` discovery + `aspects.builder` cap.
-   *  - **player scope**: `request_player_blueprint` with the caller
-   *    player + target placement. Server validates
-   *    `PlayerProfile.blueprints_0` discovery + `blueprint_info`
-   *    cap.
+   *  or mini-zone), fires `request_blueprint` with the active soul +
+   *  target placement. Server validates soul ownership +
+   *  `SoulPrivate.blueprints_0` discovery + `aspects.builder` cap.
    *
    *  The cap pre-check mirrors what the server gates on, so we skip
    *  a guaranteed-to-fail roundtrip when the local mirror already
    *  shows the cap is full. */
   private handleBlueprintDrop(
     blueprintId: number,
-    scope: BlueprintScope,
     ghost: DragGhost,
     up: PointerEventData,
   ): void {
@@ -393,7 +377,7 @@ export class DragManager {
     if (!layoutWorld) {
       debug.log(
         ["drag"],
-        `[drag] blueprint drop scope=${scope} id=${blueprintId} outside hex-grid view — ignored`,
+        `[drag] blueprint drop id=${blueprintId} outside hex-grid view — ignored`,
         2,
       );
       return;
@@ -412,57 +396,20 @@ export class DragManager {
     const macroZone = packMacroZone(zoneQ, zoneR);
     const microZone = packMicroZone(localQ, localR, STACKED_LOOSE);
 
-    if (scope === "soul") {
-      const soulId = this.ctx.souls.getSoulId();
-      if (soulId === null) {
-        debug.log(
-          ["drag"],
-          `[drag] blueprint drop id=${blueprintId} — no active soul; ignored`,
-          2,
-        );
-        return;
-      }
-      const capacity = getSoulBlueprintCapacity(this.ctx, soulId);
-      if (capacity.available <= 0) {
-        debug.log(
-          ["drag"],
-          `[drag] blueprint drop id=${blueprintId} — soul ${soulId} at cap ` +
-            `(${capacity.active}/${capacity.max}); not sending request`,
-          2,
-        );
-        return;
-      }
+    const soulId = this.ctx.souls.getSoulId();
+    if (soulId === null) {
       debug.log(
         ["drag"],
-        `[drag] request blueprint id=${blueprintId} soul=${soulId} surface=${surface} q=${q} r=${r}`,
-        2,
-      );
-      void this.ctx.reducers.requestBlueprint({
-        soulCardId: soulId,
-        blueprintId,
-        surface,
-        macroZone,
-        microZone,
-        microLocation: 0,
-      });
-      return;
-    }
-
-    // Player scope.
-    const playerId = this.ctx.playerSession.getPlayer()?.playerId ?? null;
-    if (playerId === null) {
-      debug.log(
-        ["drag"],
-        `[drag] player_blueprint drop id=${blueprintId} — no logged-in player; ignored`,
+        `[drag] blueprint drop id=${blueprintId} — no active soul; ignored`,
         2,
       );
       return;
     }
-    const capacity = getPlayerBlueprintCapacity(this.ctx, playerId);
+    const capacity = getSoulBlueprintCapacity(this.ctx, soulId);
     if (capacity.available <= 0) {
       debug.log(
         ["drag"],
-        `[drag] player_blueprint drop id=${blueprintId} — player ${playerId} at cap ` +
+        `[drag] blueprint drop id=${blueprintId} — soul ${soulId} at cap ` +
           `(${capacity.active}/${capacity.max}); not sending request`,
         2,
       );
@@ -470,10 +417,11 @@ export class DragManager {
     }
     debug.log(
       ["drag"],
-      `[drag] request player_blueprint id=${blueprintId} player=${playerId} surface=${surface} q=${q} r=${r}`,
+      `[drag] request blueprint id=${blueprintId} soul=${soulId} surface=${surface} q=${q} r=${r}`,
       2,
     );
-    void this.ctx.reducers.requestPlayerBlueprint({
+    void this.ctx.reducers.requestBlueprint({
+      soulCardId: soulId,
       blueprintId,
       surface,
       macroZone,

@@ -68,11 +68,11 @@ export class WorldPanManager {
   readonly viewportAnchorName: string;
 
   /** Surface the anchor is pinned to. World viewports start at
-   *  `WORLD_LAYER` (the default); player-dim viewports start at
-   *  `PLAYER_DIMENSION_LAYER`. Threaded into every `setAnchor`
-   *  call so the anchor's surface stays stable across drag frames
-   *  — defaulting `setAnchor`'s `surface` arg would clobber a
-   *  dim-anchor's surface back to world on the next pan tick.
+   *  `WORLD_LAYER` (the default); non-world viewports pass their own
+   *  surface. Threaded into every `setAnchor` call so the anchor's
+   *  surface stays stable across drag frames — defaulting
+   *  `setAnchor`'s `surface` arg would clobber a non-world anchor's
+   *  surface back to world on the next pan tick.
    *
    *  Mutable via [`setSurface`] so a panel can be re-pointed at a
    *  different surface (`GameViewPanel.focusAt` calls both

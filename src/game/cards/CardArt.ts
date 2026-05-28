@@ -58,13 +58,11 @@ export interface CardObjectRef {
  * the file whose basename is `<N>.png`; without it, the runtime
  * picks pseudo-randomly per `seed` from the aspect's variant list.
  *
- * Five callers today:
+ * Four callers today:
  *   - `RectCard.applyCardArt` (player's rect cards, in-world + inventory)
  *   - `HexCard.applyCardArt` (player's hex cards)
  *   - `CardFace.draw` (drag ghosts, blueprint previews)
  *   - `BlueprintSlot` (wrench-panel grid)
- *   - per-blueprint visuals in `PackContentsPanel` (character-create
- *     preview)
  *
  * A null `ref` or unknown aspect hides the sprite. An aspect with
  * no LOD files anywhere renders the white fallback (a uniform

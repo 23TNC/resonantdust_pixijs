@@ -1,11 +1,11 @@
 import { Graphics } from "pixi.js";
 import { LayoutNode } from "../layout/LayoutNode";
 import { RECT_CARD_HEIGHT, RECT_CARD_WIDTH } from "../cards/layout/rectangle/RectCard";
-import { BlueprintSlot, type BlueprintScope } from "./BlueprintSlot";
+import { BlueprintSlot } from "./BlueprintSlot";
 import type { Blueprint } from "../definitions/DefinitionManager";
 import { getTextureRegistry } from "../definitions/TextureRegistry";
 import { localPlayerFactionFolder } from "../../server/player/playerFlags";
-import type { Player, Soul } from "../../server/spacetime/bindings/types";
+import type { Soul } from "../../server/spacetime/bindings/types";
 
 const PANEL_BG = 0x1a1f24;
 
@@ -65,20 +65,12 @@ class ScrollbarThumb extends LayoutNode {
 }
 
 /**
- * Blueprint grid — scope-aware. Renders a scrollable grid of
- * `BlueprintSlot`s, one per discovery bit in either:
- *
- * - **Soul scope** (`scope: "soul"`): bits in
- *   `SoulPrivate.blueprints_0`, drives `request_blueprint` reducer
- *   calls in `DragManager` on drop.
- * - **Player scope** (`scope: "player"`): bits in
- *   `PlayerProfile.blueprints_0`, drives `request_player_blueprint`
- *   on drop.
+ * Blueprint grid for the active soul. Renders a scrollable grid of
+ * `BlueprintSlot`s, one per discovery bit in `SoulPrivate.blueprints_0`,
+ * driving `request_blueprint` reducer calls in `DragManager` on drop.
  *
  * Each unlocked slot is a hit target — dragging from a slot fires a
- * craft action via `DragManager`. The slot itself carries its scope
- * tag so the drag handler can dispatch without walking back to the
- * panel.
+ * craft action via `DragManager`.
  *
  * Sizing: the panel adapts to `this.width × this.height`, set by the
  * wrapping `PixiPanel` (in `MainLayout` it lives inside
@@ -89,7 +81,6 @@ class ScrollbarThumb extends LayoutNode {
  */
 export class BlueprintsPanel extends LayoutNode {
   private readonly bg = new Graphics();
-  private readonly scope: BlueprintScope;
 
   // ── Card grid ────────────────────────────────────────────────────
   /** One slot per `blueprints_0` bit. Locked slots collapse their
@@ -99,24 +90,15 @@ export class BlueprintsPanel extends LayoutNode {
    *  `InputManager.hitTestLayout` can route drag-starts on them
    *  through `DragManager`. */
   private readonly slots: BlueprintSlot[] = [];
-  /** Card-id of the active soul (soul scope) — drives which
-   *  `SoulPrivate` row we read for the unlock bits. `null`
-   *  pre-character-select and unused in player scope. */
+  /** Card-id of the active soul — drives which `SoulPrivate` row we
+   *  read for the unlock bits. `null` pre-character-select. */
   private currentSoulId: number | null = null;
-  /** Player-id of the local player (player scope) — drives which
-   *  `PlayerProfile` row we read for the unlock bits. `null`
-   *  pre-login and unused in soul scope. */
-  private currentPlayerId: number | null = null;
   /** Cached soul listener — keeps `currentSoulId` in sync and
-   *  invalidates layout on soul-swap. Only attached in soul scope. */
+   *  invalidates layout on soul-swap. */
   private unsubSoul: (() => void) | null = null;
-  /** Cached player-session listener — keeps `currentPlayerId` in
-   *  sync. Only attached in player scope. */
-  private unsubPlayer: (() => void) | null = null;
-  /** Side-channel `soul_privates` / `player_profiles` handler —
-   *  fires on every insert / update / delete for the scoped table.
-   *  Invalidates when the row for our owner changes; other owners'
-   *  changes are no-ops here. */
+  /** Side-channel `soul_privates` handler — fires on every insert /
+   *  update / delete. Invalidates when the active soul's row changes;
+   *  other souls' changes are no-ops here. */
   private unsubBitfieldTable: (() => void) | null = null;
   /** Cleared once we subscribe to `cardTextures.onArtLoad` — that
    *  callback invalidates the panel so any blueprint slot whose
@@ -148,9 +130,8 @@ export class BlueprintsPanel extends LayoutNode {
   private readonly onScrollPointerMove: (e: PointerEvent) => void;
   private readonly onWheel: (e: WheelEvent) => void;
 
-  constructor(scope: BlueprintScope = "soul") {
+  constructor() {
     super();
-    this.scope = scope;
     // Visibility is owned by the wrapping PixiPanel — we don't hide
     // ourselves on construct any more. The host panel's
     // `applyVisibility` flips our container's `visible` based on
@@ -209,7 +190,6 @@ export class BlueprintsPanel extends LayoutNode {
     this.unsubDragStart?.();
     this.unsubDragStop?.();
     this.unsubSoul?.();
-    this.unsubPlayer?.();
     this.unsubBitfieldTable?.();
     this.unsubArtLoad?.();
     document.removeEventListener("pointermove", this.onScrollPointerMove);
@@ -249,62 +229,36 @@ export class BlueprintsPanel extends LayoutNode {
     // `HexCard` use for the in-world equivalent.
     this.unsubArtLoad = ctx.lodTextures.onLoad(() => this.invalidate());
 
-    if (this.scope === "soul") {
-      // Track active soul → drives which `SoulPrivate` row we read.
-      // `souls.on` fires immediately with the current value, so a
-      // soul already-selected by the time the panel opens is picked
-      // up here without a manual seed.
-      this.unsubSoul = ctx.souls.on((soul: Soul | null) => {
-        const next = soul?.cardId ?? null;
-        if (next === this.currentSoulId) return;
-        this.currentSoulId = next;
-        this.invalidate();
-      });
+    // Track active soul → drives which `SoulPrivate` row we read.
+    // `souls.on` fires immediately with the current value, so a
+    // soul already-selected by the time the panel opens is picked
+    // up here without a manual seed.
+    this.unsubSoul = ctx.souls.on((soul: Soul | null) => {
+      const next = soul?.cardId ?? null;
+      if (next === this.currentSoulId) return;
+      this.currentSoulId = next;
+      this.invalidate();
+    });
 
-      // Re-render on every `soul_privates` event for the active
-      // soul. The row is keyed by `cardId`; events for other souls
-      // fall through as no-ops. Side-channel handler — leaves the
-      // existing `DataManager` mirror handler intact (multiple
-      // handlers fan out through `SubscriptionBase`).
-      this.unsubBitfieldTable = ctx.data.subscriptions.registerTableHandlers(
-        "soul_privates",
-        {
-          onInsert: (row) => {
-            if (row.cardId === this.currentSoulId) this.invalidate();
-          },
-          onUpdate: (_oldRow, newRow) => {
-            if (newRow.cardId === this.currentSoulId) this.invalidate();
-          },
-          onDelete: (row) => {
-            if (row.cardId === this.currentSoulId) this.invalidate();
-          },
+    // Re-render on every `soul_privates` event for the active
+    // soul. The row is keyed by `cardId`; events for other souls
+    // fall through as no-ops. Side-channel handler — leaves the
+    // existing `DataManager` mirror handler intact (multiple
+    // handlers fan out through `SubscriptionBase`).
+    this.unsubBitfieldTable = ctx.data.subscriptions.registerTableHandlers(
+      "soul_privates",
+      {
+        onInsert: (row) => {
+          if (row.cardId === this.currentSoulId) this.invalidate();
         },
-      );
-    } else {
-      // Player scope — track local player, watch `player_profiles`
-      // for the matching row. `playerSession.on` fires immediately
-      // with the cached player when one is set.
-      this.unsubPlayer = ctx.playerSession.on((player: Player | null) => {
-        const next = player?.playerId ?? null;
-        if (next === this.currentPlayerId) return;
-        this.currentPlayerId = next;
-        this.invalidate();
-      });
-      this.unsubBitfieldTable = ctx.data.subscriptions.registerTableHandlers(
-        "player_profiles",
-        {
-          onInsert: (row) => {
-            if (row.playerId === this.currentPlayerId) this.invalidate();
-          },
-          onUpdate: (_oldRow, newRow) => {
-            if (newRow.playerId === this.currentPlayerId) this.invalidate();
-          },
-          onDelete: (row) => {
-            if (row.playerId === this.currentPlayerId) this.invalidate();
-          },
+        onUpdate: (_oldRow, newRow) => {
+          if (newRow.cardId === this.currentSoulId) this.invalidate();
         },
-      );
-    }
+        onDelete: (row) => {
+          if (row.cardId === this.currentSoulId) this.invalidate();
+        },
+      },
+    );
 
     this.inputWired = true;
   }
@@ -377,28 +331,16 @@ export class BlueprintsPanel extends LayoutNode {
     // the pool at full `CARD_COUNT` so we never have to grow it as
     // the player unlocks more.
     const ctx = this.ctx;
-    // Scope-driven bitfield source:
-    //  - soul scope: `SoulPrivate.blueprints0` for the active soul
-    //  - player scope: `PlayerProfile.blueprints0` for the local player
-    // Each row is keyed by its scope's owner id; if the owner
-    // isn't known yet (pre-login / pre-character-select) we render
-    // an empty grid.
+    // Bitfield source: `SoulPrivate.blueprints0` for the active soul.
+    // If no soul is active yet (pre-character-select) we render an
+    // empty grid.
     let blueprintsBits = 0n;
-    if (this.scope === "soul") {
-      if (this.currentSoulId !== null) {
-        const row = ctx.data.soulPrivatesLocal.get(this.currentSoulId);
-        blueprintsBits = row?.blueprints0 ?? 0n;
-      }
-    } else {
-      if (this.currentPlayerId !== null) {
-        const row = ctx.data.playerProfilesLocal.get(this.currentPlayerId);
-        blueprintsBits = row?.blueprints0 ?? 0n;
-      }
+    if (this.currentSoulId !== null) {
+      const row = ctx.data.soulPrivatesLocal.get(this.currentSoulId);
+      blueprintsBits = row?.blueprints0 ?? 0n;
     }
     const lookup = (id: number): Blueprint | null =>
-      this.scope === "soul"
-        ? ctx.definitions.blueprintById(id)
-        : ctx.definitions.playerBlueprintById(id);
+      ctx.definitions.blueprintById(id);
 
     // First pass: count discovered blueprints so the scrollbar /
     // overscroll math sees the right content height *before* we
@@ -431,7 +373,7 @@ export class BlueprintsPanel extends LayoutNode {
       const slot = this.slots[i];
       const bit = 1n << BigInt(i);
       if ((blueprintsBits & bit) === 0n) {
-        slot.setBlueprint(0, 0, this.scope);
+        slot.setBlueprint(0, 0);
         slot.setBounds(0, 0, 0, 0);
         slot.container.visible = false;
         continue;
@@ -444,7 +386,7 @@ export class BlueprintsPanel extends LayoutNode {
       // matches the count from the pre-pass above.
       const bp = lookup(i + 1);
       if (bp === null) {
-        slot.setBlueprint(0, 0, this.scope);
+        slot.setBlueprint(0, 0);
         slot.setBounds(0, 0, 0, 0);
         slot.container.visible = false;
         continue;
@@ -459,7 +401,7 @@ export class BlueprintsPanel extends LayoutNode {
       const row = Math.floor(displayIndex / cols);
       const x = bodyLeft + col * colStep;
       const y = bodyTop + row * ROW_STEP - this.scrollOffset;
-      slot.setBlueprint(bp.id, bp.blueprintPackedDefinition, this.scope);
+      slot.setBlueprint(bp.id, bp.blueprintPackedDefinition);
       slot.setBounds(x, y, CARD_W, CARD_H);
       // One call paints body + title + outline + sprite. If the
       // sprite hasn't loaded yet the face hides its art layer; the

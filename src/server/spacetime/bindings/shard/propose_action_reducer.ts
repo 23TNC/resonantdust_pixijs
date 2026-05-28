@@ -14,7 +14,7 @@ export default {
   clientTimeMs: __t.u64(),
   recipeId: __t.u16(),
   surface: __t.u8(),
-  macroZone: __t.u32(),
+  macroZone: __t.u64(),
   microZone: __t.u8(),
   root: __t.u32(),
   bindings: __t.array(__t.array(__t.u32())),

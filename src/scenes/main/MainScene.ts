@@ -6,7 +6,6 @@ import { LogManager } from "../../game/chat/LogManager";
 import { debug } from "../../debug";
 import { MainManager } from "./MainManager";
 import type { GameContext } from "../../GameContext";
-import type { StarterPack } from "../../game/definitions/DefinitionManager";
 import { DragManager } from "../../game/input/DragManager";
 import { InputManager } from "../../game/input/InputManager";
 import { InventoryPanel } from "../../game/inventory/InventoryPanel";
@@ -23,6 +22,8 @@ import { Scene } from "../Scene";
 
 // `is_owned_by_player` is bit 4 of `cards_state` post unified-hold-counts rework.
 const FLAG_OWNED_BY_PLAYER = 1 << 4;
+// `card_type` nibble (bits 12-15 of packed_definition) for soul cards.
+const SOUL_CARD_TYPE = 6;
 
 /**
  * Single post-login scene. There are no browse/play modes — every
@@ -33,9 +34,9 @@ const FLAG_OWNED_BY_PLAYER = 1 << 4;
  *
  *   - `PanelManager` (registry of open panels — set on ctx first).
  *   - `LayoutManager`, `CardManager` — surfaces + card spawning.
- *   - `MainLayout` — chooser + details + blueprints panels.
- *     Per-soul `InventoryPanel` / `GameViewPanel` are opened on
- *     demand via PanelManager.
+ *   - `MainLayout` — details + blueprints panels. Per-soul
+ *     `InventoryPanel` / `GameViewPanel` are opened on demand via
+ *     PanelManager.
  *   - `InputManager`, `DragManager`, `ActionManager`.
  *   - `MainManager` (30Hz tick), `ParticleManager`, `LogManager`,
  *     `ChatPanel`.
@@ -50,12 +51,10 @@ const FLAG_OWNED_BY_PLAYER = 1 << 4;
  * stay subscribed for the scene's lifetime; SoulManager's player-wide
  * inventory refcount tracker is also enabled here.
  *
- * Scene flow: `LoginScene → MainScene`. The chooser is the entry
- * point. Single-clicking a soul card activates that soul and opens
- * (or focuses) its inventory; clicking the 👁 icon on a soul card
- * snaps the gameview to the soul's tile. Clicking the `+` create-
- * character tile opens `packCreate` → `createCharacter` reducer →
- * new soul row arrives → panels open for it automatically.
+ * Scene flow: `LoginScene → MainScene`. A player's single soul is
+ * auto-spawned at signup, so on login `openDefaultSoulView` picks it
+ * up and opens its game-view automatically. Clicking a soul card in
+ * the world activates that soul and opens (or focuses) its inventory.
  */
 export class MainScene extends Scene {
   // ── Always-on managers ───────────────────────────────────────────
@@ -76,11 +75,10 @@ export class MainScene extends Scene {
    *  Installed in `onEnter`, released in `onExit`. */
   private releaseInputHandlers: (() => void) | null = null;
 
-  // ── Create-character flow (one-shot) ─────────────────────────────
-  /** Set while we're waiting for the server to deliver the newly-
-   *  created soul row. Cleaned up if we leave the scene before it
-   *  arrives. */
-  private pendingCreateUnsub: (() => void) | null = null;
+  /** One-shot watcher that opens the default soul-mode game-view once
+   *  the player's first owned soul arrives on login. Cleared once it
+   *  fires, or in `onExit` if we leave before any soul lands. */
+  private pendingDefaultViewUnsub: (() => void) | null = null;
 
   onEnter(ctx: GameContext): void {
     const player = ctx.playerSession.getPlayer();
@@ -101,11 +99,7 @@ export class MainScene extends Scene {
     this.layoutManager = new LayoutManager();
     ctx.layout = this.layoutManager;
 
-    this.mainLayout = new MainLayout(
-      ctx,
-      player.playerId,
-      (pack) => this.handleCreateCharacter(pack),
-    );
+    this.mainLayout = new MainLayout(ctx, player.playerId);
     this.mainLayout.setContext(ctx);
     this.layoutManager.overlay = this.mainLayout.overlay;
     // ctx.layout.worldView is now set by each `GameViewPanel`'s
@@ -145,10 +139,9 @@ export class MainScene extends Scene {
     this.particleManager = new ParticleManager();
     void this.particleManager.init();
 
-    // Subscribe to the player's owned cards so the chooser sees the
-    // soul list (and any new soul we create during this session
-    // shows up). Stays subscribed for the entire scene lifetime —
-    // browse↔play transitions don't touch this.
+    // Subscribe to the player's owned cards so the player's soul rows
+    // (and any new soul created this session) are available. Stays
+    // subscribed for the entire scene lifetime.
     void ctx.data.subscriptions.subscribeOwnedCards(player.playerId);
 
     // Once owned-cards is in flight, ask SoulManager to hold an
@@ -157,24 +150,17 @@ export class MainScene extends Scene {
     // `ensureInventory` calls stack on the same refs.
     ctx.souls.startTrackingOwnedSoulInventories();
 
-    // Auto-open the player's pocket-dimension view immediately on
-    // scene entry. The dim is the player-wide "home" surface where
-    // all of their characters live; surfacing it on login gives the
-    // player somewhere to look at while they pick a soul. The
-    // chooser's 👁 button retargets this panel (or any open
-    // game-view panel) to a soul's current location on demand.
-    this.mainLayout.openPlayerDimensionPanel();
+    // TEMP (testing): land on a fixed world-origin view — surface 64,
+    // q/r (0, 0) — instead of following the player's soul. The
+    // soul-follow path (`openDefaultSoulView` + `firstOwnedSoul`) is
+    // left intact below; swap this call back to `openDefaultSoulView`
+    // once soul-follow is rewired for the player_soul model.
+    this.mainLayout.openWorldView();
 
     // Same idea for the player-wide inventory bucket — the account-
     // scoped permanent-items bag. Soul-specific inventories open
-    // when the user clicks a soul card in the chooser.
+    // when the user clicks a soul card.
     this.mainLayout.openPlayerInventoryPanel(player.playerId);
-
-    // Location switcher — buttons for the pocket dim plus every
-    // world-layer surface the player's souls currently occupy. Opens
-    // alongside the dim panel so the player has the means to jump
-    // between surfaces visible from the moment they log in.
-    this.mainLayout.openLocationPanel();
 
     this.installInputHandlers(ctx);
   }
@@ -300,8 +286,8 @@ export class MainScene extends Scene {
     this.releaseInputHandlers?.();
     this.releaseInputHandlers = null;
 
-    this.pendingCreateUnsub?.();
-    this.pendingCreateUnsub = null;
+    this.pendingDefaultViewUnsub?.();
+    this.pendingDefaultViewUnsub = null;
 
     if (this.ctxRef) {
       this.ctxRef.souls.stopTrackingOwnedSoulInventories();
@@ -309,11 +295,10 @@ export class MainScene extends Scene {
     }
 
     // Tear down every PanelManager-registered panel first — each
-    // `InventoryPanel` / `GameViewPanel` / `PackCreatePanel` /
-    // `PackPreviewPanel` releases its own zone refcounts, soul
-    // subs, and tick registrations on destroy. Order matters: panel
-    // destructors call into CardManager / MainManager / ZoneManager,
-    // so this has to run while those are still alive.
+    // `InventoryPanel` / `GameViewPanel` releases its own zone
+    // refcounts, soul subs, and tick registrations on destroy. Order
+    // matters: panel destructors call into CardManager / MainManager /
+    // ZoneManager, so this has to run while those are still alive.
     this.ctxRef?.panels?.closeAll();
 
     this.chatPanel.destroy();
@@ -375,61 +360,40 @@ export class MainScene extends Scene {
 
   // ── Create-character flow ────────────────────────────────────────
 
-  /** Create-character callback from the `packCreate` panel. Fires
-   *  `createCharacter` and watches `cardsLocal` for the new soul row
-   *  to arrive; on arrival, closes the create + preview panels and
-   *  opens inventory + game-view panels for the new soul. The
-   *  watcher is installed BEFORE the reducer call so the new soul
-   *  can't arrive between submit and listener install. */
-  private handleCreateCharacter(pack: StarterPack): void {
-    if (!this.ctxRef) return;
-    const ctx = this.ctxRef;
-
-    // Snapshot existing soul card IDs so we can identify the new one.
-    const priorSoulIds = new Set<number>();
-    for (const card of ctx.data.cardsLocal.values()) {
-      if (card.ownerId === this.playerId && (card.flagsState & FLAG_OWNED_BY_PLAYER) !== 0) {
-        priorSoulIds.add(card.cardId);
-      }
-    }
-
-    let transitioned = false;
-    let unsubNewSoul: (() => void) | null = null;
-    unsubNewSoul = ctx.data.subscribeLocalCard((change) => {
-      if (transitioned || change.kind !== "added") return;
-      const card = change.row;
-      if (card.ownerId !== this.playerId) return;
-      if ((card.flagsState & FLAG_OWNED_BY_PLAYER) === 0) return;
-      if (priorSoulIds.has(card.cardId)) return;
-      transitioned = true;
-      unsubNewSoul?.();
-      unsubNewSoul = null;
-      this.pendingCreateUnsub = null;
-      // Close the create / preview panels and open the new soul's
-      // inventory + game-view. PanelManager.ensure dedupes if the
-      // panels somehow already exist.
-      ctx.panels?.close("packPreview");
-      ctx.panels?.close("packCreate");
-      ctx.souls.setActiveSoul(card.cardId);
-      this.mainLayout.openInventoryPanel(card.cardId);
-      this.mainLayout.openGameViewPanel(card.cardId);
+  /** Open a soul-mode game-view on the player's first owned soul so
+   *  login lands on that soul's world location. Opens immediately if
+   *  a soul is already present; otherwise watches `cardsLocal` and
+   *  opens once the first owned soul arrives. One-shot — unsubscribes
+   *  after the first open, and skips if a game-view is already open
+   *  (so it never stomps a soul the user explicitly picked). */
+  private openDefaultSoulView(ctx: GameContext): void {
+    const tryOpen = (): boolean => {
+      if (ctx.panels?.focused("gameview") instanceof GameViewPanel) return true;
+      const soulId = this.firstOwnedSoul(ctx);
+      if (soulId === null) return false;
+      this.mainLayout.openGameViewPanel(soulId);
+      return true;
+    };
+    if (tryOpen()) return;
+    let unsub: (() => void) | null = null;
+    unsub = ctx.data.subscribeLocalCard(() => {
+      if (!tryOpen()) return;
+      unsub?.();
+      unsub = null;
+      this.pendingDefaultViewUnsub = null;
     });
-    this.pendingCreateUnsub = unsubNewSoul;
+    this.pendingDefaultViewUnsub = unsub;
+  }
 
-    debug.log(
-      ["spacetime"],
-      `[MainScene] create character: pack id=${pack.id} soul=${pack.soul} packId=${pack.packId} contents=[${pack.contents.map((c) => `${c.cardKey}×${c.count}`).join(", ")}]`,
-      4,
-    );
-
-    void ctx.reducers.createCharacter({ starterPackId: pack.id })
-      .catch((err) => {
-        if (!transitioned) {
-          unsubNewSoul?.();
-          unsubNewSoul = null;
-          this.pendingCreateUnsub = null;
-        }
-        debug.log(["spacetime"], `[MainScene] createCharacter reducer failed: ${err}`, 4);
-      });
+  /** First card the local player owns that is a soul (owned-by-player
+   *  flag + soul card_type). `null` when none have synced yet. */
+  private firstOwnedSoul(ctx: GameContext): number | null {
+    for (const row of ctx.data.cardsLocal.values()) {
+      if (row.ownerId !== this.playerId) continue;
+      if ((row.flagsState & FLAG_OWNED_BY_PLAYER) === 0) continue;
+      if (((row.packedDefinition >> 12) & 0xf) !== SOUL_CARD_TYPE) continue;
+      return row.cardId;
+    }
+    return null;
   }
 }

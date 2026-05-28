@@ -63,8 +63,8 @@ const I16_MAX = 0x7fff;
 export type DropIntent =
   | { kind: "stack";     target: Card;   direction: StackDirection }
   /** `surface` is the destination hex-grid layer — `WORLD_LAYER`
-   *  for the overworld, `PLAYER_DIMENSION_LAYER` for a player's
-   *  pocket dim. The LayoutWorld the cursor landed on supplies it. */
+   *  for the overworld, `MINI_ZONE_LAYER` for a deployed mini-zone.
+   *  The LayoutWorld the cursor landed on supplies it. */
   | { kind: "world";     q: number;      r: number; surface: number }
   | { kind: "loose";     x: number;      y: number }
   /** `soulCardId` is the inventory bucket's macro_zone — the soul's
@@ -126,7 +126,7 @@ export function resolveRectDrop(c: DropContext): DropIntent {
     if (direct !== null) return direct;
   }
 
-  // 2. Hex-grid view drop (world OR player dim — picked from the
+  // 2. Hex-grid view drop (world or mini-zone — picked from the
   // LayoutWorld actually under the cursor).
   const worldCoord = resolveWorldDropCoords(c);
   if (worldCoord) {
@@ -150,7 +150,7 @@ export function resolveRectDrop(c: DropContext): DropIntent {
 
   // 2.5. Inventory-panel drop (soul or player inventory) — picked
   // from the LayoutInventory under the cursor. Lets a card move
-  // from the dim view into the player inventory bag, etc.
+  // from a world view into the player inventory bag, etc.
   const invIntent = resolveInventoryDropTarget(c);
   if (invIntent !== null) return invIntent;
 
@@ -363,11 +363,10 @@ function resolveFallback(c: DropContext): DropIntent {
   }
   // Only accept loose-in-own-zone when the cursor actually landed
   // on a valid drop target — a `LayoutInventory`, `LayoutWorld`, or
-  // `LayoutCard`. Dropping on the chooser / blueprints / details /
-  // packCreate / packPreview panels would otherwise produce a
-  // loose position relative to the source inventory that sits
-  // visually outside the panel; reject instead so the card
-  // snap-backs to its original spot.
+  // `LayoutCard`. Dropping on the blueprints / details panels would
+  // otherwise produce a loose position relative to the source
+  // inventory that sits visually outside the panel; reject instead
+  // so the card snap-backs to its original spot.
   if (!isDroppableHit(c.up.hit)) {
     return {
       kind: "rejected",
@@ -386,7 +385,7 @@ function resolveFallback(c: DropContext): DropIntent {
  *  (inclusive) is a `LayoutInventory`, `LayoutWorld`, or `LayoutCard`
  *  — the three node types the drop resolver treats as legitimate
  *  drop targets. Used to reject drops that land on chrome panels
- *  (chooser, packCreate, packPreview, blueprints, details). */
+ *  (blueprints, details). */
 function isDroppableHit(hit: LayoutNode | null): boolean {
   let n: LayoutNode | null = hit;
   while (n) {
@@ -508,7 +507,7 @@ function wouldExceedChainDepth(
  *
  *  - Explicit hit on a `LayoutWorld` (empty grid area). With
  *    multiple game-view panels open (e.g. the overworld view + a
- *    player-dim view), we use the SPECIFIC LayoutWorld the cursor
+ *    mini-zone view), we use the SPECIFIC LayoutWorld the cursor
  *    landed on — not the singleton `ctx.layout.worldView`. That
  *    pointer is last-write-wins and may not match the panel the
  *    user is hovering.
@@ -551,7 +550,7 @@ function findLayoutWorldInChain(hit: LayoutNode | null): LayoutWorld | null {
  *  for further state-1 chain members) over a hex occupant.
  *  `excludeId` excludes the dragged card itself. `surface` is the
  *  layer the LayoutWorld under the cursor renders — `WORLD_LAYER`
- *  for the overworld, `PLAYER_DIMENSION_LAYER` for a player dim. */
+ *  for the overworld, `MINI_ZONE_LAYER` for a deployed mini-zone. */
 function findCardAtTile(
   ctx: GameContext,
   q: number,
@@ -707,8 +706,7 @@ function buildPlacement(
     }
     case "world": {
       // Convert global (q, r) → (macroZone, localQ, localR). Same
-      // chunk math regardless of whether this is `WORLD_LAYER` or
-      // `PLAYER_DIMENSION_LAYER` — both use 8×8-chunk hex grids.
+      // chunk math for any 8×8-chunk hex-grid surface (world, etc.).
       const zoneQ = Math.floor(intent.q / ZONE_SIZE) * ZONE_SIZE;
       const zoneR = Math.floor(intent.r / ZONE_SIZE) * ZONE_SIZE;
       const localQ = intent.q - zoneQ;

@@ -113,17 +113,6 @@ export const WORLD_LAYER = 64;
  *  `spacetime/server/spacetimedb/src/packed.rs`. */
 export const MINI_ZONE_LAYER = 63;
 
-/** Surface band for a player's private pocket dimension — a 2×2
- *  grid of `Zone`s each player gets at signup, where all of that
- *  player's souls can visit and permanent state lives. Unlike
- *  other surfaces, `macro_zone` (packed chunk coords) is NOT a
- *  unique container address here — multiple players' Zones
- *  coexist at the same `macro_zone` and are discriminated by
- *  `Zone.owner_id == player_id`. Cards on this surface follow the
- *  same discriminator. Client subscriptions must include the
- *  owner filter to scope to the local player's dim. */
-export const PLAYER_DIMENSION_LAYER = 62;
-
 /** Surface band for a pocket dimension — a private interior
  *  carried by an anchor card. `macro_zone` is the anchor's
  *  `card_id`, same convention as `MINI_ZONE_LAYER`. */
@@ -184,6 +173,48 @@ export function unpackMacroZone(macroZone: number): {
   const chunkQ = rawQ >= 0x8000 ? rawQ - 0x10000 : rawQ;
   const chunkR = rawR >= 0x8000 ? rawR - 0x10000 : rawR;
   return { zoneQ: chunkQ * ZONE_SIZE, zoneR: chunkR * ZONE_SIZE };
+}
+
+/** Decoded macro-location — what the client carries on a row instead of the
+ *  packed `macro_zone`. On world surfaces (`surface >= WORLD_LAYER`) it's the
+ *  zone's tile-origin hex coords `(q, r)` (multiples of `ZONE_SIZE`, signed);
+ *  on every other surface band `macro_zone` is a bare container id (soul /
+ *  player / anchor `card_id`). Carrying the decoded form means the u64 wire
+ *  composite never lives client-side — the next phase's upper-32-bit axis
+ *  becomes an additive field here, not a `bigint` migration. */
+export type MacroLoc =
+  | { kind: "world"; q: number; r: number }
+  | { kind: "container"; id: number };
+
+/** Decode the wire `macro_zone` (a `u64` → SDK `bigint`) into a `MacroLoc`,
+ *  dispatching on surface band. World surfaces unpack the packed
+ *  `(chunkQ | chunkR)` low 32 bits into tile-origin coords; non-world
+ *  surfaces carry the bare id (a u32, fits in `number`). The high 32 bits are
+ *  reserved (zero today) — we read only the low 32. */
+export function decodeMacroLoc(macroZone: bigint, surface: number): MacroLoc {
+  if (surface >= WORLD_LAYER) {
+    const { zoneQ, zoneR } = unpackMacroZone(Number(macroZone & 0xffffffffn));
+    return { kind: "world", q: zoneQ, r: zoneR };
+  }
+  return { kind: "container", id: Number(macroZone) };
+}
+
+/** Inverse of [`decodeMacroLoc`] — re-pack a `MacroLoc` into the low-32-bit
+ *  `macro_zone` number (world: packed chunk coords; container: the id). */
+export function encodeMacroZone(macro: MacroLoc): number {
+  return macro.kind === "world" ? packMacroZone(macro.q, macro.r) : macro.id;
+}
+
+/** The two macro-location fields a client row carries: the packed
+ *  `macroZone` (the location *key* — used directly for equality, `ZoneId`
+ *  keying, subscription SQL, and reducer args) and the decoded `macro` (the
+ *  *coords* — used directly for rendering / pathfinding). A row holds **both**
+ *  so reads never pack or unpack. This is the single write helper: any code
+ *  constructing a row from a `MacroLoc` calls it so the two stay in lockstep
+ *  — encoding happens here and nowhere else. (Copies between rows just carry
+ *  both fields across.) */
+export function macroFields(macro: MacroLoc): { macroZone: number; macro: MacroLoc } {
+  return { macroZone: encodeMacroZone(macro), macro };
 }
 
 /** Pack `(localQ, localR, stackedState)` into a u8 microZone under the

@@ -27,14 +27,9 @@ import init, {
   recipeById as wasmRecipeById,
   recipeByKey as wasmRecipeByKey,
   recipesAll as wasmRecipesAll,
-  starterPacksForSoul as wasmStarterPacksForSoul,
-  starterBlueprintsForSoul as wasmStarterBlueprintsForSoul,
   blueprintById as wasmBlueprintById,
   blueprintByKey as wasmBlueprintByKey,
   allBlueprints as wasmAllBlueprints,
-  playerBlueprintById as wasmPlayerBlueprintById,
-  playerBlueprintByKey as wasmPlayerBlueprintByKey,
-  allPlayerBlueprints as wasmAllPlayerBlueprints,
   aspectValue as wasmAspectValue,
 } from "../../content/pkg/resonantdust_content";
 import {
@@ -77,21 +72,6 @@ export interface AspectInfo {
   /** Section the entry was declared under — drives details-panel
    *  visibility. See [`AspectCategory`]. */
   category: AspectCategory;
-}
-
-export interface StarterPackItem {
-  cardKey: string;
-  packedDefinition: number;
-  count: number;
-}
-
-/** A starter pack offered to a player creating a character of a
- *  given soul. Mirrors `StarterPack` from the content crate. */
-export interface StarterPack {
-  id: number;
-  soul: string;
-  packId: string;
-  contents: readonly StarterPackItem[];
 }
 
 /** A blueprint catalog entry. Mirrors `Blueprint` from the content
@@ -523,24 +503,6 @@ export class DefinitionManager {
     return null;
   }
 
-  /** All starter packs registered for the given soul card key
-   *  (e.g. `"human"`), in stable-id order. Empty array for unknown
-   *  soul keys — there's no enum of valid souls on the client, so
-   *  callers pass whatever key the soul-create panel offers. */
-  starterPacksForSoul(soul: string): StarterPack[] {
-    const raw = wasmStarterPacksForSoul(soul) as unknown;
-    return raw as StarterPack[];
-  }
-
-  /** Stable blueprint ids granted to a player creating a character of
-   *  the given soul (sourced from the soul's `"blueprints"` array in
-   *  `starter_packs/data/*.json`). Resolve each id to a `Blueprint`
-   *  via `blueprintById`. Empty array when the soul declares none. */
-  starterBlueprintsForSoul(soul: string): number[] {
-    const raw = wasmStarterBlueprintsForSoul(soul) as unknown;
-    return Array.from(raw as ArrayLike<number>);
-  }
-
   /** Look up a blueprint by its stable u16 id. `null` for unknown
    *  ids and for `BLUEPRINT_NONE` (id 0). */
   blueprintById(id: number): Blueprint | null {
@@ -559,28 +521,6 @@ export class DefinitionManager {
    *  wrench panel to enumerate the catalog for display. */
   allBlueprints(): Blueprint[] {
     const raw = wasmAllBlueprints() as unknown;
-    return raw as Blueprint[];
-  }
-
-  /** Player-scope counterpart of [`blueprintById`]. Looks up a
-   *  player-scoped blueprint (registered from
-   *  `content/player_blueprints/data/`) by its stable u16 id.
-   *  `null` for unknown ids and for `BLUEPRINT_NONE` (id 0). */
-  playerBlueprintById(id: number): Blueprint | null {
-    const raw = wasmPlayerBlueprintById(id) as unknown;
-    return raw === null || raw === undefined ? null : (raw as Blueprint);
-  }
-
-  /** Player-scope counterpart of [`blueprintByKey`]. */
-  playerBlueprintByKey(key: string): Blueprint | null {
-    const raw = wasmPlayerBlueprintByKey(key) as unknown;
-    return raw === null || raw === undefined ? null : (raw as Blueprint);
-  }
-
-  /** Every registered player-scope blueprint in stable-id order.
-   *  Drives the dna-panel's catalog enumeration. */
-  allPlayerBlueprints(): Blueprint[] {
-    const raw = wasmAllPlayerBlueprints() as unknown;
     return raw as Blueprint[];
   }
 

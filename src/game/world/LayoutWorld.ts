@@ -5,10 +5,13 @@ import type { LayoutManager } from "../layout/LayoutManager";
 import { debug } from "../../debug";
 import { WORLD_HEX_HEIGHT, WORLD_HEX_RADIUS, WORLD_HEX_WIDTH } from "./hexSize";
 import { getTextureRegistry, type TextureDefinition } from "../definitions/TextureRegistry";
-import { decodeZoneTiles, unpackMacroZone, WORLD_LAYER } from "./worldCoords";
+import type { CardDefinition } from "../definitions/DefinitionManager";
+import { decodeZoneTiles, macroOrigin, WORLD_LAYER } from "./worldCoords";
 import { unpackZoneId } from "../../server/data/packing";
 import { getStackedState, STACKED_LOOSE } from "../cards/cardData";
 import { localPlayerFactionFolder } from "../../server/player/playerFlags";
+import type { LocalCard } from "../../server/data/DataManager";
+import type { ObjectSpriteRequest } from "../../assets/ObjectManager";
 
 /** `card_type` value reserved for tile-cards (promoted zone tiles).
  *  Mirrors the constant in `gc.rs` / `world_gen.rs` /
@@ -18,6 +21,32 @@ import { localPlayerFactionFolder } from "../../server/player/playerFlags";
 const TILE_CARD_TYPE = 7;
 
 const BG_COLOR = "#0d1218";
+
+/** Default number of tile-rings kept built beyond the visible rect.
+ *  The buffer absorbs pan latency: when the integer hex anchor
+ *  crosses a boundary the newly-revealed row was already built (it
+ *  was off-screen margin), so only the new *outer* margin row is
+ *  fresh — and it has ~a hex-width of pan slack before it becomes
+ *  visible. Exposed as `LayoutWorld.marginRings` so 1 / 3 can be
+ *  tried at runtime (a future settings knob can write to it). */
+const DEFAULT_MARGIN_RINGS = 2;
+
+/** Max tiles built per `layout()` pass while draining the build
+ *  queue. Spreads a large fill (scene enter, teleport, surface swap)
+ *  or a fresh margin edge over several frames instead of hitching on
+ *  one. Edge rows land off-screen, so the spread is invisible. */
+const BUILD_BUDGET = 12;
+
+/** Render signature for a tile — every input that changes its drawn
+ *  output (packed def + the two stock counters + which source the
+ *  data came from, since that drives the debug ring). A data update
+ *  that leaves this unchanged is a no-op the retained renderer skips. */
+function tileSig(
+  entry: { packed: number; stock0: number; stock1: number; source: "card" | "zone" } | null,
+): string {
+  if (entry === null) return "none";
+  return `${entry.source}:${entry.packed}:${entry.stock0}:${entry.stock1}`;
+}
 
 /** Number of decorative sprites placed per tile that has an object
  *  aspect. >1 fans them around the tile centre in a ring. */
@@ -175,6 +204,12 @@ class WorldCardSurface extends LayoutNode {
  */
 export class LayoutWorld extends LayoutNode {
   private readonly bg = new Graphics();
+  /** Holds the tile + object + debug layers in stable world-pixel
+   *  space and is itself positioned at `worldToLocal(0, 0)` every
+   *  pass — so a pan is a single transform write on this container,
+   *  not a per-sprite reposition. Mirrors how `worldCardSurface`
+   *  already carries cards. */
+  private readonly panLayer = new Container();
   private readonly tileLayer = new Container();
   private readonly objectContainer: Container;
   private readonly worldCardSurface = new WorldCardSurface();
@@ -197,8 +232,66 @@ export class LayoutWorld extends LayoutNode {
   get worldOverlayContainer(): Container {
     return this.worldCardSurface.container;
   }
+  /** Recycled tile (hex-body) sprites. One per built tile while
+   *  active; returned here on drop so a tile re-entering the active
+   *  rect reuses the allocation. */
   private readonly spritePool: Sprite[] = [];
-  private readonly activeSprites: Sprite[] = [];
+
+  /** Currently-built tiles, keyed by `"${q},${r}"`. The retained set:
+   *  a tile's sprites are created once on enter, released on exit, and
+   *  re-rendered in place only when `sig` (its packed def + stocks +
+   *  source) changes. `cardSourced` drives the debug ring. */
+  private readonly retained = new Map<
+    string,
+    { q: number; r: number; tileSprite: Sprite; sig: string; cardSourced: boolean }
+  >();
+
+  /** Keys currently inside the active rect (visible + margin). The
+   *  drain loop checks this so a tile that left the rect before it
+   *  was built is skipped. */
+  private activeKeys = new Set<string>();
+
+  /** Tiles inside the active rect not yet built, ordered closest-to-
+   *  centre first. Drained `BUILD_BUDGET` per pass; `layout()` returns
+   *  `true` while non-empty so it keeps running until drained. */
+  private buildQueue: { q: number; r: number; key: string }[] = [];
+
+  /** Number of tile-rings kept built beyond the visible rect. See
+   *  `DEFAULT_MARGIN_RINGS`. Public + mutable so the buffer size can
+   *  be tuned at runtime. */
+  marginRings = DEFAULT_MARGIN_RINGS;
+
+  /** `(q,r)` of the integer hex the viewport last reconciled around,
+   *  plus the rect dims at that time. A change in any of these means
+   *  the active rect shifted (boundary cross / resize) → re-diff.
+   *  `NaN` forces the first pass to reconcile. */
+  private lastBaseQ = NaN;
+  private lastBaseR = NaN;
+  private diffW = NaN;
+  private diffH = NaN;
+
+  /** Last applied background size — redraw `bg` only when it changes. */
+  private lastW = NaN;
+  private lastH = NaN;
+
+  /** Local-player faction folder applied to the built tiles. A change
+   *  (login resolving) invalidates every baked centre/body texture
+   *  choice → full rebuild. */
+  private lastTileFaction: string | undefined = undefined;
+
+  /** Set when a LOD pack lands (`lodTextures.onLoad`); the next pass
+   *  re-resolves textures for the active tiles (bounded) instead of a
+   *  full grid rebuild. */
+  private texturesDirty = false;
+
+  /** Set when the retained set must be torn down and rebuilt wholesale
+   *  (surface swap, faction change). Honoured at the top of `layout()`. */
+  private rebuildPending = false;
+
+  /** `(q,r)` → tile-card row index. Replaces the per-tile full
+   *  `cardsLocal` scan in `tileViewAt`; rebuilt from the cards
+   *  subscription whenever a tile-card row changes. */
+  private readonly tileCardIndex = new Map<string, LocalCard>();
 
   /** Flat tile cache keyed by `"${q},${r}"`. Each entry carries the
    *  packed definition id plus the two row-mutable stock counters
@@ -229,10 +322,9 @@ export class LayoutWorld extends LayoutNode {
   readonly viewportAnchorName: string;
 
   /** Surface this view renders. World panels start at `WORLD_LAYER`
-   *  (the default); player-dim panels start at
-   *  `PLAYER_DIMENSION_LAYER`. Mutable via [`setSurface`] so a
-   *  single panel can be re-pointed at a different surface
-   *  (e.g., the 👁-on-soul jump in `OwnedCardsPanel`). Used to
+   *  (the default); non-world panels pass their own surface. Mutable
+   *  via [`setSurface`] so a single panel can be re-pointed at a
+   *  different surface (e.g. a soul-jump affordance). Used to
    *  filter incoming card/zone rows to this view's surface, and to
    *  gate `worldCardSurface` registration so each LayoutWorld only
    *  registers itself for zones on its own layer. */
@@ -252,6 +344,12 @@ export class LayoutWorld extends LayoutNode {
     surface: number = WORLD_LAYER,
   ) {
     super();
+    // Seed our own context immediately. The constructor runs tile-cache
+    // hydration (`rebuildTileCardIndex`) before this node is attached to
+    // a parent, so the parent-chain `ctx` getter has nothing to resolve
+    // against yet. Setting `_localCtx` here makes `this.ctx` available
+    // during construction; descendants still inherit it once attached.
+    this.setContext(ctx);
     this.viewportAnchorName = viewportAnchorName;
     this.surface = surface;
     this.layoutManagerRef = layoutManager;
@@ -269,9 +367,14 @@ export class LayoutWorld extends LayoutNode {
     // calls; the over-draw cost of letting world bleed get painted
     // and then overwritten is cheaper.
     this.objectContainer = ctx.objects.createContainer();
+    // bg is a fixed full-rect backdrop (does NOT pan). tileLayer,
+    // objectContainer and debugOverlay live inside panLayer in stable
+    // world-pixel space; panLayer is repositioned to worldToLocal(0,0)
+    // each pass so the whole grid pans by one transform write.
+    this.panLayer.addChild(this.tileLayer);
+    this.panLayer.addChild(this.objectContainer);
     this.container.addChild(this.bg);
-    this.container.addChild(this.tileLayer);
-    this.container.addChild(this.objectContainer);
+    this.container.addChild(this.panLayer);
 
     // Wire worldCardSurface into the LayoutNode tree manually — we
     // want its PIXI container to sit on top of tileLayer for z-order,
@@ -281,18 +384,18 @@ export class LayoutWorld extends LayoutNode {
     this.children.push(this.worldCardSurface);
     this.container.addChild(this.worldCardSurface.container);
 
-    // Debug overlay on top of everything except drag previews
-    // (MainLayout's overlay still wins via its high zIndex). Stays
-    // hit-transparent — it's a raw Graphics, not a LayoutNode, so
-    // hit-test ignores it entirely.
-    this.container.addChild(this.debugOverlay);
+    // Debug overlay rides inside panLayer (world-pixel space) so its
+    // tile rings pan with the grid. Repainted from the retained set
+    // whenever tiles change. Stays hit-transparent — it's a raw
+    // Graphics, not a LayoutNode, so hit-test ignores it entirely.
+    this.panLayer.addChild(this.debugOverlay);
 
     // Register the card surface for every zone on THIS view's
     // surface that the ZoneManager tracks now and as zones enter /
     // leave "active" tier. Hex cards landing on these zones resolve
     // their parent surface via `LayoutManager.surfaceFor(zoneId)`.
     // The `=== this.surface` check means a world LayoutWorld and a
-    // player-dim LayoutWorld can coexist without stealing each
+    // mini-zone LayoutWorld can coexist without stealing each
     // other's zone registrations.
     const registerZone = (zoneId: number): void => {
       if (unpackZoneId(zoneId).layer === this.surface) {
@@ -320,7 +423,13 @@ export class LayoutWorld extends LayoutNode {
     // first sync after a fresh `get` returns null until the pack lands
     // in the atlas; this hook ensures we run a second sync once it's
     // ready instead of waiting for a pan to invalidate us.
-    this.unsubObjectLoad = ctx.lodTextures.onLoad(() => this.invalidate());
+    // A LOD pack landed. Don't rebuild the grid — flag a coalesced
+    // texture re-resolve for the active tiles, handled once on the
+    // next pass however many loads fired between frames.
+    this.unsubObjectLoad = ctx.lodTextures.onLoad(() => {
+      this.texturesDirty = true;
+      this.invalidate();
+    });
 
     // Expose the per-card "in-front objects" snapshot service for hex
     // cards on world surfaces. Cards call this when their (q, r)
@@ -345,7 +454,7 @@ export class LayoutWorld extends LayoutNode {
     };
 
     // Hydrate tile cache from zones already in `data.zones.current`.
-    // Filter by surface so a player-dim LayoutWorld doesn't ingest
+    // Filter by surface so a mini-zone LayoutWorld doesn't ingest
     // world tiles (and vice versa) — necessary now that multiple
     // surfaces can have Zone rows in `current` simultaneously.
     for (const zone of ctx.data.zones.current.values()) {
@@ -358,6 +467,10 @@ export class LayoutWorld extends LayoutNode {
         });
       }
     }
+    // Build the `(q,r)` → tile-card index from cards already present so
+    // the first `tileViewAt` resolves card-sourced tiles without a
+    // full `cardsLocal` scan.
+    this.rebuildTileCardIndex();
 
     // Deferred re-invalidate one frame after construction. The first
     // layout pass runs synchronously off `LayoutNode`'s initial
@@ -391,10 +504,11 @@ export class LayoutWorld extends LayoutNode {
       if (row.surface !== this.surface) return;
       const cardType = (row.packedDefinition >> 12) & 0xf;
       if (cardType !== TILE_CARD_TYPE) return;
-      // Update-on-update only fires when the relevant fields
-      // (packed_def / flags_bk stock bits) actually changed; let
-      // the cheap render re-decide instead of diffing here.
-      this.invalidate();
+      // A tile-card landed / moved / was reaped — its hex (and any hex
+      // it vacated) may now resolve differently. Rebuild the index,
+      // then re-render only the active tiles whose signature changed.
+      this.rebuildTileCardIndex();
+      this.reconcileActiveTileData();
       for (const cb of this.tileChangeListeners) cb();
     });
 
@@ -408,9 +522,9 @@ export class LayoutWorld extends LayoutNode {
         : change.kind === "added" ? change.row
         : change.newRow;
       // Filter to this view's surface so a world LayoutWorld
-      // doesn't react to player-dim zone changes (and vice versa).
+      // doesn't react to mini-zone zone changes (and vice versa).
       if (zone.surface !== this.surface) return;
-      const { zoneQ, zoneR } = unpackMacroZone(zone.macroZone);
+      const { zoneQ, zoneR } = macroOrigin(zone.macro);
       for (let t = 0; t < 8; t++) {
         for (let b = 0; b < 8; b++) {
           this.tileData.delete(`${zoneQ + b},${zoneR + t}`);
@@ -426,7 +540,9 @@ export class LayoutWorld extends LayoutNode {
           });
         }
       }
-      this.invalidate();
+      // Re-render only the active tiles whose signature changed; tiles
+      // outside the active rect pick up the new data when they enter.
+      this.reconcileActiveTileData();
       // Notify subscribed cards so their in-front-objects overlay
       // re-bakes against the freshly arrived tile data.
       for (const cb of this.tileChangeListeners) cb();
@@ -478,6 +594,10 @@ export class LayoutWorld extends LayoutNode {
         });
       }
     }
+    this.rebuildTileCardIndex();
+    // Every retained tile's data came from the old surface — tear the
+    // set down and rebuild on the next pass.
+    this.rebuildPending = true;
     this.invalidate();
     for (const cb of this.tileChangeListeners) cb();
   }
@@ -518,344 +638,410 @@ export class LayoutWorld extends LayoutNode {
     return { q: rx, r: rz };
   }
 
-  private acquireSprite(): Sprite {
-    const s = this.spritePool.pop() ?? new Sprite(Texture.EMPTY);
+  /** Hex `(q, r)` → centre pixel in `panLayer`-local (world-pixel)
+   *  space — independent of the viewport. `panLayer` carries the view
+   *  offset, so a sprite placed here pans for free. Equivalent to
+   *  `worldToLocal(q, r)` minus the per-frame `(viewQ, viewR)` term. */
+  private worldPixel(q: number, r: number): { x: number; y: number } {
+    return {
+      x: WORLD_HEX_RADIUS * (Math.sqrt(3) * q + (Math.sqrt(3) / 2) * r),
+      y: WORLD_HEX_RADIUS * ((3 / 2) * r),
+    };
+  }
+
+  /** Take a tile (hex-body) sprite from the pool (or make one) and
+   *  attach it to `tileLayer`. Size is applied in `buildTile` *after*
+   *  the real texture is assigned — setting size against the EMPTY
+   *  texture's 1×1 frame would pin scale to literal pixels. */
+  private acquireTileSprite(): Sprite {
+    const s = this.spritePool.pop() ?? new Sprite();
     s.visible = true;
-    // Hex textures are baked at HEX_TEXTURE_* dimensions; rescale to
-    // the world display size every acquire (cheap, and lets a
-    // WORLD_HEX_* change take effect on the next layout pass without
-    // touching pooled sprites elsewhere).
-    //
-    // Oversize by 2px past the ceiled bbox. Why two: the bake's
-    // hex polygon has a vertical right edge at bake-x ≈ 124.7
-    // inside a 125-wide texture; Pixi's linear-filtered upscale
-    // to the display size adds ~1px of AA fringe at that edge.
-    // Position rounding (`Math.round` in the layout loop below)
-    // makes neighbour spacing alternate between 124 and 125 px in
-    // a periodic pattern set by the irrational `√3 * R` step
-    // (period ≈ 1 / (√3 mod 1) ≈ 3-4 tiles, which is exactly the
-    // beat the seams showed up at). With `ceil + 1` (126), the
-    // 125-spacing case leaves 1px of bbox overlap — not enough
-    // for both neighbours' AA fringes to land on each other's
-    // opaque interior, so the dark BG bleeds through at the seam
-    // and the seam visibly migrates with the viewport pan. `ceil
-    // + 2` (127) guarantees ≥2px overlap in every case, fully
-    // absorbing the AA fringe regardless of which side of the
-    // beat each pair lands on. Same reasoning on the height axis
-    // for safety even though row spacing has 36px of bbox slack.
-    s.setSize(Math.ceil(WORLD_HEX_WIDTH) + 2, Math.ceil(WORLD_HEX_HEIGHT) + 2);
     this.tileLayer.addChild(s);
-    this.activeSprites.push(s);
     return s;
   }
 
-  private releaseActiveSprites(): void {
-    for (const s of this.activeSprites) {
-      s.visible = false;
-      this.tileLayer.removeChild(s);
-      this.spritePool.push(s);
-    }
-    this.activeSprites.length = 0;
-  }
-
-  protected override layout(): void {
+  protected override layout(): boolean | void {
     const w = this.width;
     const h = this.height;
 
-    this.bg.clear();
-    this.bg.rect(0, 0, w, h).fill({ color: BG_COLOR });
+    if (w !== this.lastW || h !== this.lastH) {
+      this.bg.clear();
+      this.bg.rect(0, 0, w, h).fill({ color: BG_COLOR });
+      this.lastW = w;
+      this.lastH = h;
+    }
 
-    this.releaseActiveSprites();
-    // Reset the debug overlay; card-sourced tiles in the loop
-    // below append rings to it.
-    this.debugOverlay.clear();
+    // The pan itself: move the layers that carry tiles / objects /
+    // cards in world-pixel space. One transform write per frame, no
+    // sprite repositioning. `worldCardSurface` tracks the same origin
+    // so cards stay aligned with the grid.
+    const origin = this.worldToLocal(0, 0);
+    this.panLayer.position.set(origin.x, origin.y);
+    this.worldCardSurface.setBounds(origin.x, origin.y, w, h);
 
-    // Conservative ring radius: enough hex columns to cover the larger
-    // of width / height plus a margin for half-tiles peeking in at the
-    // edges. The +2 is a safety margin against rounding.
-    const range = Math.ceil(Math.max(w, h) / (WORLD_HEX_RADIUS * Math.sqrt(3))) + 2;
+    // Local-player faction resolving (login) changes every baked
+    // centre/body texture choice — rebuild the retained set so tiles
+    // re-resolve into the right palette.
+    const tileFaction = localPlayerFactionFolder(this.ctx) ?? undefined;
+    if (tileFaction !== this.lastTileFaction) {
+      this.lastTileFaction = tileFaction;
+      this.rebuildPending = true;
+    }
+
+    if (this.rebuildPending) {
+      this.rebuildPending = false;
+      this.dropAllTiles();
+      this.lastBaseQ = NaN; // force the active-rect re-diff below
+    }
+
     const baseQ = Math.round(this.viewQ);
     const baseR = Math.round(this.viewR);
 
-    // Tile centre objects (the `def.object` slot — e.g. the alter at
-    // the pocket-dimension centre, or building tiles) render in the
-    // local player's faction palette. Computed once per layout pass
-    // since the local-player row doesn't change per tile. Ring
-    // decoration objects intentionally don't take faction — they're
-    // world / climate flora that read as part of the landscape rather
-    // than as anyone's property. Refine to per-zone-owner lookup if
-    // shared dimensions ever need faction-tinted centres.
+    let structureChanged = false;
+    // Only re-diff the active rect when the integer hex anchor crossed
+    // a boundary or the viewport resized. A smooth sub-hex pan leaves
+    // base unchanged → no diff, no rebuild — just the transform above.
+    if (
+      baseQ !== this.lastBaseQ || baseR !== this.lastBaseR ||
+      w !== this.diffW || h !== this.diffH
+    ) {
+      this.reconcileActiveRect(baseQ, baseR, w, h);
+      this.lastBaseQ = baseQ;
+      this.lastBaseR = baseR;
+      this.diffW = w;
+      this.diffH = h;
+      structureChanged = true;
+    }
+
+    // Coalesced texture-load refresh: a LOD pack landed since last
+    // pass, so re-resolve textures for the (bounded) active tiles.
+    if (this.texturesDirty) {
+      this.texturesDirty = false;
+      for (const e of [...this.retained.values()]) this.buildTile(e.q, e.r);
+      structureChanged = true;
+    }
+
+    // Drain the build queue with a per-frame budget — spreads a big
+    // fill or a fresh margin edge across frames.
+    let built = 0;
+    while (this.buildQueue.length > 0 && built < BUILD_BUDGET) {
+      const next = this.buildQueue.shift()!;
+      if (!this.activeKeys.has(next.key)) continue; // left the rect first
+      if (this.retained.has(next.key)) continue;    // already built
+      this.buildTile(next.q, next.r);
+      built++;
+    }
+    if (built > 0) structureChanged = true;
+
+    if (structureChanged) this.repaintDebugOverlay();
+
+    // Stay dirty while tiles remain to build so `layout()` re-runs.
+    return this.buildQueue.length > 0 ? true : undefined;
+  }
+
+  /** Diff the active rect (visible + `marginRings`) against the
+   *  retained set: drop tiles that left, queue tiles that entered
+   *  (closest-to-centre first so a big fill paints inside-out). */
+  private reconcileActiveRect(baseQ: number, baseR: number, w: number, h: number): void {
+    const keys = this.activeRectKeys(baseQ, baseR, w, h);
+    const next = new Set<string>();
+    for (const k of keys) next.add(k.key);
+    for (const key of [...this.retained.keys()]) {
+      if (!next.has(key)) this.dropTile(key);
+    }
+    this.activeKeys = next;
+    this.buildQueue = keys.filter(k => !this.retained.has(k.key));
+  }
+
+  /** Tile keys inside the active rect, sorted closest-to-centre first.
+   *  Computes a tight per-row `q` span from the actual viewport bounds
+   *  (not a `max(w, h)` square), padded by `marginRings` on every
+   *  side. */
+  private activeRectKeys(
+    baseQ: number,
+    baseR: number,
+    w: number,
+    h: number,
+  ): { q: number; r: number; key: string }[] {
+    const R = WORLD_HEX_RADIUS;
+    const colW = Math.sqrt(3) * R; // horizontal step per dq (and per dr/2)
+    const rowH = 1.5 * R;          // vertical step per dr
+    const margin = this.marginRings;
+
+    // Row span: a hex centre is on-screen when its y ± R overlaps
+    // [0, h]; solve for (r - viewR).
+    const rSpan = (h / 2 + R) / rowH;
+    const rMin = Math.floor(this.viewR - rSpan) - margin;
+    const rMax = Math.ceil(this.viewR + rSpan) + margin;
+
+    const qSpan = w / (2 * colW) + 0.5;
+    const ranked: { q: number; r: number; key: string; d: number }[] = [];
+    for (let r = rMin; r <= rMax; r++) {
+      const qCentre = this.viewQ - (r - this.viewR) / 2;
+      const qMin = Math.floor(qCentre - qSpan) - margin;
+      const qMax = Math.ceil(qCentre + qSpan) + margin;
+      for (let q = qMin; q <= qMax; q++) {
+        const dq = q - baseQ;
+        const dr = r - baseR;
+        // Axial hex distance from the anchor, for inside-out ordering.
+        const d = (Math.abs(dq) + Math.abs(dr) + Math.abs(dq + dr)) / 2;
+        ranked.push({ q, r, key: `${q},${r}`, d });
+      }
+    }
+    ranked.sort((a, b) => a.d - b.d);
+    return ranked;
+  }
+
+  /** Build (or rebuild in place) one tile's hex body + object sprites
+   *  and record its render signature. Reuses the tile's pooled sprite
+   *  when it's already retained (texture refresh / data change). */
+  private buildTile(q: number, r: number): void {
+    const key = `${q},${r}`;
+    const entry = this.tileViewAt(q, r);
+    const def = entry !== null ? (this.ctx.definitions.decode(entry.packed) ?? null) : null;
     const tileFaction = localPlayerFactionFolder(this.ctx) ?? undefined;
-    // Hoisted: needed both by the tile body-fill branch (resolving
-    // `def.texture`) and by the centre/instance object loop later in
-    // the per-tile body. `getTextureRegistry()` returns a cached
-    // singleton — repeat calls are cheap, but one binding reads
-    // clearer than scattered calls.
     const reg = getTextureRegistry();
 
-    for (let dq = -range; dq <= range; dq++) {
-      for (let dr = -range; dr <= range; dr++) {
-        const q = baseQ + dq;
-        const r = baseR + dr;
-        const { x, y } = this.worldToLocal(q, r);
+    const sprite = this.retained.get(key)?.tileSprite ?? this.acquireTileSprite();
 
-        // Cull off-screen hexes by their bounding box. A more precise
-        // hex-vs-rect cull would be cheaper per-tile but more code; the
-        // bounding box is fine at typical viewport sizes.
-        if (x + WORLD_HEX_WIDTH / 2 < 0 || x - WORLD_HEX_WIDTH / 2 > w) continue;
-        if (y + WORLD_HEX_HEIGHT / 2 < 0 || y - WORLD_HEX_HEIGHT / 2 > h) continue;
+    // Hex body. `def.texture` (when set) fills the body via the LOD
+    // pipeline; faction recursion to neutral happens inside
+    // `lodTextures.get`. A null def keys the colour-only fallback hex.
+    let bodyTex: Texture | null = null;
+    const texRef = def?.texture;
+    if (texRef) {
+      bodyTex = this.ctx.lodTextures.get(
+        texRef.name,
+        Math.max(WORLD_HEX_WIDTH, WORLD_HEX_HEIGHT),
+        hash(q, r, INSTANCE_TEX_SEED_BASE),
+        texRef.index,
+        tileFaction,
+      );
+    }
+    sprite.texture = this.ctx.cardTextures.getHex(def, bodyTex);
+    // Size AFTER the real texture is set. Oversize by 2px past the
+    // ceiled bbox so adjacent hexes' AA fringes overlap (the bake's
+    // hex edge is anti-aliased; ≥2px overlap absorbs it on every
+    // neighbour-spacing beat). Positions are rounded once in
+    // world-pixel space and never re-rounded per frame, so seams no
+    // longer migrate with the pan.
+    sprite.setSize(Math.ceil(WORLD_HEX_WIDTH) + 2, Math.ceil(WORLD_HEX_HEIGHT) + 2);
+    const c = this.worldPixel(q, r);
+    sprite.position.set(
+      Math.round(c.x - WORLD_HEX_WIDTH / 2),
+      Math.round(c.y - WORLD_HEX_HEIGHT / 2),
+    );
 
-        const entry = this.tileViewAt(q, r);
-        const sprite = this.acquireSprite();
-        if (entry !== null) {
-          const def = this.ctx.definitions.decode(entry.packed) ?? null;
-          // `def.texture` (when set) fills the tile body via the
-          // textures pipeline. Faction-aware via the same local-
-          // player lookup we use for tile centre objects; faction
-          // recursion to neutral happens inside `lodTextures.get`.
-          // `null` (no texture ref) keys the bake to the colour-only
-          // variant. When the ideal LOD lands (or upgrades from the
-          // white-fallback), the `lodTextures.onLoad` subscription
-          // re-invalidates and the next layout pass picks the new
-          // texture-filled bake. Body-fill aspects are shape-driven
-          // — desired size is the world hex's bbox so the LOD picker
-          // grabs a bucket large enough to cover-fit without
-          // upscaling.
-          let bodyTex: Texture | null = null;
-          const texRef = def?.texture;
-          if (texRef) {
-            bodyTex = this.ctx.lodTextures.get(
-              texRef.name,
-              Math.max(WORLD_HEX_WIDTH, WORLD_HEX_HEIGHT),
-              hash(q, r, INSTANCE_TEX_SEED_BASE),
-              texRef.index,
-              tileFaction,
-            );
-          }
-          sprite.texture = this.ctx.cardTextures.getHex(def, bodyTex);
+    // Object sprites for this tile (centre + ring), keyed so the
+    // ObjectManager can replace just this tile's group.
+    const reqs = (entry !== null && def !== null)
+      ? this.collectTileObjectReqs(q, r, entry, def, reg, tileFaction)
+      : [];
+    this.ctx.objects.syncTile(this.objectContainer, key, reqs);
+
+    this.retained.set(key, {
+      q,
+      r,
+      tileSprite: sprite,
+      sig: tileSig(entry),
+      cardSourced: entry?.source === "card",
+    });
+  }
+
+  /** Build the object-sprite requests for one tile — centre instance
+   *  (the def's `object` slot) plus ring instances sourced from the
+   *  def's `stock` slots (or the legacy `aspects` fallback), placed in
+   *  the fixed 7-slot layout. Positions are in `panLayer`-local
+   *  (world-pixel) space. Ported verbatim from the old per-tile sync
+   *  loop minus the off-screen cull (the active rect bounds it). */
+  private collectTileObjectReqs(
+    q: number,
+    r: number,
+    entry: { stock0: number; stock1: number },
+    def: CardDefinition,
+    reg: ReturnType<typeof getTextureRegistry>,
+    tileFaction: string | undefined,
+  ): ObjectSpriteRequest[] {
+    const reqs: ObjectSpriteRequest[] = [];
+
+    // Instance roster: one entry per *potential* object regardless of
+    // current stock, so slot assignment stays stable as stock changes.
+    const instances: { tex: TextureDefinition; present: boolean; index?: number }[] = [];
+    if (def.stock && def.stock.length > 0) {
+      for (let i = 0; i < def.stock.length; i++) {
+        const slot = def.stock[i];
+        if (!slot) continue;
+        const aspectName = this.ctx.definitions.aspectInfo(slot.aspectId)?.name;
+        if (!aspectName) continue;
+        const tex = reg.find(aspectName);
+        if (!tex) continue;
+        const cur = i === 0 ? entry.stock0 : entry.stock1;
+        if (slot.mode === "index") {
+          // Index mode: one sprite pinned to `_<cur>.png`; cur 0 → none.
+          instances.push({ tex, present: cur > 0, index: cur });
         } else {
-          sprite.texture = this.ctx.cardTextures.getHex(null);
+          // Count mode: N copies for stock = N; roster reserves
+          // MAX_STOCK_PER_SLOT positions so the visible/hidden mix is
+          // stable per (q, r).
+          for (let k = 0; k < MAX_STOCK_PER_SLOT; k++) {
+            instances.push({ tex, present: k < cur });
+          }
         }
-        // Round to integer pixels. Sub-pixel positions smear the
-        // hex polygon's anti-aliased edges across two pixel rows /
-        // columns, so adjacent hexes can't meet cleanly — even
-        // with the size ceiled to overlap, fractional positions
-        // re-introduce a faint seam as the viewport pans.
-        sprite.position.set(
-          Math.round(x - WORLD_HEX_WIDTH / 2),
-          Math.round(y - WORLD_HEX_HEIGHT / 2),
-        );
-
-        // Debug: ring tiles whose `(packed, stocks)` came from a
-        // `cardsLocal` tile-card rather than the zone snapshot.
-        // The radius matches the inscribed hex circle so the ring
-        // hugs the tile's footprint; misshapen rings (smaller /
-        // larger) flag tile-cards being drawn at the wrong scale.
-        if (entry?.source === "card") {
-          this.debugOverlay
-            .circle(x, y, WORLD_HEX_RADIUS)
-            .stroke({ color: 0xff0000, width: 2, alpha: 0.9 });
+      }
+    } else if (def.aspects) {
+      for (const pair of def.aspects) {
+        if (!pair) continue;
+        const aspectName = this.ctx.definitions.aspectInfo(pair[0])?.name;
+        if (!aspectName) continue;
+        const tex = reg.find(aspectName);
+        if (!tex) continue;
+        for (let k = 0; k < OBJECTS_PER_TILE; k++) {
+          instances.push({ tex, present: true });
         }
+        break;
       }
     }
 
-    // Anchor the card surface at the origin hex's pixel position so a
-    // card whose `setTarget` carries raw world-relative pixel offsets
-    // ends up in the right spot after the surface's PIXI translation.
-    const origin = this.worldToLocal(0, 0);
-    this.worldCardSurface.setBounds(origin.x, origin.y, w, h);
+    // Centre instance — pinned to slot 0 when the def declares an
+    // `object`.
+    let centre: { tex: TextureDefinition; index?: number } | null = null;
+    if (def.object) {
+      const cTex = reg.find(def.object.name);
+      if (cTex) centre = { tex: cTex, index: def.object.index };
+    }
 
-    // Queue object sprites for every visible tile, sourced from the
-    // tile def's `stock` slots. Each slot contributes its row value
-    // (0..=3) of sprites — a tile with `wood: 2, stone: 1` renders
-    // 2 wood + 1 stone sprite. Defs without `stock` fall back to the
-    // legacy per-aspect single-texture path used by non-tile decor.
-    // (`reg` is hoisted above so the tile body-fill branch and this
-    // loop share one binding.)
-    for (let dq = -range; dq <= range; dq++) {
-      for (let dr = -range; dr <= range; dr++) {
-        const q = baseQ + dq;
-        const r = baseR + dr;
-        const entry = this.tileViewAt(q, r);
-        if (entry === null) continue;
-        const def = this.ctx.definitions.decode(entry.packed);
-        if (!def) continue;
+    if (instances.length === 0 && !centre) return reqs;
+    let presentCount = centre ? 1 : 0;
+    for (const inst of instances) if (inst.present) presentCount++;
+    if (presentCount === 0) return reqs;
 
-        // Build the tile's "instance roster": one entry per *potential*
-        // object regardless of current stock. The roster length is
-        // fixed by the definition (`MAX_STOCK_PER_SLOT * def.stock.length`),
-        // so a wood-2/stone-1 tile and a wood-1/stone-0 tile share the
-        // same roster shape — they just differ in which entries have
-        // `present = true`. That fixed shape + index is what makes the
-        // slot assignment stable across stock changes. Legacy stockless
-        // defs use `OBJECTS_PER_TILE` copies of their first aspect, all
-        // marked present.
-        // Ring instances: built from `stock` (per-row mutable
-        // counts) or from the legacy `aspects` fallback. These
-        // populate the 6 ring slots (1..6) of the 7-slot layout.
-        const instances: { tex: TextureDefinition; present: boolean; index?: number }[] = [];
-        if (def.stock && def.stock.length > 0) {
-          for (let i = 0; i < def.stock.length; i++) {
-            const slot = def.stock[i];
-            if (!slot) continue;
-            const aspectName = this.ctx.definitions.aspectInfo(slot.aspectId)?.name;
-            if (!aspectName) continue;
-            const tex = reg.find(aspectName);
-            if (!tex) continue;
-            const cur = i === 0 ? entry.stock0 : entry.stock1;
-            if (slot.mode === "index") {
-              // Index mode: one sprite per slot, pinned to
-              // `_<cur>.png`. Cycling the stock value cycles the
-              // visible variant. `cur = 0` → no sprite (matches
-              // count mode's empty state). See
-              // docs/STOCK_INDEX_MODE.md.
-              instances.push({ tex, present: cur > 0, index: cur });
-            } else {
-              // Count mode (default): N copies for stock = N, each
-              // pseudo-randomly picked from the pack. Roster
-              // reserves `MAX_STOCK_PER_SLOT` positions per slot so
-              // the visible / hidden mix is stable per (q, r).
-              for (let k = 0; k < MAX_STOCK_PER_SLOT; k++) {
-                instances.push({ tex, present: k < cur });
-              }
-            }
-          }
-        } else if (def.aspects) {
-          for (const pair of def.aspects) {
-            if (!pair) continue;
-            const aspectName = this.ctx.definitions.aspectInfo(pair[0])?.name;
-            if (!aspectName) continue;
-            const tex = reg.find(aspectName);
-            if (!tex) continue;
-            for (let k = 0; k < OBJECTS_PER_TILE; k++) {
-              instances.push({ tex, present: true });
-            }
-            break;
-          }
-        }
+    const ringRadius = WORLD_HEX_RADIUS / 2;
+    const { x: cx, y: cy } = this.worldPixel(q, r);
 
-        // Centre instance — pinned to slot 0 when the def declares
-        // an `object`. Falls back to nothing if the referenced
-        // aspect isn't renderable (unknown / no `size`). See
-        // docs/CARD_OBJECT_UNIFICATION.md (M5).
-        let centre: { tex: TextureDefinition; index?: number } | null = null;
-        if (def.object) {
-          const cTex = reg.find(def.object.name);
-          if (cTex) centre = { tex: cTex, index: def.object.index };
-        }
+    // Fixed 7-slot layout (1 centre + 6 ring). Centre reserves slot 0
+    // when present; ring instances skip it.
+    const slotOrder = centre
+      ? slotPermutation(q, r).filter(s => s !== 0)
+      : slotPermutation(q, r);
+    const startAngle = tileAngleOffset(q, r);
 
-        if (instances.length === 0 && !centre) continue;
-        let presentCount = centre ? 1 : 0;
-        for (const inst of instances) if (inst.present) presentCount++;
-        if (presentCount === 0) continue;
+    if (centre) {
+      const t = hash(q, r, INSTANCE_SCALE_SEED_BASE) / 0x1_0000_0000;
+      const scaleEnv = def.object?.scale ?? centre.tex.scale;
+      const scale = scaleEnv.min + t * (scaleEnv.max - scaleEnv.min);
+      const centreFaction =
+        this.ctx.definitions.cardFactionOverride(def) ?? tileFaction;
+      reqs.push({
+        name: centre.tex.name,
+        desiredSize: centre.tex.size,
+        seed: hash(q, r, INSTANCE_TEX_SEED_BASE),
+        index: centre.index,
+        faction: centreFaction,
+        x: cx,
+        y: cy,
+        scale,
+        sortKey: cy,
+        anchorX: centre.tex.anchor.x,
+        anchorY: centre.tex.anchor.y,
+      });
+    }
 
-        const ringRadius = WORLD_HEX_RADIUS / 2;
+    for (let i = 0; i < instances.length; i++) {
+      const inst = instances[i];
+      if (!inst.present) continue;
+      const slot = slotOrder[i];
+      if (slot === undefined) break; // more ring instances than ring slots
+      let x: number;
+      let y: number;
+      if (slot === 0) {
+        x = cx;
+        y = cy;
+      } else {
+        const ringN = slot - 1;
+        const angle = startAngle + (2 * Math.PI * ringN) / RING_SLOT_COUNT + ringAngleJitter(q, r, ringN, RING_SLOT_COUNT);
+        x = cx + Math.cos(angle) * ringRadius;
+        y = cy + Math.sin(angle) * ringRadius;
+      }
+      const t = hash(q, r, INSTANCE_SCALE_SEED_BASE + i + 1) / 0x1_0000_0000;
+      const scale = inst.tex.scale.min + t * (inst.tex.scale.max - inst.tex.scale.min);
+      reqs.push({
+        name: inst.tex.name,
+        desiredSize: inst.tex.size,
+        seed: hash(q, r, INSTANCE_TEX_SEED_BASE + i + 1),
+        index: inst.index,
+        x,
+        y,
+        scale,
+        sortKey: y,
+        anchorX: inst.tex.anchor.x,
+        anchorY: inst.tex.anchor.y,
+      });
+    }
+    return reqs;
+  }
 
-        const { x: cx, y: cy } = this.worldToLocal(q, r);
-        // Cull only when every sprite's bounding box is fully off-screen.
-        // The cluster spans `ringRadius` from the tile centre; each sprite
-        // adds its own scaled half-width / anchor-offset on top, so the
-        // effective cluster footprint is ringRadius + sprite extent.
-        // Anchor is (0.5, 0.75): sprite extends 0.5 to each side
-        // horizontally, 0.75 above its position and 0.25 below.
-        let maxSpriteSize = 0;
-        for (const inst of instances) {
-          if (!inst.present) continue;
-          const s = inst.tex.size * inst.tex.scale.max;
-          if (s > maxSpriteSize) maxSpriteSize = s;
-        }
-        if (centre) {
-          // Card-side `object.scale` overrides the object's declared
-          // envelope — use the override here so cull math matches the
-          // sprite the renderer will actually draw below.
-          const maxScale = def.object?.scale?.max ?? centre.tex.scale.max;
-          const s = centre.tex.size * maxScale;
-          if (s > maxSpriteSize) maxSpriteSize = s;
-        }
-        const halfX  = ringRadius + maxSpriteSize * 0.5;
-        const topY   = ringRadius + maxSpriteSize * 0.75;
-        const botY   = ringRadius + maxSpriteSize * 0.25;
-        if (cx + halfX < 0 || cx - halfX > w) continue;
-        if (cy + botY < 0 || cy - topY > h) continue;
+  /** Release one built tile: pool its hex sprite, drop its object
+   *  group, forget the key. */
+  private dropTile(key: string): void {
+    const e = this.retained.get(key);
+    if (!e) return;
+    e.tileSprite.visible = false;
+    this.tileLayer.removeChild(e.tileSprite);
+    this.spritePool.push(e.tileSprite);
+    this.ctx.objects.dropTile(this.objectContainer, key);
+    this.retained.delete(key);
+  }
 
-        // Fixed 7-slot layout (1 centre + 6 ring). When the def
-        // carries an `object`, centre (slot 0) is reserved for it
-        // and ring instances skip slot 0. When no `object`, the
-        // original behaviour: ring instances permute across all
-        // 7 slots, leaving slot 0 empty if instance count < 7.
-        const slotOrder = centre
-          ? slotPermutation(q, r).filter(s => s !== 0)
-          : slotPermutation(q, r);
-        const startAngle = tileAngleOffset(q, r);
+  /** Tear down the whole retained set (surface swap, faction change).
+   *  The next `layout()` re-diffs the active rect and rebuilds. */
+  private dropAllTiles(): void {
+    for (const key of [...this.retained.keys()]) this.dropTile(key);
+    this.buildQueue = [];
+    this.activeKeys = new Set();
+  }
 
-        // Centre instance first, when present. A def carrying a
-        // faction sub-aspect (e.g. tile-flavoured chorus variant)
-        // overrides the local player's tileFaction so the variant
-        // looks the same regardless of who's viewing it. A def's
-        // `object.scale` overrides the object's declared scale
-        // envelope so the same pack can render at a different size.
-        if (centre) {
-          const t = hash(q, r, INSTANCE_SCALE_SEED_BASE) / 0x1_0000_0000;
-          const scaleEnv = def.object?.scale ?? centre.tex.scale;
-          const scale = scaleEnv.min + t * (scaleEnv.max - scaleEnv.min);
-          const centreFaction =
-            this.ctx.definitions.cardFactionOverride(def) ?? tileFaction;
-          this.ctx.objects.add(this.objectContainer, {
-            name: centre.tex.name,
-            // `tex.size` is the aspect's preferred draw size in px;
-            // `ObjectManager` resolves the matching LOD and scales
-            // the sprite to render at this size × `scale`.
-            desiredSize: centre.tex.size,
-            // Index pins a specific variant when set; otherwise the
-            // per-tile coordinate hash provides deterministic variance.
-            seed: hash(q, r, INSTANCE_TEX_SEED_BASE),
-            index: centre.index,
-            faction: centreFaction,
-            x: cx,
-            y: cy,
-            scale,
-            sortKey: cy,
-            anchorX: centre.tex.anchor.x,
-            anchorY: centre.tex.anchor.y,
-          });
-        }
-
-        for (let i = 0; i < instances.length; i++) {
-          const inst = instances[i];
-          if (!inst.present) continue;
-          const slot = slotOrder[i];
-          if (slot === undefined) break; // more ring instances than ring slots
-          let x: number;
-          let y: number;
-          if (slot === 0) {
-            x = cx;
-            y = cy;
-          } else {
-            const ringN = slot - 1;
-            const angle = startAngle + (2 * Math.PI * ringN) / RING_SLOT_COUNT + ringAngleJitter(q, r, ringN, RING_SLOT_COUNT);
-            x = cx + Math.cos(angle) * ringRadius;
-            y = cy + Math.sin(angle) * ringRadius;
-          }
-          const t = hash(q, r, INSTANCE_SCALE_SEED_BASE + i + 1) / 0x1_0000_0000;
-          const scale = inst.tex.scale.min + t * (inst.tex.scale.max - inst.tex.scale.min);
-          this.ctx.objects.add(this.objectContainer, {
-            name: inst.tex.name,
-            // Per-aspect preferred draw size; LOD picker resolves
-            // the matching bucket and the sprite is scaled to
-            // render at this size × `scale`.
-            desiredSize: inst.tex.size,
-            seed: hash(q, r, INSTANCE_TEX_SEED_BASE + i + 1),
-            index: inst.index,
-            x, y,
-            scale,
-            sortKey: y,
-            anchorX: inst.tex.anchor.x,
-            anchorY: inst.tex.anchor.y,
-          });
-        }
+  /** Re-render the active tiles whose underlying data changed. Called
+   *  from the zone / tile-card subscriptions; O(active tiles), each an
+   *  O(1) signature compare. */
+  private reconcileActiveTileData(): void {
+    let changed = false;
+    for (const e of [...this.retained.values()]) {
+      if (tileSig(this.tileViewAt(e.q, e.r)) !== e.sig) {
+        this.buildTile(e.q, e.r);
+        changed = true;
       }
     }
-    this.ctx.objects.sync(this.objectContainer);
+    if (changed) this.repaintDebugOverlay();
+  }
+
+  /** Rebuild the `(q,r)` → tile-card index from `cardsLocal`. Cheap
+   *  enough to redo wholesale on each tile-card change (infrequent
+   *  vs. frames); replaces the per-tile `cardsLocal` scan. */
+  private rebuildTileCardIndex(): void {
+    this.tileCardIndex.clear();
+    for (const row of this.ctx.data.cardsLocal.values()) {
+      if (row.surface !== this.surface) continue;
+      const cardType = (row.packedDefinition >> 12) & 0xf;
+      if (cardType !== TILE_CARD_TYPE) continue;
+      const hex = this.resolveTileCardHex(row);
+      if (hex === null) continue;
+      const { zoneQ, zoneR } = macroOrigin(row.macro);
+      this.tileCardIndex.set(`${zoneQ + hex.q},${zoneR + hex.r}`, row);
+    }
+  }
+
+  /** Repaint the debug overlay from the retained set — rings tiles
+   *  whose data came from a `cardsLocal` tile-card rather than the
+   *  zone snapshot. Drawn in world-pixel space (rides `panLayer`). */
+  private repaintDebugOverlay(): void {
+    this.debugOverlay.clear();
+    for (const e of this.retained.values()) {
+      if (!e.cardSourced) continue;
+      const c = this.worldPixel(e.q, e.r);
+      this.debugOverlay
+        .circle(c.x, c.y, WORLD_HEX_RADIUS)
+        .stroke({ color: 0xff0000, width: 2, alpha: 0.9 });
+    }
   }
 
   /** Render the "in-front objects" snapshot for a card on tile (q, r)
@@ -939,37 +1125,17 @@ export class LayoutWorld extends LayoutNode {
     return { ...zone, source: "zone" };
   }
 
-  /** Find a tile-card (`card_type == 7`) whose hex resolves to world
-   *  `(q, r)`. Walks every tile-card in `cardsLocal`; for each,
-   *  resolves its hex either directly from `microZone` (Free state)
-   *  or by chasing the parent-pointer chain to the first Free
-   *  ancestor (OnRoot / Slot state — set by chain_stitch when the
-   *  tile-card was bound to an action). The orphan case (Free
-   *  ancestor reaped by GC before the tile-card was demoted) returns
-   *  `null` and the caller falls back to zone data — temporary
-   *  staleness that resolves on the next server tile write or the
-   *  next GC demote-then-promote cycle. Bounded by total card count
-   *  × max chain depth; called per-tile during overlay rendering so
-   *  kept tight. */
-  private findFreeTileCardAt(q: number, r: number) {
-    for (const row of this.ctx.data.cardsLocal.values()) {
-      // Match the LayoutWorld instance's own surface. Each LayoutWorld
-      // is scoped to a single surface (world, mini-zone, player-dim,
-      // …) — a tile-card promotion on a different surface belongs to
-      // a different LayoutWorld instance, not this one. The prior
-      // hard-coded `WORLD_LAYER` filter dated from when LayoutWorld
-      // only served the world surface; left dim tile-cards invisible
-      // here (and the zone-tile rendering double-drew over them).
-      if (row.surface !== this.surface) continue;
-      const cardType = (row.packedDefinition >> 12) & 0xf;
-      if (cardType !== TILE_CARD_TYPE) continue;
-      const hex = this.resolveTileCardHex(row);
-      if (hex === null) continue;
-      const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
-      if (zoneQ + hex.q !== q || zoneR + hex.r !== r) continue;
-      return row;
-    }
-    return null;
+  /** Tile-card (`card_type == 7`) whose hex resolves to world `(q, r)`,
+   *  or `null`. O(1) lookup into `tileCardIndex`, which is rebuilt from
+   *  `cardsLocal` on every tile-card change via `rebuildTileCardIndex`
+   *  — replacing the old per-call full-`cardsLocal` scan that ran once
+   *  per tile per relayout. The index resolves each tile-card's hex
+   *  the same way (`resolveTileCardHex`: Free state reads `microZone`
+   *  directly; OnRoot / Slot chases the parent chain to the first Free
+   *  ancestor), and is surface-scoped so a tile-card on another layer
+   *  belongs to a different LayoutWorld instance. */
+  private findFreeTileCardAt(q: number, r: number): LocalCard | null {
+    return this.tileCardIndex.get(`${q},${r}`) ?? null;
   }
 
   /** Resolve a tile-card's local (q, r) within its zone. For Free
@@ -1271,8 +1437,11 @@ export class LayoutWorld extends LayoutNode {
     this.ctx.onTilesChanged = null;
     this.tileChangeListeners.clear();
     this.ctx.objects.destroyContainer(this.objectContainer);
-    for (const s of this.activeSprites) s.destroy();
-    this.activeSprites.length = 0;
+    // Destroy retained tile sprites + the pool. ObjectManager already
+    // destroyed every object sprite via destroyContainer above.
+    for (const e of this.retained.values()) e.tileSprite.destroy();
+    this.retained.clear();
+    this.tileCardIndex.clear();
     for (const s of this.spritePool) s.destroy();
     this.spritePool.length = 0;
     super.destroy();

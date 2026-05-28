@@ -1,7 +1,5 @@
 import type { GameContext } from "../../GameContext";
-import type { StarterPack } from "../../game/definitions/DefinitionManager";
 import { InventoryPanel } from "../../game/inventory/InventoryPanel";
-import { tryActivateSoul } from "../../game/permissions";
 import type { LayoutManager } from "../../game/layout/LayoutManager";
 import { LayoutNode } from "../../game/layout/LayoutNode";
 import { GameViewPanel } from "../../game/world/GameViewPanel";
@@ -10,26 +8,14 @@ import {
   BLUEPRINTS_DEFAULT_WIDTH,
   BlueprintsPanel,
 } from "../../game/blueprints/BlueprintsPanel";
-import {
-  getPlayerBlueprintCapacity,
-  getSoulBlueprintCapacity,
-} from "../../game/blueprints/blueprintCapacity";
+import { getSoulBlueprintCapacity } from "../../game/blueprints/blueprintCapacity";
 import { PanelTaskbar } from "../../ui/dom/PanelTaskbar";
 import { PixiPanel } from "../../ui/dom/PixiPanel";
 import type { DomZBand } from "../../ui/dom/DomPanel";
-import { PLAYER_DIMENSION_LAYER, PLAYER_INVENTORY_LAYER } from "../../server/data/packing";
-import { LocationPanel } from "./LocationPanel";
-import { OwnedCardsPanel } from "./chooser/OwnedCardsPanel";
-import { PackCreatePanel } from "./chooser/PackCreatePanel";
-import { PackPreviewPanel } from "./chooser/PackPreviewPanel";
-
-/** Initial width for the chooser PixiPanel. Resizable once open. */
-const DEFAULT_CHOOSER_WIDTH = 440;
+import { PLAYER_INVENTORY_LAYER } from "../../server/data/packing";
 
 /** Right-edge offset (in px) used for default rects of panels that
- *  want to sit alongside the chooser. Roughly the chooser's width
- *  plus a margin; with no singleton inventory panel anymore, this
- *  is just a layout baseline. */
+ *  want to sit inset from the right edge — a layout baseline. */
 const DEFAULT_RIGHT_PANEL_OFFSET = 460;
 
 /** Default width / height for the details PixiPanel. Matches the
@@ -87,23 +73,17 @@ class LayerNode extends LayoutNode {
  * browse/play modes — every panel is independent and managed by
  * `ctx.panels` (PanelManager):
  *
- *   - `chooser` (always taskbar-pinned) — OwnedCardsPanel content,
- *     entry-point for selecting souls and starting the create flow.
  *   - `inventory:<soulId>` (per-soul, multiple) — independent panels
  *     for each soul's inventory.
  *   - `gameview:<soulId>` (per-soul, multiple) — each holds its own
  *     LayoutWorld + viewport + soul subscriptions.
- *   - `packCreate` (singleton) — character-create flow.
- *   - `packPreview` (singleton) — preview of the pack selected
- *     inside packCreate.
  *   - `details` (singleton, wrapped in `detailsHostPanel`) — opens
  *     on card click via `detailsPanel.show(...)`.
  *   - `blueprints` (taskbar-pinned `blueprintsHostPanel`).
  *
  * MainLayout's job is reduced to: hosting the always-on panels
- * (chooser, details, blueprints) as direct children, plus providing
- * `openInventoryPanel(soulId)` / `openGameViewPanel(soulId)` /
- * `openPackCreatePanel()` / `openPackPreviewPanel(pack)` helpers
+ * (details, blueprints) as direct children, plus providing
+ * `openInventoryPanel(soulId)` / `openGameViewPanel(soulId)` helpers
  * that route through PanelManager.
  */
 export class MainLayout extends LayoutNode {
@@ -115,13 +95,6 @@ export class MainLayout extends LayoutNode {
    *  open / focus affordance now. */
   readonly blueprintsPanel: BlueprintsPanel;
   readonly blueprintsHostPanel: PixiPanel;
-  /** Player-scope counterpart of `blueprintsPanel` — discoveries
-   *  live on `PlayerProfile.blueprints_0`, drag drops route to
-   *  `request_player_blueprint`. Distinct PixiPanel so users can
-   *  open both side-by-side; the dna (🧬) glyph distinguishes the
-   *  taskbar entry. */
-  readonly playerBlueprintsPanel: BlueprintsPanel;
-  readonly playerBlueprintsHostPanel: PixiPanel;
   /** The actual details renderer — a `LayoutNode` that draws the
    *  card-info Pixi visuals. `MainScene` calls `show()` / `hide()` /
    *  `handleClick()` on it directly; the PixiPanel wrapper
@@ -140,8 +113,7 @@ export class MainLayout extends LayoutNode {
   //
   //   gameviewLayer   (zIndex 0)   — game-view panels
   //   inventoryLayer  (zIndex 1)   — inventory panels
-  //   chooserLayer    (zIndex 2)   — chooser, details, blueprints,
-  //                                  packCreate, packPreview
+  //   chooserLayer    (zIndex 2)   — chooser, details, blueprints
   //   overlay         (zIndex 1000) — drag previews (frontmost)
   //
   // Children added to a layer inherit the layer's zIndex relative to
@@ -154,15 +126,6 @@ export class MainLayout extends LayoutNode {
   readonly inventoryLayer: LayoutNode;
   readonly chooserLayer:   LayoutNode;
 
-  // ── Chooser PixiPanel ─────────────────────────────────────────────
-  /** Character chooser PixiPanel. Always alive — taskbar-pinned and
-   *  user-controlled (open / minimize via the pin glyph). Content is
-   *  always an `OwnedCardsPanel`; the character-create flow is its
-   *  own `packCreate` panel now, not a content swap inside the
-   *  chooser. */
-  private readonly chooserPanel: PixiPanel;
-  private readonly chooserContent: OwnedCardsPanel;
-  private readonly unsubChooserRect: () => void;
   /** Cleanup for the `detailsHostPanel.onRectChange` subscription —
    *  same shape as the world / inventory rect listeners, but for
    *  the details host. The inner `DetailsPanel` draws at its own
@@ -200,31 +163,14 @@ export class MainLayout extends LayoutNode {
    *  `request_blueprint` succeeds, or a blueprint dies and frees a
    *  slot via the `on_card_write` hook). */
   private readonly unsubBlueprintsSoulPrivate: () => void;
-  /** Cleanup for `playerBlueprintsHostPanel.onRectChange` — same
-   *  shape as `unsubBlueprintsRect` but for the player-scope panel. */
-  private readonly unsubPlayerBlueprintsRect: () => void;
-  /** `player_profiles` side-channel handler — refreshes the player
-   *  blueprints title bar whenever the local profile's blueprint
-   *  count changes (a `request_player_blueprint` succeeds, or a
-   *  player_blueprint dies and frees a slot). */
-  private readonly unsubPlayerBlueprintsProfile: () => void;
-  /** Login listener — refreshes the player blueprints title on
-   *  initial login (the cap is read from `PlayerProfile.blueprint_info`,
-   *  which only arrives after the profile subscription delivers). */
-  private readonly unsubPlayerBlueprintsLogin: () => void;
 
 
   // ── External wiring ──────────────────────────────────────────────
   private readonly gameContext: GameContext;
   private readonly layoutManager: LayoutManager;
   private readonly playerId: number;
-  private readonly onCreateCharacter: (pack: StarterPack) => void;
 
-  constructor(
-    ctx: GameContext,
-    playerId: number,
-    onCreateCharacter: (pack: StarterPack) => void,
-  ) {
+  constructor(ctx: GameContext, playerId: number) {
     super();
     if (!ctx.layout) {
       throw new Error("[MainLayout] ctx.layout must be set before constructing MainLayout");
@@ -232,7 +178,6 @@ export class MainLayout extends LayoutNode {
     this.gameContext = ctx;
     this.layoutManager = ctx.layout;
     this.playerId = playerId;
-    this.onCreateCharacter = onCreateCharacter;
 
     // Always-on Pixi surfaces. World views live inside individual
     // `GameViewPanel` instances now (created on demand via
@@ -240,8 +185,7 @@ export class MainLayout extends LayoutNode {
     // blueprints panel lives inside `blueprintsHostPanel`; details
     // panel inside `detailsHostPanel`. Only the drag overlay still
     // parents directly under MainLayout.
-    this.blueprintsPanel = new BlueprintsPanel("soul");
-    this.playerBlueprintsPanel = new BlueprintsPanel("player");
+    this.blueprintsPanel = new BlueprintsPanel();
     this.detailsPanel = new DetailsPanel();
     this.overlay = new OverlayNode();
 
@@ -395,79 +339,9 @@ export class MainLayout extends LayoutNode {
       },
     );
 
-    // Player-scope counterpart of the soul blueprints host. Same
-    // shape, different scope:
-    //  - source bitfield = `PlayerProfile.blueprints_0`
-    //  - cap = `PlayerProfile.blueprint_info.max` nibble (default 1)
-    //  - drag drop fires `request_player_blueprint`
-    // Pinned to bottom-left alongside the soul panel; the 🧬 (dna)
-    // glyph distinguishes the taskbar entry. Default position is
-    // tucked to the right of the soul panel so first-launch shows
-    // both without overlap, but the user can drag freely.
-    this.playerBlueprintsHostPanel = new PixiPanel({
-      title: "Player Blueprints",
-      parent: this.chooserLayer,
-      storageKey: "gamePlayerBlueprintsPanel",
-      defaultRect: {
-        left:   `${BLUEPRINTS_DEFAULT_WIDTH + 8}px`,
-        top:    `${PanelTaskbar.HEIGHT + 60}px`,
-        width:  `${BLUEPRINTS_DEFAULT_WIDTH}px`,
-        height: "400px",
-      },
-      minWidth:    200,
-      minHeight:   200,
-      pin:         "bottom-left",
-      taskbarIcon: "🧬",
-      pinned:      true,
-      uiEditMode:  ctx.uiEditMode,
-    });
-    this.playerBlueprintsHostPanel.content.addChild(this.playerBlueprintsPanel);
-    this.unsubPlayerBlueprintsRect = this.playerBlueprintsHostPanel.onRectChange(() => {
-      this.playerBlueprintsPanel.setBounds(
-        0, 0,
-        this.playerBlueprintsHostPanel.content.width,
-        this.playerBlueprintsHostPanel.content.height,
-      );
-    });
-    const refreshPlayerBlueprintsTitle = (): void => {
-      const player = ctx.playerSession.getPlayer();
-      if (player === null) {
-        this.playerBlueprintsHostPanel.setTitle("Player Blueprints");
-        return;
-      }
-      const cap = getPlayerBlueprintCapacity(ctx, player.playerId);
-      this.playerBlueprintsHostPanel.setTitle(
-        `Player Blueprints (${cap.active}/${cap.max})`,
-      );
-    };
-    refreshPlayerBlueprintsTitle();
-    this.unsubPlayerBlueprintsLogin = ctx.playerSession.on(
-      () => refreshPlayerBlueprintsTitle(),
-    );
-    this.unsubPlayerBlueprintsProfile = ctx.data.subscriptions.registerTableHandlers(
-      "player_profiles",
-      {
-        onInsert: (row) => {
-          if (row.playerId === ctx.playerSession.getPlayer()?.playerId) {
-            refreshPlayerBlueprintsTitle();
-          }
-        },
-        onUpdate: (_oldRow, newRow) => {
-          if (newRow.playerId === ctx.playerSession.getPlayer()?.playerId) {
-            refreshPlayerBlueprintsTitle();
-          }
-        },
-        onDelete: (row) => {
-          if (row.playerId === ctx.playerSession.getPlayer()?.playerId) {
-            refreshPlayerBlueprintsTitle();
-          }
-        },
-      },
-    );
-
-    // The chooser + inventory PixiPanels are constructed *after* this
-    // point (in `enterBrowseMode` / `enterPlayMode` / `rebuildInventoryPanel`)
-    // and each one's `parent: this` option appends its Pixi `content`
+    // The inventory PixiPanels are constructed *after* this point (via
+    // the `open*` panel helpers) and each one's `parent:` option
+    // appends its Pixi `content`
     // to *this* layout's container — which would land them *after*
     // `overlay` in child order and draw drag previews behind the
     // inventory cards. Use Pixi's `sortableChildren` + an explicit
@@ -477,63 +351,6 @@ export class MainLayout extends LayoutNode {
     // beneath.
     this.container.sortableChildren = true;
     this.overlay.zIndex = 1000;
-
-    // Build the chooser once and leave it alive for the scene's
-    // lifetime — `enterPlayMode` / `enterBrowseMode` toggle it via
-    // `close()` / `open()` so its pinned taskbar entry survives
-    // both transitions. Pinned to the top-right taskbar with a 👤
-    // glyph. Default content is the "select" submode (owned cards).
-    this.chooserPanel = new PixiPanel({
-      title: "Character",
-      parent: this.chooserLayer,
-      storageKey: "characterSelectPanel",
-      defaultRect: {
-        right:  "0",
-        top:    `${PanelTaskbar.HEIGHT}px`,
-        width:  `${DEFAULT_CHOOSER_WIDTH}px`,
-        height: `calc(100vh - ${PanelTaskbar.HEIGHT * 2}px)`,
-      },
-      minWidth:    240,
-      // ~ one rect-card title-bar tall — lets the user shrink the
-      // chooser to a sliver when they want most of the screen for
-      // other panels.
-      minHeight:   120,
-      pin:         "top-right",
-      taskbarIcon: "👤",
-      pinned:      true,
-      uiEditMode:  ctx.uiEditMode,
-    });
-    this.chooserContent = new OwnedCardsPanel(
-      this.gameContext,
-      this.playerId,
-      () => this.openPackCreatePanel(),
-      (cardId) => {
-        // Single-click on a soul card in the chooser activates that
-        // soul (if owned — chooser currently shows only owned
-        // souls, but the gate generalizes when this panel widens)
-        // and opens (or focuses) its inventory. `null` (deselection)
-        // is a no-op — inventory panels are independent and survive
-        // deselection.
-        if (cardId === null) return;
-        tryActivateSoul(this.gameContext, cardId);
-        this.openInventoryPanel(cardId);
-      },
-    );
-    this.chooserPanel.content.addChild(this.chooserContent);
-    this.unsubChooserRect = this.chooserPanel.onRectChange(() => {
-      this.chooserContent.setBounds(
-        0, 0,
-        this.chooserPanel.content.width,
-        this.chooserPanel.content.height,
-      );
-    });
-    this.chooserPanel.open();
-    // Login lands here; the chooser is the player's first action,
-    // so restore it if a previous session left it minimized to the
-    // taskbar. Other panels (world / inventory / details /
-    // blueprints) keep their persisted minimize state — only the
-    // chooser auto-restores because it's the entry-point panel.
-    if (this.chooserPanel.isMinimized) this.chooserPanel.restore();
   }
 
   // ── PanelManager-routed open helpers ─────────────────────────────
@@ -636,110 +453,18 @@ export class MainLayout extends LayoutNode {
     );
   }
 
-  /** Open (or focus) the player's pocket-dimension view — a
-   *  `GameViewPanel` in dim mode (no soul tracking) bound to
-   *  `PLAYER_DIMENSION_LAYER (62)`. ZoneManager + the subscribe
-   *  dispatch resolve owner_id from the local player automatically.
-   *
-   *  Called from `MainScene.onEnter` so the dim shows immediately
-   *  on login instead of waiting for the user to click Play. Keyed
-   *  separately from the soul-mode panel (`gameview:dim`) so both
-   *  can coexist once the player picks a soul to play with. */
-  openPlayerDimensionPanel(): GameViewPanel {
+  /** Open a soulless game-view anchored at world origin — surface 64,
+   *  q/r (0, 0). `GameViewPanel`'s soulless mode defaults `surface` to
+   *  `WORLD_LAYER` and the anchor to `(0, 0)`, so no options are
+   *  needed. Used as a fixed testing entry point until soul-follow is
+   *  rewired (see `MainScene.openDefaultSoulView`). */
+  openWorldView(): GameViewPanel {
     if (!this.gameContext.panels) {
-      throw new Error("[MainLayout] ctx.panels must be set before opening player-dim panel");
-    }
-    // Title composes in DomPanel — `GameViewPanel`'s constructor
-    // registers the "player" resolver and defaults to that suffix
-    // mode in dim mode (soulId == null), reproducing the old
-    // pre-baked "Game View - <name>" without us having to compute
-    // and inject it here.
-    return this.gameContext.panels.ensure(
-      "gameview:dim",
-      () =>
-        new GameViewPanel(
-          this.gameContext,
-          this.gameviewLayer,
-          "gameview:dim",
-          /* soulId */ null,
-          {
-            surface: PLAYER_DIMENSION_LAYER,
-            // Open centered on chunk (0, 0)'s middle hex. Dim is a
-            // 2×2 chunk grid (chunks (0,0)..(1,1)); origin gets the
-            // user looking at the top-left chunk's center on first
-            // open. Pan-drag works the same as world.
-            initialQ: 4,
-            initialR: 4,
-          },
-        ),
-    );
-  }
-
-  /** Open (or focus) the Location panel — buttons for the player's
-   *  pocket dimension plus every world-layer surface their owned
-   *  souls occupy. Clicking a button retargets the most-recently-
-   *  focused `GameViewPanel`'s surface and pans to a natural anchor
-   *  for that surface (centre of the pocket-dim seed disc, or the
-   *  closest owned soul on a world surface). If no game-view exists,
-   *  one is opened first — dim mode for the pocket-dim button, soul
-   *  mode (using the closest owned soul) for any other surface.
-   *
-   *  Singleton — `"location"` in PanelManager. */
-  openLocationPanel(): LocationPanel {
-    if (!this.gameContext.panels) {
-      throw new Error("[MainLayout] ctx.panels must be set before opening location");
+      throw new Error("[MainLayout] ctx.panels must be set before opening game-view panels");
     }
     return this.gameContext.panels.ensure(
-      "location",
-      () => new LocationPanel(
-        this.gameContext,
-        this.chooserLayer,
-        (soulCardId) => this.openGameViewPanel(soulCardId),
-        () => this.openPlayerDimensionPanel(),
-      ),
-    );
-  }
-
-  /** Open (or focus) the character-create panel. The packCreate
-   *  panel exposes the starter-pack picker and forwards pack
-   *  selection / creation through `openPackPreviewPanel` and
-   *  `onCreateCharacter`. */
-  openPackCreatePanel(): PackCreatePanel {
-    if (!this.gameContext.panels) {
-      throw new Error("[MainLayout] ctx.panels must be set before opening packCreate");
-    }
-    return this.gameContext.panels.ensure(
-      "packCreate",
-      () => new PackCreatePanel(
-        this.gameContext,
-        this.chooserLayer,
-        (pack) => {
-          this.openPackPreviewPanel(pack);
-          // Mirror the selection back into the create panel so its
-          // own highlight stays accurate. `ensure` is dedup-safe
-          // here; this is the same panel we just opened.
-          this.openPackCreatePanel().setSelectedPackId(pack.id);
-        },
-        (pack) => this.onCreateCharacter(pack),
-      ),
-    );
-  }
-
-  /** Open (or update) the pack-preview panel for `pack`. Single-slot
-   *  — subsequent calls update the existing panel's content in place. */
-  openPackPreviewPanel(pack: StarterPack): PackPreviewPanel {
-    if (!this.gameContext.panels) {
-      throw new Error("[MainLayout] ctx.panels must be set before opening packPreview");
-    }
-    const existing = this.gameContext.panels.get("packPreview");
-    if (existing instanceof PackPreviewPanel) {
-      existing.setPack(pack);
-      existing.focus();
-      return existing;
-    }
-    return this.gameContext.panels.ensure(
-      "packPreview",
-      () => new PackPreviewPanel(this.gameContext, this.chooserLayer, pack),
+      "gameview",
+      () => new GameViewPanel(this.gameContext, this.gameviewLayer, "gameview", null),
     );
   }
 
@@ -754,18 +479,11 @@ export class MainLayout extends LayoutNode {
   }
 
   override destroy(): void {
-    // Per-soul inventory + game-view + packCreate + packPreview
-    // panels are owned by `ctx.panels` now — `MainScene.onExit`
-    // calls `panels.closeAll()` before this method runs, so each
-    // panel's own teardown has already disposed its
-    // `GameInventory` / zone refs / soul subs. Nothing for MainLayout
-    // to do for them here.
-
-    // Chooser teardown — the panel is always alive during the
-    // scene, only the rect listener + DOM/Pixi nodes need a final
-    // release here.
-    this.unsubChooserRect();
-    this.chooserPanel.destroy();
+    // Per-soul inventory + game-view panels are owned by
+    // `ctx.panels` now — `MainScene.onExit` calls `panels.closeAll()`
+    // before this method runs, so each panel's own teardown has
+    // already disposed its `GameInventory` / zone refs / soul subs.
+    // Nothing for MainLayout to do for them here.
 
     // Details host — same shape. The visibility + size
     // subscriptions have to come down before the host so the
@@ -783,11 +501,6 @@ export class MainLayout extends LayoutNode {
     this.unsubBlueprintsSoul();
     this.unsubBlueprintsSoulPrivate();
     this.blueprintsHostPanel.destroy();
-
-    this.unsubPlayerBlueprintsRect();
-    this.unsubPlayerBlueprintsLogin();
-    this.unsubPlayerBlueprintsProfile();
-    this.playerBlueprintsHostPanel.destroy();
 
     super.destroy();
   }

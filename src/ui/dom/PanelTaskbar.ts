@@ -412,19 +412,23 @@ export class PanelTaskbar {
       return;
     }
     if (panel.isMinimized) {
-      // Minimized → restore + focus.
+      // Minimized → restore + focus (focus brings it to the front).
       panel.restore();
       panel.focus();
       return;
     }
-    // Visible (open + not minimized) → minimize, regardless of focus
-    // state. Departure from the Windows convention (which would focus
-    // a not-focused open panel on first click, minimize on second) —
-    // the focus-then-minimize two-step felt unresponsive ("highlight
-    // on first click, action on second"). To bring a buried open
-    // panel forward, click its body — the panel's own `pointerdown`
-    // handler calls `bringToFront`.
-    panel.minimize();
+    // Visible (open + not minimized). If this panel is already the
+    // frontmost / focused one, a click minimizes it (toggle away).
+    // Otherwise it's buried behind a peer — bring it to front and
+    // select it in a single click. `focus()` raises both the DOM
+    // chrome z-index and the Pixi nodes (via PixiPanel's onFocus
+    // reorder hook), so surfacing a buried panel no longer needs a
+    // click-on-body or a second taskbar click.
+    if (this.focusedPanel === panel) {
+      panel.minimize();
+    } else {
+      panel.focus();
+    }
   }
 
   private applyEntryState(entry: Entry): void {

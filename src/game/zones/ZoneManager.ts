@@ -7,9 +7,8 @@ export type ZoneListener = (zoneId: ZoneId) => void;
 
 export type AnchorName = string;
 /** Named viewport anchor. Carries the surface it's pinned to so
- *  `recomputeAnchorZones` can pack zone_ids on the right layer —
- *  WORLD_LAYER for the overworld, PLAYER_DIMENSION_LAYER for a
- *  player's pocket dim, etc. `surface` is part of the anchor's
+ *  `recomputeAnchorZones` can pack zone_ids on the right layer (e.g.
+ *  WORLD_LAYER for the overworld). `surface` is part of the anchor's
  *  identity for zone-recompute purposes; changing it via
  *  `setAnchor(name, q, r, surface)` re-walks the surrounding ring
  *  on the new surface. */
@@ -50,45 +49,32 @@ export class ZoneManager {
 
   private prevAnchorZones = new Set<ZoneId>();
 
-  /** Local player_id, set when login resolves. Read by the subscribe
-   *  dispatch in `main.ts` to scope `PLAYER_DIMENSION_LAYER` zones to
-   *  the local player's pocket dim (owner_id = player_id). `null`
-   *  pre-login; consumers must defer player-dim subscriptions until
-   *  this is populated. */
+  /** Local player_id, set when login resolves. Read by client-local
+   *  "who am I signed in as" lookups (e.g. `localPlayerFactionFolder`
+   *  for drag previews). `null` pre-login. */
   private playerId: number | null = null;
 
   // Anchors are set by callers via `setAnchor(name, q, r, surface)`.
-  // With the PanelManager rollout, each `GameViewPanel` owns a pair
-  // of namespaced anchors (`viewport:<panelId>` / `soul:<panelId>`) —
-  // there is no singleton `"viewport"` anchor anymore. Until any
-  // panel is open there are no anchors and no zones get collected;
-  // player row + chat subscriptions are the only baseline traffic.
+  // With the PanelManager rollout, each `GameViewPanel` owns a
+  // namespaced `viewport:<panelId>` anchor — there is no singleton
+  // `"viewport"` anchor anymore. Until any panel is open there are no
+  // anchors and no zones get collected; player row + chat
+  // subscriptions are the only baseline traffic.
   //
   // Surface plumbing: each anchor is tied to a surface (default
   // WORLD_LAYER). `recomputeAnchorZones` packs zone_ids using each
-  // anchor's surface, so a viewport pinned to
-  // `PLAYER_DIMENSION_LAYER` activates zones on that layer (which
-  // the `main.ts` dispatch routes through `subscribePlayerDimension`
-  // rather than `subscribeWorldZone`).
+  // anchor's surface, so a viewport pinned to a non-world surface
+  // activates zones on that layer.
   constructor() {}
 
   /** Set the local player_id (called from `PlayerManager`'s login
-   *  listener). Triggers a recompute so any pre-login player-dim
-   *  anchors get their subscriptions activated. */
+   *  listener). */
   setPlayerId(playerId: number | null): void {
-    if (this.playerId === playerId) return;
     this.playerId = playerId;
-    // No recompute needed — the zone IDs in `entries` don't change
-    // when the player_id changes; the dispatcher in `main.ts`
-    // reads `getPlayerId()` lazily when it fires `subscribeZone`.
-    // Consumers that need a player-dim subscription installed
-    // immediately after login should call `setAnchor(... surface =
-    // PLAYER_DIMENSION_LAYER)` to seed the active set.
   }
 
-  /** Read the local player_id. Returns `null` pre-login. Used by the
-   *  `main.ts` zone-subscribe dispatcher to scope
-   *  `PLAYER_DIMENSION_LAYER` subscriptions. */
+  /** Read the local player_id. Returns `null` pre-login. Used by
+   *  client-local "who am I signed in as" lookups. */
   getPlayerId(): number | null {
     return this.playerId;
   }
@@ -200,10 +186,9 @@ export class ZoneManager {
    * names: `"viewport"`, `"player"`, `"viewport:<panelId>"`.
    *
    * `surface` defaults to `WORLD_LAYER` for backward compatibility
-   * with the world-pan code. Player-dim viewports pass
-   * `PLAYER_DIMENSION_LAYER` so `recomputeAnchorZones` packs zone
-   * ids on the right layer and the `main.ts` dispatch routes them
-   * through `subscribePlayerDimension`.
+   * with the world-pan code. Non-world viewports pass their own
+   * surface so `recomputeAnchorZones` packs zone ids on the right
+   * layer.
    *
    * LayoutWorld subscribes to `"viewport:<panelId>"` to know where
    * to center its hex grid. Other anchors keep their surrounding

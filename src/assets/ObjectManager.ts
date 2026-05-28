@@ -57,31 +57,34 @@ export interface ObjectSpriteRequest {
 }
 
 interface ManagedState {
-  pending: ObjectSpriteRequest[];
-  /** Sprites currently attached to the Container. */
-  active: Sprite[];
-  /** Recycled sprites available for reuse on the next sync. */
+  /** Sprites currently shown, grouped by caller key (one key per
+   *  world tile). Lets the retained renderer rebuild or drop a single
+   *  tile's objects without touching its neighbours. */
+  groups: Map<string, Sprite[]>;
+  /** Recycled sprites available for reuse. */
   pool: Sprite[];
 }
 
 /**
- * Manages a Container of object sprites (trees, rocks, etc.).
+ * Manages a Container of object sprites (trees, rocks, etc.) in a
+ * retained, per-key fashion.
  *
  * Pattern:
  *   const root = manager.createContainer();
  *   scene.addChild(root);
- *   // each layout pass:
- *   for (const tile of tiles) manager.add(root, { ... });
- *   manager.sync(root);
+ *   // when a tile enters / its data changes:
+ *   manager.syncTile(root, "q,r", [ ...reqs ]);
+ *   // when a tile leaves the active rect:
+ *   manager.dropTile(root, "q,r");
  *
  * The returned Container has `sortableChildren = true`, so each
  * sprite's `zIndex` (set from the request's `sortKey`) determines
- * draw order at render time — no manual painter's sort.
+ * draw order at render time — a single global painter's sort across
+ * every tile's objects, no per-tile sub-containers.
  *
- * Sprites are pooled per managed Container so steady-state syncs reuse
- * allocations. Requests whose texture hasn't finished loading are
- * silently skipped on the current sync — next sync picks them up once
- * LodTextureManager finishes the load.
+ * Sprites are pooled per managed Container, so a tile that leaves and
+ * re-enters (or re-renders on a stock change) reuses allocations
+ * instead of churning the heap.
  */
 export class ObjectManager {
   private readonly lodTextures: LodTextureManager;
@@ -96,83 +99,79 @@ export class ObjectManager {
   createContainer(): Container {
     const c = new Container();
     c.sortableChildren = true;
-    this.state.set(c, { pending: [], active: [], pool: [] });
+    this.state.set(c, { groups: new Map(), pool: [] });
     return c;
   }
 
-  /** Tear down a managed Container — destroys every active and pooled
+  /** Tear down a managed Container — destroys every live and pooled
    *  sprite, then destroys the outer Container. */
   destroyContainer(c: Container): void {
     const s = this.state.get(c);
     if (!s) return;
-    for (const sp of s.active) sp.destroy();
+    for (const sprites of s.groups.values()) {
+      for (const sp of sprites) sp.destroy();
+    }
     for (const sp of s.pool) sp.destroy();
-    s.active.length = 0;
+    s.groups.clear();
     s.pool.length = 0;
-    s.pending.length = 0;
     this.state.delete(c);
     c.destroy({ children: true });
   }
 
-  /** Drop pending requests and release every active sprite back into
-   *  the pool. The Container is left empty. */
-  clear(c: Container): void {
-    const s = this.state.get(c);
-    if (!s) return;
-    this.releaseActive(c, s);
-    s.pending.length = 0;
-  }
-
-  /** Queue a sprite for the next `sync`. */
-  add(c: Container, req: ObjectSpriteRequest): void {
-    const s = this.state.get(c);
-    if (!s) return;
-    s.pending.push(req);
-  }
-
-  /** Commit pending requests: release all active sprites, then acquire
-   *  one from the pool (or create new) for each request whose texture
-   *  is ready, set its texture/position/scale/zIndex, and re-attach.
-   *  Pending requests whose textures haven't loaded yet are skipped. */
-  sync(c: Container): void {
+  /** Build (or rebuild) the sprites for one key. Releases the key's
+   *  current sprites back to the pool, then acquires one per request,
+   *  sets its texture/anchor/position/scale/zIndex, and attaches it.
+   *  `LodTextureManager.get` never returns null — it falls through to
+   *  a cached LOD substitute or the white 64×64 fallback while the
+   *  ideal LOD loads, then fires `onLoad` so the caller can re-sync to
+   *  pick up the upgrade. Scale math compensates for the substitute's
+   *  native size so the rendered px stays `desiredSize × scale`
+   *  regardless of which LOD bucket backs the Texture. */
+  syncTile(c: Container, key: string, reqs: readonly ObjectSpriteRequest[]): void {
     const s = this.state.get(c);
     if (!s) return;
 
-    this.releaseActive(c, s);
+    const out = s.groups.get(key) ?? [];
+    // Release the key's existing sprites to the pool, then refill the
+    // same array in place so we reuse them request-by-request below.
+    for (const sp of out) {
+      c.removeChild(sp);
+      s.pool.push(sp);
+    }
+    out.length = 0;
 
-    for (const req of s.pending) {
-      // `LodTextureManager.get` never returns null — falls through
-      // to a cached LOD substitute or the white 64×64 fallback when
-      // the ideal LOD isn't loaded yet, then upgrades via `onLoad`
-      // on subsequent syncs. Scale math compensates for the
-      // substitute's native size so the rendered px stays
-      // `desiredSize × scale` regardless of which LOD bucket
-      // backs the Texture this frame.
+    for (const req of reqs) {
       const tex = this.lodTextures.get(
         req.name, req.desiredSize, req.seed, req.index, req.faction,
       );
       const sp = this.acquire(s);
       sp.texture = tex;
-      // Apply anchor here (not just at pool acquisition) so a pooled
-      // sprite re-used by a request with a different anchor doesn't
-      // inherit its previous tenant's pivot point.
+      // Apply anchor here (not at acquire) so a pooled sprite reused
+      // by a request with a different anchor doesn't inherit its
+      // previous tenant's pivot point.
       sp.anchor.set(req.anchorX, req.anchorY);
       sp.position.set(req.x, req.y);
       sp.scale.set((req.desiredSize / tex.width) * req.scale);
       sp.zIndex = req.sortKey;
       c.addChild(sp);
-      s.active.push(sp);
+      out.push(sp);
     }
 
-    s.pending.length = 0;
+    if (out.length > 0) s.groups.set(key, out);
+    else s.groups.delete(key);
   }
 
-  private releaseActive(c: Container, s: ManagedState): void {
-    for (const sp of s.active) {
+  /** Release one key's sprites back to the pool and forget the key. */
+  dropTile(c: Container, key: string): void {
+    const s = this.state.get(c);
+    if (!s) return;
+    const sprites = s.groups.get(key);
+    if (!sprites) return;
+    for (const sp of sprites) {
       c.removeChild(sp);
       s.pool.push(sp);
     }
-    s.active.length = 0;
+    s.groups.delete(key);
   }
 
   private acquire(s: ManagedState): Sprite {

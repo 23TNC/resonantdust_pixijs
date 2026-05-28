@@ -11,10 +11,9 @@ const MAX_CATCHUP_TICKS = 5;
  * game ticks. Iterates registered `GameInventory` (and eventually GameWorld)
  * per tick and dispatches `update(dt)` with delta-time in seconds.
  *
- * Always-on inside `MainScene` regardless of mode — registered inventories
- * are what's mode-dependent: in browse mode the set is empty (no
- * `GameInventory` constructed yet) so `tick` runs the loop and exits
- * cheaply; in play mode the active soul's `GameInventory` is added.
+ * Always-on inside `MainScene`. The registered-inventory set starts
+ * empty — until an inventory panel constructs a `GameInventory` and
+ * registers it, `tick` runs the loop and exits cheaply.
  */
 export class MainManager {
   private readonly inventories = new Set<GameInventory>();

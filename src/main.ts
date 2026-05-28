@@ -27,7 +27,7 @@ import { DataManager } from "./server/data/DataManager";
 import { DomPanel } from "./ui/dom/DomPanel";
 import panelDefaults from "./content/panels/defaults.json";
 import { ZoneManager } from "./game/zones/ZoneManager";
-import { PLAYER_DIMENSION_LAYER, unpackZoneId, WORLD_LAYER } from "./server/data/packing";
+import { unpackZoneId, WORLD_LAYER } from "./server/data/packing";
 import { PanelTaskbar } from "./ui/dom/PanelTaskbar";
 import { UiEditMode } from "./ui/dom/UiEditMode";
 import { PanelSettingsPopup } from "./ui/dom/PanelSettingsPopup";
@@ -224,34 +224,17 @@ async function main(): Promise<Runtime> {
   // (0, 0), the "active" set starts empty at app boot — no zone
   // subscriptions until a caller actually sets an anchor.
   //
-  // Three flavors, branched on the zoneId's layer:
+  // Two flavors, branched on the zoneId's layer:
   //
   //  - World zones (`layer === WORLD_LAYER`): `subscribeWorldZone`
   //    pulls both the `zones` row (tile data) AND world-surface
   //    `cards` / `souls` for that macro_zone.
-  //  - Player-dim zones (`layer === PLAYER_DIMENSION_LAYER`): one
-  //    `subscribePlayerDimension(playerId)` covers ALL 4 chunks of
-  //    the local player's dim — filtered server-side by
-  //    `owner_id = playerId`, not by macro_zone. Multiple zone-id
-  //    activations on this layer dedupe via `installSubscription`'s
-  //    name key (`player_dim:<playerId>`). The `playerId` is read
-  //    lazily from `zones.getPlayerId()` so anchors set before
-  //    login defer their subscriptions until login lands and
-  //    `setPlayerId` fires (see PlayerManager listener below).
   //  - Inventory / non-world zones: `subscribeCards` pulls cards
   //    for `(macro_zone, surface)`. No `zones` row to fetch.
   const subscribeZone = (zoneId: number) => {
     const { macroZone, layer } = unpackZoneId(zoneId);
     if (layer === WORLD_LAYER) {
       void data.subscriptions.subscribeWorldZone(macroZone);
-    } else if (layer === PLAYER_DIMENSION_LAYER) {
-      const playerId = zones.getPlayerId();
-      if (playerId !== null) {
-        void data.subscriptions.subscribePlayerDimension(playerId);
-      }
-      // No-op pre-login; the PlayerManager listener below
-      // re-runs subscribeZone for every active player-dim zone
-      // once the player_id lands.
     } else {
       void data.subscriptions.subscribeCards(zoneId);
     }
@@ -260,18 +243,6 @@ async function main(): Promise<Runtime> {
     const { macroZone, layer } = unpackZoneId(zoneId);
     if (layer === WORLD_LAYER) {
       data.subscriptions.unsubscribeWorldZone(macroZone);
-    } else if (layer === PLAYER_DIMENSION_LAYER) {
-      const playerId = zones.getPlayerId();
-      if (playerId !== null) {
-        // Single shared subscription across the 4 chunks — only
-        // tear down when ALL player-dim zones have demoted.
-        const stillActive = Array.from(zones.zonesIn("active")).some(
-          (zid) => unpackZoneId(zid).layer === PLAYER_DIMENSION_LAYER,
-        );
-        if (!stillActive) {
-          data.subscriptions.unsubscribePlayerDimension(playerId);
-        }
-      }
     } else {
       data.subscriptions.unsubscribeCards(zoneId);
     }
@@ -289,19 +260,11 @@ async function main(): Promise<Runtime> {
   const playerSession = new PlayerManager(reducers, data);
   const souls = new SoulManager(playerSession, data, zones);
 
-  // Feed the player_id into ZoneManager so the player-dim subscribe
-  // dispatch above can resolve owner_id at subscription time. Also
-  // re-run `subscribeZone` for every player-dim zone that landed in
-  // "active" before login — those were no-ops at the time (player_id
-  // was null) and need a second chance now that we know the owner.
+  // Feed the player_id into ZoneManager so client-local "who am I
+  // signed in as" lookups (e.g. `localPlayerFactionFolder`) resolve.
   playerSession.on((player) => {
     zones.setPlayerId(player?.playerId ?? null);
     if (player) {
-      for (const zoneId of zones.zonesIn("active")) {
-        if (unpackZoneId(zoneId).layer === PLAYER_DIMENSION_LAYER) {
-          subscribeZone(zoneId);
-        }
-      }
       // PlayerProfile mirror — covers blueprint_info / soul_info
       // capacity readouts and the player-scope blueprint
       // discovery bitfield. One-off install per login (the row is
@@ -353,10 +316,6 @@ async function main(): Promise<Runtime> {
     playerSession,
   });
   lifecycle.start();
-
-  // The old singleton `"soul"` anchor (zones-around-the-active-soul)
-  // moved into `GameViewPanel`: each open panel maintains its own
-  // namespaced `soul:<panelId>` anchor for the soul it displays.
 
   const ctx: GameContext = {
     app,

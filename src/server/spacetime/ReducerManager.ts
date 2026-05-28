@@ -43,11 +43,13 @@ import type { ConnectionRegistry } from "./ConnectionRegistry";
  *      to every `serverNowMs()` output so the client stays safely
  *      behind true server. Sized at `2 * runningDelay` and clamped to
  *      `[CLIENT_DELAY_MIN_MS, CLIENT_DELAY_MAX_MS]`, where
- *      `runningDelay` tracks the EWMA of recent extreme-spike
- *      magnitudes. Grows on observed turbulence, decays as conditions
- *      improve. The server's backward grace is set per-player to
- *      `2 * clientDelay` (via `setClientDelay`), giving 4× safety
- *      headroom over the observed worst-case variance.
+ *      `runningDelay` tracks the EWMA of recent spike magnitudes.
+ *      Grows on observed turbulence, decays as conditions improve.
+ *      Purely client-local — no server coordination. The server uses
+ *      a static `BACKWARD_GRACE_MS` (= 10s) wide enough to cover the
+ *      client's max `clientDelay` (5s) with 2× headroom, so the
+ *      client adapts freely within `[1500, 5000]` without telling
+ *      the server anything.
  *
  * Routing: all reducers go to `registry.shard` except `sendChatMessage`,
  * which targets `registry.chat`.
@@ -463,8 +465,8 @@ export class ReducerManager {
    *     after a drift-correction window clear.
    *   - `clientLagMs`: live `clientDelay` value subtracted from
    *     `serverNowMs()`. Adaptive — grows on extreme spikes, decays
-   *     as conditions stabilize. Server's backward grace is `2 *
-   *     this` (per-player, set via `setClientDelay`).
+   *     as conditions stabilize. Client-local only; the server's
+   *     static `BACKWARD_GRACE_MS` (= 10s) covers it with margin.
    *   - `runningDeltaMs`: cumulative offset correction. Smooths
    *     anchor-swap jumps. In steady state oscillates near zero.
    *   - `runningDelayMs`: EWMA of recent extreme-spike magnitudes.
@@ -608,7 +610,11 @@ export class ReducerManager {
     const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.moveSoul({ ...args, clientTimeMs });
+      await conn.reducers.moveSoul({
+        ...args,
+        path: args.path.map((p) => ({ ...p, macroZone: BigInt(p.macroZone) })),
+        clientTimeMs,
+      });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
@@ -650,7 +656,14 @@ export class ReducerManager {
     const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.placeCard({ ...args, clientTimeMs });
+      await conn.reducers.placeCard({
+        ...args,
+        placement: {
+          ...args.placement,
+          macroZone: BigInt(args.placement.macroZone),
+        },
+        clientTimeMs,
+      });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
@@ -686,60 +699,11 @@ export class ReducerManager {
     const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.requestBlueprint({ ...args, clientTimeMs });
-    } catch (err) {
-      this.correctFromDrift(err, Number(clientTimeMs), start);
-      throw err;
-    } finally {
-      this.recordRtt(performance.now() - start);
-    }
-  }
-
-  /** Fire `request_player_blueprint`: spawn a `player_blueprint`
-   *  card at `(surface, macroZone, microZone, microLocation)` owned
-   *  by the caller player. The server validates that the player has
-   *  discovered the blueprint (`PlayerProfile.blueprints_0`) and
-   *  that `blueprint_info.count < blueprint_info.max`. Driven by
-   *  the player-scope BlueprintsPanel's drag drop in
-   *  `DragManager.handleBlueprintDrop`. */
-  async requestPlayerBlueprint(args: {
-    blueprintId: number;
-    surface: number;
-    macroZone: number;
-    microZone: number;
-    microLocation: number;
-  }): Promise<void> {
-    const clientTimeMs = BigInt(Math.round(this.serverNowMs()));
-    debug.log(
-      ["spacetime"],
-      `[spacetime] requestPlayerBlueprint blueprint=${args.blueprintId} ` +
-        `surface=${args.surface} macroZone=${args.macroZone} microZone=${args.microZone} ` +
-        `microLocation=${args.microLocation} clientTimeMs=${clientTimeMs}`,
-      0,
-    );
-    const conn = await this.registry.shard.connect();
-    const start = performance.now();
-    try {
-      await conn.reducers.requestPlayerBlueprint({ ...args, clientTimeMs });
-    } catch (err) {
-      this.correctFromDrift(err, Number(clientTimeMs), start);
-      throw err;
-    } finally {
-      this.recordRtt(performance.now() - start);
-    }
-  }
-
-  async createCharacter(args: { starterPackId: number }): Promise<void> {
-    const clientTimeMs = BigInt(Math.round(this.serverNowMs()));
-    debug.log(
-      ["spacetime"],
-      `[spacetime] createCharacter starterPackId=${args.starterPackId} clientTimeMs=${clientTimeMs}`,
-      4,
-    );
-    const conn = await this.registry.shard.connect();
-    const start = performance.now();
-    try {
-      await conn.reducers.createCharacter({ ...args, clientTimeMs });
+      await conn.reducers.requestBlueprint({
+        ...args,
+        macroZone: BigInt(args.macroZone),
+        clientTimeMs,
+      });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
@@ -799,7 +763,11 @@ export class ReducerManager {
     const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.proposeAction({ ...args, clientTimeMs });
+      await conn.reducers.proposeAction({
+        ...args,
+        macroZone: BigInt(args.macroZone),
+        clientTimeMs,
+      });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;

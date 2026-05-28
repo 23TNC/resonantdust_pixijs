@@ -4,8 +4,7 @@ import { LayoutWorld } from "./LayoutWorld";
 import type { ManagedPanel } from "../../ui/panels/PanelManager";
 import { PanelTaskbar } from "../../ui/dom/PanelTaskbar";
 import { PixiPanel } from "../../ui/dom/PixiPanel";
-import { tryActivateSoul } from "../permissions";
-import { unpackMacroZone, unpackMicroZone, WORLD_LAYER } from "../../server/data/packing";
+import { unpackMicroZone, WORLD_LAYER } from "../../server/data/packing";
 import { WorldPanManager } from "./WorldPanManager";
 
 /** Default world-panel width when no saved rect exists. */
@@ -26,15 +25,16 @@ const DEFAULT_GAMEVIEW_WIDTH = 800;
  *  - A `WorldPanManager` wired to the same anchor + surface, driving
  *    drag-pan and Space-key recenter for this panel.
  *  - **Soul mode (`surface == WORLD_LAYER`, `soulId != null`).** Per-
- *    soul subscriptions install (`subscribeSoul` /
- *    `subscribeCard` / `subscribeSoulPrivate`) and a `"soul:<panelId>"`
- *    anchor keeps zones around the soul subscribed even when the
- *    camera has panned elsewhere. `assignSoul(newSoulId)` retargets.
- *  - **Dimension mode (`soulId == null`).** No soul subscriptions,
+ *    soul subscriptions install (`subscribeSoul` / `subscribeCard` /
+ *    `subscribeSoulPrivate`) and the viewport recenters on the soul
+ *    once its row lands. From then on the `viewport:<panelId>` anchor
+ *    drives zone subscription; the player's own cards stay loaded via
+ *    the scene-wide `subscribeOwnedCards`. `assignSoul(newSoulId)`
+ *    retargets.
+ *  - **Soulless mode (`soulId == null`).** No soul subscriptions,
  *    no soul-follow anchor. The viewport starts at the supplied
  *    `(initialQ, initialR)` (default `(0, 0)`) and pans freely
- *    within whatever ZoneManager activates on this surface. Used
- *    by the auto-opened player-dim view on login.
+ *    within whatever ZoneManager activates on this surface.
  */
 export class GameViewPanel implements ManagedPanel {
   readonly panel: PixiPanel;
@@ -46,7 +46,7 @@ export class GameViewPanel implements ManagedPanel {
   private readonly ctx: GameContext;
   /** Stack of cleanup fns for the currently-assigned soul (subscriptions,
    *  row listener, anchor clear). Replaced wholesale on `assignSoul`.
-   *  Empty in dimension mode. */
+   *  Empty in soulless mode. */
   private soulCleanup: Array<() => void> = [];
   private destroyed = false;
   private readonly unsubRect: () => void;
@@ -61,8 +61,7 @@ export class GameViewPanel implements ManagedPanel {
       initialQ?: number;
       initialR?: number;
       /** Panel title override. Defaults to `"Game View - <soulId>"`
-       *  in soul mode, `"Game View"` in dim mode. Dim-mode callers
-       *  typically pass `"Game View - <player.name>"`. */
+       *  in soul mode, `"Game View"` in soulless mode. */
       title?: string;
     } = {},
   ) {
@@ -88,9 +87,8 @@ export class GameViewPanel implements ManagedPanel {
     // Title composes from `"Game View" + suffix resolver`. Default
     // suffix is "soul" in soul mode (preserves the prior "Game
     // View - <soulId>" but with the soul's name instead of the
-    // raw id) and "player" in dim mode (preserves the prior
-    // caller-injected "Game View - <player.name>"). User can
-    // flip / disable via the popup.
+    // raw id) and "player" in soulless mode. User can flip / disable
+    // via the popup.
     this.panel = new PixiPanel({
       title: options.title ?? "Game View",
       parent,
@@ -99,7 +97,7 @@ export class GameViewPanel implements ManagedPanel {
         player: () => ctx.playerSession.getPlayer()?.name ?? null,
         // Soul-name lookup from card id (`null` when the soul
         // row hasn't landed yet). Only registered when soulId is
-        // non-null — dim-mode game views don't have a soul to
+        // non-null — soulless game views don't have a soul to
         // name.
         ...(soulId !== null ? {
           soul: () => {
@@ -159,13 +157,6 @@ export class GameViewPanel implements ManagedPanel {
       ctx.zones.setAnchor(viewportAnchorName, q, r, this.surface);
     }
 
-    // Focusing the game-view re-activates its currently-assigned
-    // soul (no-op in dim mode where soulId is null —
-    // `tryActivateSoul` does nothing for non-numeric ids).
-    this.panel.onFocus(() => {
-      if (this.soulId !== null) tryActivateSoul(this.ctx, this.soulId);
-    });
-
     this.panel.onDestroy(() => this.cleanup());
   }
 
@@ -205,7 +196,7 @@ export class GameViewPanel implements ManagedPanel {
   }
 
   /** Re-center the viewport on this panel's current soul. No-op if
-   *  the soul row hasn't landed yet, or in dim mode (no soul to
+   *  the soul row hasn't landed yet, or in soulless mode (no soul to
    *  follow — caller should `tweenTo` an explicit hex). Called by
    *  the Space-key handler while this panel has focus. */
   recenter(): void {
@@ -213,9 +204,9 @@ export class GameViewPanel implements ManagedPanel {
     if (this.soulId === null) return;
     const soul = this.ctx.data.soulsLocal.get(this.soulId);
     if (!soul) return;
-    const { zoneQ, zoneR } = unpackMacroZone(soul.macroZone);
+    if (soul.macro.kind !== "world") return;
     const { localQ, localR } = unpackMicroZone(soul.microZone);
-    this.worldPanManager.tweenTo(zoneQ + localQ, zoneR + localR);
+    this.worldPanManager.tweenTo(soul.macro.q + localQ, soul.macro.r + localR);
   }
 
   /** Snap the viewport to `(q, r)` on `surface`. Switches the
@@ -225,9 +216,8 @@ export class GameViewPanel implements ManagedPanel {
    *  the subscribed zones. One-shot — does not attach a
    *  soul-follow; the user pans freely from the new position.
    *
-   *  Used by the `👁` button on soul cards in `OwnedCardsPanel`
-   *  to jump this viewport to wherever the selected soul
-   *  currently lives. */
+   *  Used by soul-jump affordances to snap this viewport to
+   *  wherever a selected soul currently lives. */
   focusAt(q: number, r: number, surface: number): void {
     if (this.destroyed) return;
     if (this.layoutWorld.surface !== surface) {
@@ -244,48 +234,42 @@ export class GameViewPanel implements ManagedPanel {
 
   get currentSoulId(): number | null { return this.soulId; }
 
-  /** Wire up subscriptions + anchor + initial-pan for a freshly-
-   *  assigned soul. */
+  /** Wire up subscriptions + initial recenter for a freshly-assigned
+   *  soul. There's no soul-follow anchor — once the initial recenter
+   *  lands the viewport on the soul, the viewport anchor (driven by
+   *  `WorldPanManager`) is what keeps the surrounding zones
+   *  subscribed. The local player's own cards stay loaded via the
+   *  scene-wide `subscribeOwnedCards`, independent of the camera. */
   private installSoul(soulId: number): void {
     const subs = this.ctx.data.subscriptions;
-    const soulAnchorName = `soul:${this.panelId}`;
 
     void subs.subscribeSoul(soulId);
     void subs.subscribeCard(soulId);
     void subs.subscribeSoulPrivate(soulId);
 
-    let panDone = false;
-    const unsubSoul = this.ctx.data.subscribeLocalSoulKey(soulId, (change) => {
-      const row = change.kind === "removed" ? null : (change.kind === "added" ? change.row : change.newRow);
-      if (!row) return;
-      if (row.surface < WORLD_LAYER) return;
-      // Keep the soul anchor (zones-around-the-soul) glued to the
-      // soul's current macro zone — even when the user pans the
-      // viewport elsewhere.
-      const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
-      this.ctx.zones.setAnchor(soulAnchorName, zoneQ, zoneR);
-      // Initial recenter on first row arrival.
-      if (!panDone) {
-        panDone = true;
-        this.recenter();
-      }
-    });
-
-    // Surface any soul row already in `soulsLocal` (e.g. row arrived
-    // via world-zone or owned-cards subscription before our per-soul
-    // sub finished installing). subscribeLocalSoulKey only fires on
+    // Recenter once the soul's world-surface row is available. It may
+    // already be in `soulsLocal` (arrived via the world-zone or
+    // owned-cards subscription before our per-soul sub installed);
+    // otherwise wait for it — `subscribeLocalSoulKey` only fires on
     // diffs, not initial state.
-    const existing = this.ctx.data.soulsLocal.get(soulId);
-    if (existing && existing.surface >= WORLD_LAYER) {
-      const { zoneQ, zoneR } = unpackMacroZone(existing.macroZone);
-      this.ctx.zones.setAnchor(soulAnchorName, zoneQ, zoneR);
-      panDone = true;
+    let unsubSoul: (() => void) | null = null;
+    const recenterOnce = (): boolean => {
+      const soul = this.ctx.data.soulsLocal.get(soulId);
+      if (!soul || soul.surface < WORLD_LAYER) return false;
       this.recenter();
+      return true;
+    };
+    if (!recenterOnce()) {
+      unsubSoul = this.ctx.data.subscribeLocalSoulKey(soulId, () => {
+        if (recenterOnce()) {
+          unsubSoul?.();
+          unsubSoul = null;
+        }
+      });
     }
 
     this.soulCleanup = [
-      () => unsubSoul(),
-      () => this.ctx.zones.clearAnchor(soulAnchorName),
+      () => unsubSoul?.(),
       () => subs.unsubscribeSoul(soulId),
       () => subs.unsubscribeCard(soulId),
       () => subs.unsubscribeSoulPrivate(soulId),

@@ -15,7 +15,7 @@ export default {
   soulCardId: __t.u32(),
   blueprintId: __t.u16(),
   surface: __t.u8(),
-  macroZone: __t.u32(),
+  macroZone: __t.u64(),
   microZone: __t.u8(),
   microLocation: __t.u32(),
 };

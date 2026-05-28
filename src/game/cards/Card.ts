@@ -58,9 +58,9 @@ export type CardPositionState =
   /** World / hex-grid placement. `q, r` are global axial coords.
    *
    *  - **Overworld** (default, `surface == WORLD_LAYER`).
-   *  - **Player pocket dimension** (`surface == PLAYER_DIMENSION_LAYER`).
-   *    `(q, r)` are still global axial coords; the converter
-   *    floors to chunk origin the same way as world. */
+   *  - **Mini-zone** (`surface == MINI_ZONE_LAYER`). `(q, r)` are
+   *    still global axial coords; the converter floors to chunk
+   *    origin the same way as world. */
   | {
       kind: "world";
       q: number;

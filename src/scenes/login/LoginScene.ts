@@ -184,7 +184,7 @@ export class LoginScene extends Scene {
       // Disconnect immediately so the next claimOrLogin (from the
       // Login button) re-establishes the session — keeps the "log
       // out then back in" narrative honest. If reconnecting feels
-      // jarring we can skip straight to MainScene's play mode instead.
+      // jarring we can skip straight to MainScene instead.
       this.rememberedUsername = username;
       this.mode = "login";
       this.busy = false;

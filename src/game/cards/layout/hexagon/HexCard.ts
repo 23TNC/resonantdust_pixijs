@@ -27,10 +27,10 @@ import { DeathAnimation } from "../DeathAnimation";
 import { WorldObjectOverlay } from "../WorldObjectOverlay";
 import { ownerFactionFolder } from "../../../../server/player/playerFlags";
 import {
-  unpackMacroZone,
   unpackMicroZone,
   WORLD_LAYER,
 } from "../../../../server/data/packing";
+import { macroOrigin } from "../../../world/worldCoords";
 
 /** Size of the hex card's *physical* footprint — the rectangle used by
  *  inventory push-collision (`GameInventory.tryPush`). Owned by
@@ -289,7 +289,7 @@ export class LayoutHexCard extends LayoutCard {
     // positioned), then center the card on its hex by subtracting
     // half-width / half-height.
     if (row.surface >= WORLD_LAYER) {
-      const { zoneQ, zoneR } = unpackMacroZone(row.macroZone);
+      const { zoneQ, zoneR } = macroOrigin(row.macro);
       const { localQ, localR } = unpackMicroZone(row.microZone);
       const q = zoneQ + localQ;
       const r = zoneR + localR;

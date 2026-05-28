@@ -6,7 +6,7 @@ import {
   STACK_DIRECTION_HEX,
   STACK_DIRECTION_UP,
 } from "../cards/cardData";
-import { PLAYER_DIMENSION_LAYER } from "../../server/data/packing";
+import { MINI_ZONE_LAYER } from "../../server/data/packing";
 import type { LocalCard } from "../../server/data/DataManager";
 import { getZoneTileSlot } from "../world/worldCoords";
 import type { MatchResult } from "./recipeMatcher";
@@ -398,12 +398,10 @@ export class ActionManager {
     // `docs/TILE_AS_CARD.md`.
     //
     // Threshold gates inventory layers (1, 2) out — those have no
-    // tile bitfield — while admitting `PLAYER_DIMENSION_LAYER` (62),
-    // `MINI_ZONE_LAYER` (63), and `WORLD_LAYER` (64). Mirrors the
-    // server's `SYNTHETIC_HEX_MIN_SURFACE` (32 — chosen with
-    // headroom for future tile-bearing surfaces).
+    // tile bitfield — while admitting `MINI_ZONE_LAYER` (63) and
+    // `WORLD_LAYER` (64+), the tile-bearing surfaces today.
     let syntheticTile: { packedDef: number; stock0: number; stock1: number } | null = null;
-    if (rootRow.surface >= PLAYER_DIMENSION_LAYER && branchHex.length === 0) {
+    if (rootRow.surface >= MINI_ZONE_LAYER && branchHex.length === 0) {
       const localQ = (rootRow.microZone >> 5) & 0x7;
       const localR = (rootRow.microZone >> 2) & 0x7;
       const tileCardRow = findFreeTileCardAt(

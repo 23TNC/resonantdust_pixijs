@@ -6,7 +6,10 @@ import type { ConnectionRegistry } from "../spacetime/ConnectionRegistry";
 import type { ReducerManager } from "../spacetime/ReducerManager";
 import { SubscriptionManager } from "../spacetime/SubscriptionManager";
 import {
+  decodeMacroLoc,
   isStackLayout,
+  type MacroLoc,
+  macroFields,
   packStackMicroZone,
   unpackStackMicroZone,
 } from "./packing";
@@ -15,6 +18,23 @@ import { getStackDirection } from "../../game/cards/cardData";
 import { ValidAtTable, type TableChange, type TableListener } from "./ValidAtTable";
 import { AppendTable } from "./AppendTable";
 import type { CardManager } from "../../game/cards/CardManager";
+
+/** Decode a server row at the ingestion boundary: carry the macro-location in
+ *  both forms — the packed `macroZone` narrowed `bigint` → `number` (the
+ *  location key, read directly for equality / keying / SQL / reducer args) and
+ *  the decoded [`MacroLoc`] (the coords, read directly for rendering). Every
+ *  client tier (`ValidAtTable.server` → `current` → `*Local`) holds both, so
+ *  reads never pack or unpack. Applied to the macro_zone-bearing tables
+ *  (`cards` / `souls` / `zones`); the flat `soul_privates` / `player_profiles`
+ *  carry no `macro_zone`. (Phase 2 extends this to `micro_zone` /
+ *  `micro_location`.) */
+const decodeMacro = <T extends { macroZone: bigint; surface: number }>(
+  row: T,
+): Omit<T, "macroZone"> & { macroZone: number; macro: MacroLoc } => ({
+  ...row,
+  macroZone: Number(row.macroZone),
+  macro: decodeMacroLoc(row.macroZone, row.surface),
+});
 
 const INVENTORY_LAYER = 1;
 /** Bit 4 of `flagsState` — set on soul cards whose `ownerId` is a
@@ -177,9 +197,7 @@ export class DataManager {
   /** Per-player profile state, keyed by `player_id`. Flat (no
    *  history). Mirrored from `subscribePlayerProfile(playerId)` —
    *  installed once at login, so the client typically holds exactly
-   *  one row (for the local player). Sourced by
-   *  `getPlayerBlueprintCapacity` for the dna-panel title bar and
-   *  the player-scope drag drop pre-check. */
+   *  one row (for the local player). */
   readonly playerProfilesLocal = new Map<number, PlayerProfile>();
 
   private readonly unsubMirror: Array<() => void> = [];
@@ -241,9 +259,10 @@ export class DataManager {
     this.chatSubscriptions = new ChatSubscriptionManager(registry.chat);
 
     this.subscriptions.registerTableHandlers("cards", {
-      onInsert: this.cards.insert,
-      onUpdate: this.cards.update,
-      onDelete: this.cards.delete,
+      onInsert: (row) => this.cards.insert(decodeMacro(row)),
+      onUpdate: (oldRow, newRow) =>
+        this.cards.update(decodeMacro(oldRow), decodeMacro(newRow)),
+      onDelete: (row) => this.cards.delete(decodeMacro(row)),
     });
     this.subscriptions.registerTableHandlers("players", {
       onInsert: this.players.insert,
@@ -251,9 +270,10 @@ export class DataManager {
       onDelete: this.players.delete,
     });
     this.subscriptions.registerTableHandlers("souls", {
-      onInsert: this.souls.insert,
-      onUpdate: this.souls.update,
-      onDelete: this.souls.delete,
+      onInsert: (row) => this.souls.insert(decodeMacro(row)),
+      onUpdate: (oldRow, newRow) =>
+        this.souls.update(decodeMacro(oldRow), decodeMacro(newRow)),
+      onDelete: (row) => this.souls.delete(decodeMacro(row)),
     });
     // `soul_privates` is flat (no validAt history), so we mirror it
     // directly into `soulPrivatesLocal` instead of routing through a
@@ -286,9 +306,10 @@ export class DataManager {
       },
     });
     this.subscriptions.registerTableHandlers("zones", {
-      onInsert: this.zones.insert,
-      onUpdate: this.zones.update,
-      onDelete: this.zones.delete,
+      onInsert: (row) => this.zones.insert(decodeMacro(row)),
+      onUpdate: (oldRow, newRow) =>
+        this.zones.update(decodeMacro(oldRow), decodeMacro(newRow)),
+      onDelete: (row) => this.zones.delete(decodeMacro(row)),
     });
     this.chatSubscriptions.registerTableHandlers("chat_messages", {
       onInsert: this.chatMessages.insert,
@@ -670,7 +691,7 @@ export class DataManager {
     if (change.kind === "removed") {
       debug.log(
         ["spacetime"],
-        `[spacetime] card row removed t=${nowSecs} id=${change.key} prev=${prev ? `flagsState=0x${prev.flagsState.toString(16)} flagsBk=0x${prev.flagsBk.toString(16)} microZone=0x${prev.microZone.toString(16)} microLocation=${prev.microLocation} macroZone=${prev.macroZone} surface=${prev.surface}` : "absent"}`,
+        `[spacetime] card row removed t=${nowSecs} id=${change.key} prev=${prev ? `flagsState=0x${prev.flagsState.toString(16)} flagsBk=0x${prev.flagsBk.toString(16)} microZone=0x${prev.microZone.toString(16)} microLocation=${prev.microLocation} macro=${JSON.stringify(prev.macro)} surface=${prev.surface}` : "absent"}`,
         0,
       );
       if (prev === undefined) return;
@@ -683,7 +704,7 @@ export class DataManager {
     const serverState = serverRow.microZone & 0x3;
     debug.log(
       ["spacetime"],
-      `[spacetime] card row ${change.kind} t=${nowSecs} id=${change.key} validAt=${validAtOf(serverRow.validAt)} state=${serverState} flagsState=0x${serverRow.flagsState.toString(16)} flagsBk=0x${serverRow.flagsBk.toString(16)} microZone=0x${serverRow.microZone.toString(16)} microLocation=${serverRow.microLocation} macroZone=${serverRow.macroZone} surface=${serverRow.surface}`,
+      `[spacetime] card row ${change.kind} t=${nowSecs} id=${change.key} validAt=${validAtOf(serverRow.validAt)} state=${serverState} flagsState=0x${serverRow.flagsState.toString(16)} flagsBk=0x${serverRow.flagsBk.toString(16)} microZone=0x${serverRow.microZone.toString(16)} microLocation=${serverRow.microLocation} macro=${JSON.stringify(serverRow.macro)} surface=${serverRow.surface}`,
       0,
     );
 
@@ -832,7 +853,7 @@ export class DataManager {
     let baseRow: Card = orphanSlot
       ? {
           ...serverRow,
-          macroZone:     orphanInventoryBucket,
+          ...macroFields({ kind: "container", id: orphanInventoryBucket }),
           surface:       INVENTORY_LAYER,
           microLocation: 0, // encodeLooseXY(0, 0) === 0
           microZone:     serverRow.microZone & ~0x3, // state → STACKED_LOOSE
@@ -841,6 +862,7 @@ export class DataManager {
       ? {
           ...serverRow,
           macroZone:     prev.macroZone,
+          macro:         prev.macro,
           microZone:     prev.microZone,
           microLocation: prev.microLocation,
           surface:       prev.surface,

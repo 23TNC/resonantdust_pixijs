@@ -10,16 +10,9 @@ const ASPECT_WALK_DEPTH_CAP = 16;
  * Blueprint-slot snapshot: `active` placed-but-unresolved blueprint
  * cards vs the cap `max`. `available = max - active` (floored at 0).
  *
- * Two parallel shapes — one per scope:
- *
- * - **Soul scope** (`getSoulBlueprintCapacity`): cap derived from the
- *   soul's `aspects.builder` value, count from
- *   `SoulPrivate.active_blueprints`. Mirrors the server's
- *   `blueprints::request_blueprint` gate.
- * - **Player scope** (`getPlayerBlueprintCapacity`): cap + count
- *   packed into `PlayerProfile.blueprint_info` (max in low nibble,
- *   count in high nibble — see `pack_nibbles`). Mirrors the server's
- *   `blueprints::request_player_blueprint` gate.
+ * Soul-scoped: cap derived from the soul's `aspects.builder` value,
+ * count from `SoulPrivate.active_blueprints`. Mirrors the server's
+ * `blueprints::request_blueprint` gate.
  */
 export interface BlueprintCapacity {
   active: number;
@@ -58,28 +51,6 @@ export function getSoulBlueprintCapacity(
 
   const privateRow = ctx.data.soulPrivatesLocal.get(soulCardId);
   const active = privateRow?.activeBlueprints ?? 0;
-  return {
-    active,
-    max,
-    available: Math.max(0, max - active),
-  };
-}
-
-/** Player-scope variant — reads the packed `blueprint_info` byte off
- *  the local `PlayerProfile` mirror. Returns the empty placeholder
- *  if the profile row hasn't arrived yet (subscription installs at
- *  login; the row is delivered on first promote). */
-export function getPlayerBlueprintCapacity(
-  ctx: GameContext,
-  playerId: number,
-): BlueprintCapacity {
-  const profile = ctx.data.playerProfilesLocal.get(playerId);
-  if (!profile) return { active: 0, max: 0, available: 0 };
-  const packed = profile.blueprintInfo;
-  // `[count: u4 | max: u4]` — count in high nibble, max in low.
-  // Matches `content/src/packed.rs::pack_nibbles`.
-  const active = (packed >> 4) & 0xf;
-  const max = packed & 0xf;
   return {
     active,
     max,

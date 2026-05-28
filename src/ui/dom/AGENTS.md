@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Purpose
-Shared DOM-based UI primitives. Every floating / dockable surface in the app (chat, debug HUD, settings menu, character-select chooser, taskbars) is built on these — the DOM side owns drag / resize / minimize / close / persistence, and consumers add either DOM content or Pixi content through narrow extension points. The bottom-of-screen "Windows-style" taskbars + the UI-edit-mode workflow also live here.
+Shared DOM-based UI primitives. Every floating / dockable surface in the app (chat, debug HUD, settings menu, taskbars) is built on these — the DOM side owns drag / resize / minimize / close / persistence, and consumers add either DOM content or Pixi content through narrow extension points. The bottom-of-screen "Windows-style" taskbars + the UI-edit-mode workflow also live here.
 
 ## Important files
 

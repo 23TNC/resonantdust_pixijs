@@ -55,8 +55,6 @@ function owningPlayerId(ctx: GameContext, cardId: number): number | null {
  *   - Clicking / focusing an inventory panel (drags of cards inside
  *     the inventory are then permission-gated against the new
  *     active soul).
- *   - Selecting a soul in the chooser (Play / drag pathways read
- *     the active soul next).
  *
  * Returns `true` when activation succeeded, `false` when the card
  * isn't a soul card or isn't owned by the local player. No-op when

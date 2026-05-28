@@ -1,12 +1,22 @@
 import {
   MINI_ZONE_LAYER,
-  PLAYER_DIMENSION_LAYER,
   unpackZoneId,
   WORLD_LAYER,
   type ZoneId,
 } from "../data/packing";
 import { DbConnection as ShardDbConnection } from "./bindings/shard";
-import type { Card, Player, PlayerProfile, Soul, SoulPrivate, Zone } from "./bindings/types";
+// The SDK→handler fan-out below operates on the *generated* row shapes
+// (`macroZone: bigint`), so this map uses those directly. `DataManager`
+// coerces `macroZone` to `number` at ingestion before storing the row; the
+// narrowed `number` row types live in `./bindings/types` for game code.
+import type {
+  Card,
+  Player,
+  PlayerProfile,
+  Soul,
+  SoulPrivate,
+  Zone,
+} from "./bindings/shard/types";
 import type { ConnectionManager } from "./ConnectionManager";
 import { SubscriptionBase, type TableHandlers } from "./SubscriptionBase";
 
@@ -165,13 +175,12 @@ export class SubscriptionManager extends SubscriptionBase<
   async subscribeWorldZone(macroZone: number): Promise<void> {
     return this.installSubscription(`zones:${macroZone}`, {
       queries: [
-        // Surface filter required since `PLAYER_DIMENSION_LAYER`
-        // landed — player dims share `macro_zone` with world chunks
-        // (`macro_zone=0` for chunk (0,0) collides with every
-        // player's dim chunk (0,0), etc.). Without this filter the
-        // subscription would deliver foreign player dim Zones into
-        // the world ValidAtTable and clobber the world Zone at
-        // matching macro_zone.
+        // Scope to the world surface explicitly: a chunk's packed
+        // `macro_zone` can numerically coincide with rows on other
+        // surfaces (e.g. a mini_zone keyed by an anchor card_id), and
+        // without this filter those would leak into the world
+        // ValidAtTable and clobber the world Zone at matching
+        // macro_zone.
         `SELECT * FROM zones WHERE macro_zone = ${macroZone} AND surface = ${WORLD_LAYER}`,
         `SELECT * FROM cards WHERE macro_zone = ${macroZone} AND surface = ${WORLD_LAYER}`,
         `SELECT * FROM souls WHERE macro_zone = ${macroZone} AND surface = ${WORLD_LAYER}`,
@@ -196,32 +205,6 @@ export class SubscriptionManager extends SubscriptionBase<
 
   unsubscribeMiniZone(anchorCardId: number): void {
     this.removeSubscription(`mini_zone:${anchorCardId}`);
-  }
-
-  /**
-   * Subscribe to the local player's pocket dimension on
-   * `PLAYER_DIMENSION_LAYER (62)`. Unlike world / mini_zone, the
-   * macro_zone is shared across all players' dims at the same chunk
-   * coord — `owner_id == player_id` is the discriminator, so the
-   * filter scopes to just this player's Zones, cards, and souls.
-   *
-   * Installed once on login, torn down on logout. Covers all 4 chunks
-   * of the 2×2 dim grid (the macro_zone filter is omitted — we want
-   * everything the player owns on this surface).
-   */
-  async subscribePlayerDimension(playerId: number): Promise<void> {
-    return this.installSubscription(`player_dim:${playerId}`, {
-      queries: [
-        `SELECT * FROM zones WHERE owner_id = ${playerId} AND surface = ${PLAYER_DIMENSION_LAYER}`,
-        `SELECT * FROM cards WHERE owner_id = ${playerId} AND surface = ${PLAYER_DIMENSION_LAYER}`,
-        `SELECT * FROM souls WHERE owner_id = ${playerId} AND surface = ${PLAYER_DIMENSION_LAYER}`,
-      ],
-      scopeKey: `player_dim:${playerId}`,
-    });
-  }
-
-  unsubscribePlayerDimension(playerId: number): void {
-    this.removeSubscription(`player_dim:${playerId}`);
   }
 
   async subscribeCard(cardId: number): Promise<void> {
@@ -266,9 +249,8 @@ export class SubscriptionManager extends SubscriptionBase<
   /** Subscribe to the per-player profile row for `playerId`. Mirrors
    *  the `subscribeSoulPrivate` pattern — the table is `public` but
    *  each client only queries its own row, so per-player
-   *  progression (`blueprints_0`, `blueprint_info`, `soul_info`,
-   *  `starter_packs`, …) doesn't fan out to other players' clients
-   *  via the player-dim / world subscriptions. */
+   *  progression (`blueprints_0`, `blueprint_info`, …) doesn't fan
+   *  out to other players' clients via the world subscriptions. */
   async subscribePlayerProfile(playerId: number): Promise<void> {
     return this.installSubscription(`player_profile:${playerId}`, {
       queries: [`SELECT * FROM player_profiles WHERE player_id = ${playerId}`],

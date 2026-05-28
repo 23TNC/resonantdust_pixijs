@@ -1,8 +1,8 @@
 /**
  * Parsed representation of the server's `magnetic_blocked:` error
- * response, returned from `proposeAction` / `addCard` / `createCharacter`
- * / `deployMiniZone` when the caller has expired magnetic actions that
- * haven't been resolved.
+ * response, returned from `proposeAction` / `addCard` / `deployMiniZone`
+ * when the caller has expired magnetic actions that haven't been
+ * resolved.
  *
  * Server format (see `magnetic_pending::block_check` in the shard
  * module):

@@ -18,7 +18,7 @@ export interface ManagedPanel {
  *
  * Keys are strings; convention is `"<type>:<entityId>"` for per-entity
  * panels (e.g. `"inventory:42"`, `"gameview:1"`) and just `"<type>"`
- * for singletons (e.g. `"chooser"`, `"details"`, `"blueprints"`).
+ * for singletons (e.g. `"details"`, `"blueprints"`).
  *
  * Callers use `ensure(id, factory)` to get-or-create — if the id is
  * already in the registry, the existing panel is focused and

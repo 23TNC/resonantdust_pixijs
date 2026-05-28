@@ -37,7 +37,6 @@ import {
 import AddCardReducer from "./add_card_reducer";
 import BootstrapReducer from "./bootstrap_reducer";
 import ClaimOrLoginReducer from "./claim_or_login_reducer";
-import CreateCharacterReducer from "./create_character_reducer";
 import DeployMiniZoneReducer from "./deploy_mini_zone_reducer";
 import EquipCardReducer from "./equip_card_reducer";
 import GenerateForestTerrainReducer from "./generate_forest_terrain_reducer";
@@ -179,7 +178,6 @@ const reducersSchema = __reducers(
   __reducerSchema("add_card", AddCardReducer),
   __reducerSchema("bootstrap", BootstrapReducer),
   __reducerSchema("claim_or_login", ClaimOrLoginReducer),
-  __reducerSchema("create_character", CreateCharacterReducer),
   __reducerSchema("deploy_mini_zone", DeployMiniZoneReducer),
   __reducerSchema("equip_card", EquipCardReducer),
   __reducerSchema("generate_forest_terrain", GenerateForestTerrainReducer),
