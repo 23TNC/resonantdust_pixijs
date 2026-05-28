@@ -11,7 +11,7 @@
   "dependencies": {
     "@spd789562/particle-emitter": "^1.0.2",
     "pixi.js": "8.9.1",
-    "spacetimedb": "^2.1.0"
+    "spacetimedb": "^2.3.0"
   },
   "devDependencies": {
     "typescript": "5.8.3",
