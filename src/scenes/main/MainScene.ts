@@ -13,7 +13,7 @@ import { LayoutManager } from "../../game/layout/LayoutManager";
 import { LayoutWorld } from "../../game/world/LayoutWorld";
 import { GameViewPanel } from "../../game/world/GameViewPanel";
 import { PanelManager } from "../../ui/panels/PanelManager";
-import { unpackMacroZone, unpackMicroZone } from "../../server/data/packing";
+import { unpackMicroZone } from "../../server/data/packing";
 import { LayoutCard } from "../../game/cards/layout/CardLayout";
 import type { LayoutNode } from "../../game/layout/LayoutNode";
 import { owningSoul, tryActivateSoul } from "../../game/permissions";
@@ -157,10 +157,11 @@ export class MainScene extends Scene {
     // once soul-follow is rewired for the player_soul model.
     this.mainLayout.openWorldView();
 
-    // Same idea for the player-wide inventory bucket — the account-
-    // scoped permanent-items bag. Soul-specific inventories open
-    // when the user clicks a soul card.
-    this.mainLayout.openPlayerInventoryPanel(player.playerId);
+    // Inventory spawning is disabled — inventory is being replaced
+    // soon. The `InventoryPanel` code + `MainLayout.open*Inventory`
+    // helpers are kept intact; re-enable by uncommenting this and the
+    // click-handler block below.
+    // this.mainLayout.openPlayerInventoryPanel(player.playerId);
 
     this.installInputHandlers(ctx);
   }
@@ -238,18 +239,22 @@ export class MainScene extends Scene {
         //                above / near the clicked card.
         //   - `> 9`    → finite cap but still large panel.
         tryActivateSoul(ctx, hit.cardId);
-        const row = ctx.data.cardsLocal.get(hit.cardId);
-        if (row) {
-          const invValue = ctx.definitions.aspectValue(row.packedDefinition, "inventory");
-          if (invValue !== null) {
-            const cap = invValue === 0 ? Infinity : invValue;
-            if (cap !== Infinity && cap <= 9) {
-              this.mainLayout.openMiniInventoryPanel(hit.cardId, data.up.x, data.up.y, cap);
-            } else {
-              this.mainLayout.openInventoryPanel(hit.cardId);
-            }
-          }
-        }
+        // Inventory spawning is disabled — inventory is being replaced
+        // soon. Kept intact for re-enable (see the login-time spawn in
+        // `onEnter`). When restored, this opens a mini popover for
+        // small caps (`1..=9`) or the large panel otherwise.
+        // const row = ctx.data.cardsLocal.get(hit.cardId);
+        // if (row) {
+        //   const invValue = ctx.definitions.aspectValue(row.packedDefinition, "inventory");
+        //   if (invValue !== null) {
+        //     const cap = invValue === 0 ? Infinity : invValue;
+        //     if (cap !== Infinity && cap <= 9) {
+        //       this.mainLayout.openMiniInventoryPanel(hit.cardId, data.up.x, data.up.y, cap);
+        //     } else {
+        //       this.mainLayout.openInventoryPanel(hit.cardId);
+        //     }
+        //   }
+        // }
         this.mainLayout.detailsPanel.show(hit.cardId, ctx);
         return;
       }

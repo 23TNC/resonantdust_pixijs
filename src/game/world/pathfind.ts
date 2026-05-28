@@ -14,7 +14,7 @@
  */
 import type { Zone } from "../../server/spacetime/bindings/types";
 import type { DefinitionManager } from "../definitions/DefinitionManager";
-import { packMacroZone, packMicroZone, unpackMacroZone, unpackMicroZone } from "../../server/data/packing";
+import { decodeMacroZone, makeMacroZone, type MacroZone, packMicroZone, unpackMicroZone } from "../../server/data/packing";
 import { STACKED_LOOSE } from "../cards/cardData";
 import { ZONE_SIZE, getZoneTileDef } from "./worldCoords";
 
@@ -50,7 +50,7 @@ export interface Coord {
  *  `TilePoint` SpacetimeType on the server. */
 export interface TilePoint {
   surface: number;
-  macroZone: number;
+  macroZone: bigint;
   microZone: number;
 }
 
@@ -108,13 +108,10 @@ function tileDefAt(
   const macroR = Math.floor(coord.r / ZONE_SIZE);
   const localQ = ((coord.q % ZONE_SIZE) + ZONE_SIZE) % ZONE_SIZE;
   const localR = ((coord.r % ZONE_SIZE) + ZONE_SIZE) % ZONE_SIZE;
-  const macroZone = packMacroZone(macroQ * ZONE_SIZE, macroR * ZONE_SIZE);
-  // `getZoneTileDef` doesn't filter by surface; gate that here so a
-  // hypothetical inventory-surface zone with the same macroZone
-  // doesn't shadow the world tile.
+  // World tile key: owner 0 (WORLD), this surface, the chunk's coords.
+  const macroZone = makeMacroZone(0, surface, macroQ * ZONE_SIZE, macroR * ZONE_SIZE).packed;
   for (const zone of zonesLocal.values()) {
-    if (zone.macroZone !== macroZone) continue;
-    if (zone.surface !== surface) continue;
+    if (zone.macroZone.packed !== macroZone) continue;
     return getZoneTileDef(zonesLocal, macroZone, localQ, localR);
   }
   return 0;
@@ -133,7 +130,7 @@ function coordToTilePoint(coord: Coord, surface: number): TilePoint {
   const localR = ((coord.r % ZONE_SIZE) + ZONE_SIZE) % ZONE_SIZE;
   return {
     surface,
-    macroZone: packMacroZone(macroQ * ZONE_SIZE, macroR * ZONE_SIZE),
+    macroZone: makeMacroZone(0, surface, macroQ * ZONE_SIZE, macroR * ZONE_SIZE).packed,
     microZone: packMicroZone(localQ, localR, STACKED_LOOSE),
   };
 }
@@ -143,13 +140,11 @@ function coordToTilePoint(coord: Coord, surface: number): TilePoint {
  *  that `micro_zone` carries an `OnHex` state — soul rows always do
  *  in the world layer. */
 export function coordFromTileAddress(
-  surface: number,
-  macroZone: number,
+  macroZone: bigint,
   microZone: number,
 ): Coord {
-  const { zoneQ, zoneR } = unpackMacroZone(macroZone);
+  const { zoneQ, zoneR } = decodeMacroZone(macroZone);
   const { localQ, localR } = unpackMicroZone(microZone);
-  void surface;
   return {
     q: zoneQ + localQ,
     r: zoneR + localR,
@@ -267,23 +262,14 @@ export function findPathForSoul(
   defs: DefinitionManager,
   soul: {
     packedDefinition: number;
-    surface: number;
-    macroZone: number;
+    macroZone: MacroZone;
     microZone: number;
   },
-  target: { surface: number; macroZone: number; microZone: number },
+  target: { surface: number; macroZone: bigint; microZone: number },
 ): PathResult {
-  if (soul.surface !== target.surface) return null;
-  const start = coordFromTileAddress(
-    soul.surface,
-    soul.macroZone,
-    soul.microZone,
-  );
-  const goal = coordFromTileAddress(
-    target.surface,
-    target.macroZone,
-    target.microZone,
-  );
+  if (soul.macroZone.surface !== target.surface) return null;
+  const start = coordFromTileAddress(soul.macroZone.packed, soul.microZone);
+  const goal = coordFromTileAddress(target.macroZone, target.microZone);
   const speed = soulSpeed(defs, soul.packedDefinition);
-  return findPath(zonesLocal, defs, soul.surface, start, goal, speed);
+  return findPath(zonesLocal, defs, soul.macroZone.surface, start, goal, speed);
 }

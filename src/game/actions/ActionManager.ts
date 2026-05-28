@@ -6,7 +6,7 @@ import {
   STACK_DIRECTION_HEX,
   STACK_DIRECTION_UP,
 } from "../cards/cardData";
-import { MINI_ZONE_LAYER } from "../../server/data/packing";
+import { MINI_ZONE_LAYER, type MacroZone } from "../../server/data/packing";
 import type { LocalCard } from "../../server/data/DataManager";
 import { getZoneTileSlot } from "../world/worldCoords";
 import type { MatchResult } from "./recipeMatcher";
@@ -70,7 +70,7 @@ export interface QueuedAction {
    *  window (server will reject in Stage 2 cross-check if it
    *  doesn't agree). */
   surface: number;
-  macroZone: number;
+  macroZone: bigint;
   microZone: number;
   /** True between `proposeAction` dispatch and its round-trip
    *  resolution. While submitted, `evaluateRoot` and the
@@ -401,13 +401,13 @@ export class ActionManager {
     // tile bitfield — while admitting `MINI_ZONE_LAYER` (63) and
     // `WORLD_LAYER` (64+), the tile-bearing surfaces today.
     let syntheticTile: { packedDef: number; stock0: number; stock1: number } | null = null;
-    if (rootRow.surface >= MINI_ZONE_LAYER && branchHex.length === 0) {
+    if (rootRow.macroZone.surface >= MINI_ZONE_LAYER && branchHex.length === 0) {
       const localQ = (rootRow.microZone >> 5) & 0x7;
       const localR = (rootRow.microZone >> 2) & 0x7;
       const tileCardRow = findFreeTileCardAt(
         this.ctx.data.cardsLocal,
-        rootRow.surface,
-        rootRow.macroZone,
+        rootRow.macroZone.surface,
+        rootRow.macroZone.packed,
         localQ,
         localR,
       );
@@ -430,7 +430,7 @@ export class ActionManager {
       } else {
         const slot = getZoneTileSlot(
           this.ctx.data.zonesLocal,
-          rootRow.macroZone,
+          rootRow.macroZone.packed,
           localQ,
           localR,
         );
@@ -510,8 +510,7 @@ export class ActionManager {
   private queueAction(
     rootRow: {
       cardId: number;
-      surface: number;
-      macroZone: number;
+      macroZone: MacroZone;
       microZone: number;
     },
     match: MatchResult,
@@ -542,8 +541,8 @@ export class ActionManager {
       // server's `chain_stitch` writes it where the player sees it.
       // Without this re-snapshot the action fires with stale coords
       // and the root snaps back to where it was at queue time.
-      existing.surface = rootRow.surface;
-      existing.macroZone = rootRow.macroZone;
+      existing.surface = rootRow.macroZone.surface;
+      existing.macroZone = rootRow.macroZone.packed;
       existing.microZone = microZoneForWire;
       return;
     }
@@ -569,8 +568,8 @@ export class ActionManager {
       looseRootId: rootRow.cardId,
       recipeId: match.recipeId,
       bindings: match.bindings,
-      surface: rootRow.surface,
-      macroZone: rootRow.macroZone,
+      surface: rootRow.macroZone.surface,
+      macroZone: rootRow.macroZone.packed,
       microZone: microZoneForWire,
       submitted: false,
       scheduledAt: 0,
@@ -904,14 +903,14 @@ export class ActionManager {
 function findFreeTileCardAt(
   cardsLocal: Map<number, LocalCard>,
   surface: number,
-  macroZone: number,
+  macroZone: bigint,
   q: number,
   r: number,
 ): LocalCard | null {
   const TILE_CARD_TYPE = 7;
   for (const row of cardsLocal.values()) {
-    if (row.surface !== surface) continue;
-    if (row.macroZone !== macroZone) continue;
+    if (row.macroZone.surface !== surface) continue;
+    if (row.macroZone.packed !== macroZone) continue;
     const cardType = (row.packedDefinition >> 12) & 0xf;
     if (cardType !== TILE_CARD_TYPE) continue;
     const hex = resolveTileCardHex(cardsLocal, row);

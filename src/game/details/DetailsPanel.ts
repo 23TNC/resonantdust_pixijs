@@ -361,9 +361,9 @@ export class DetailsPanel extends LayoutNode {
     // micro_zone packs different bits (loose xy, parent pointers),
     // so the threshold gate keeps the panel quiet for those.
     let worldHex: { q: number; r: number } | null = null;
-    if (row.surface > WORLD_SURFACE_THRESHOLD && row.macro.kind === "world") {
+    if (row.macroZone.surface > WORLD_SURFACE_THRESHOLD) {
       const { localQ, localR } = unpackMicroZone(row.microZone);
-      worldHex = { q: row.macro.q + localQ, r: row.macro.r + localR };
+      worldHex = { q: row.macroZone.zoneQ + localQ, r: row.macroZone.zoneR + localR };
     }
     this.showByPackedDefinition(row.packedDefinition, ctx, stockValues, worldHex);
   }

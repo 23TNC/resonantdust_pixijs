@@ -13,7 +13,6 @@ import {
 export default __t.row({
   validAt: __t.u64().primaryKey().name("valid_at"),
   zoneId: __t.u32().name("zone_id"),
-  surface: __t.u8(),
   macroZone: __t.u64().name("macro_zone"),
   packedDefinition: __t.u8().name("packed_definition"),
   ownerId: __t.u32().name("owner_id"),

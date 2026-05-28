@@ -14,7 +14,6 @@ export default __t.row({
   validAt: __t.u64().primaryKey().name("valid_at"),
   cardId: __t.u32().name("card_id"),
   ownerId: __t.u32().name("owner_id"),
-  surface: __t.u8(),
   macroZone: __t.u64().name("macro_zone"),
   microZone: __t.u8().name("micro_zone"),
   microLocation: __t.u32().name("micro_location"),

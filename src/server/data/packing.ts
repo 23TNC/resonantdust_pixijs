@@ -17,9 +17,6 @@
  *  the same patch. There is no compile-time drift check; the
  *  discipline is "same file, same PR."
  *
- *  Client-only helpers (e.g. `packZoneId` / `unpackZoneId`) don't
- *  have server-side equivalents — those stay TS-only and live below
- *  alongside the mirrored ones for locality.
  *
  *  Encoding schemes here all match the server's wire format:
  *
@@ -33,13 +30,17 @@
  *     per id can coexist; the client picks the row whose validAt is
  *     the largest one that has elapsed.
  *
- *  2. **`ZoneId` = `macroZone * 256 + layer`** packed as a JS `number`
- *     (40 bits, well inside safe-integer range). World zones use
- *     `WORLD_LAYER`; inventory/card zones use `layer < 64`.
+ *  2. **`ZoneId` = the full packed `macroZone` u64** held as a `bigint`
+ *     (the SDK wire type). It identifies a zone uniquely by owner +
+ *     surface + coords; it's `MacroZone.packed`. World zones carry
+ *     `WORLD_LAYER` in the surface band; inventory/card zones use a
+ *     `surface < 64`.
  *
- *  3. **`macroZone` = `(chunkQ << 16) | chunkR`** packed as a u32, where
- *     each chunk is `ZONE_SIZE` × `ZONE_SIZE` hexes wide. Q/R are signed
- *     16-bit; the unpack restores the sign.
+ *  3. **`macroZone`** = `[owner_card_id:u32 | surface:u8 | chunkQ:i12 | chunkR:i12]`
+ *     (high → low), where each chunk is `ZONE_SIZE` × `ZONE_SIZE` hexes wide.
+ *     `owner` is bits 32-63 (the owning card_id; `0` = WORLD), `surface` bits
+ *     24-31, `chunkQ` bits 12-23, `chunkR` bits 0-11; the two coords are signed
+ *     12-bit (±2047), the unpack restores the sign.
  *
  *  4. **`microZone` u8 — TWO INTERPRETATIONS, gated on (state, surface):**
  *
@@ -95,14 +96,14 @@ export function validAtOf(packed: ValidAt): number {
   return Number(packed >> SEQ_SHIFT);
 }
 
-const LAYER_RANGE = 256;
+/** Zone identifier — the full packed `macro_zone` u64
+ *  `[owner_card_id:u32 | surface:u8 | i12 | i12]`, as a `bigint` (the SDK wire
+ *  type). The single value identifies a zone (owner + surface + coords)
+ *  uniquely; it's `MacroZone.packed`. */
+export type ZoneId = bigint;
 
-/** Packed `(macroZone: u32, layer: u8)` zone identifier. */
-export type ZoneId = number;
-
-/** Layer value for world zones. World ZoneIds are
- *  `packZoneId(macroZone, WORLD_LAYER)`; inventory/card zones use
- *  `layer < 64`. */
+/** Surface band for world zones. World `macroZone`s carry `WORLD_LAYER`
+ *  in bits 24-31 with owner `0`; inventory/card zones use a `surface < 64`. */
 export const WORLD_LAYER = 64;
 
 /** Surface band for a deployed mini_zone's contents — its `Zone`
@@ -129,92 +130,60 @@ export const INVENTORY_LAYER = 1;
  *  `soul.card_id`. */
 export const PLAYER_INVENTORY_LAYER = 2;
 
-/**
- * Packs `(macroZone: u32, layer: u8)` into a single `ZoneId`:
- *
- *   zoneId = macroZone * 256 + layer
- *
- * Equivalent to `macroZone << 8 | layer` but written with `*` / `%` so
- * macroZone values above `2 ** 23` survive (JS bitwise ops are 32-bit signed).
- * Result fits in 40 bits — well inside the 53-bit safe-integer range.
- */
-export function packZoneId(macroZone: number, layer: number): ZoneId {
-  return macroZone * LAYER_RANGE + (layer % LAYER_RANGE);
-}
-
-export function unpackZoneId(zoneId: ZoneId): {
-  macroZone: number;
-  layer: number;
-} {
-  return {
-    macroZone: Math.floor(zoneId / LAYER_RANGE),
-    layer: zoneId % LAYER_RANGE,
-  };
-}
-
 /** Each macroZone covers an 8×8 block of hex positions. */
 export const ZONE_SIZE = 8;
 
-/** Pack `(zoneQ, zoneR)` tile origins (multiples of `ZONE_SIZE`) into a
- *  u32 macroZone. Server format: `((chunkQ as i16 as u16) << 16) | (chunkR
- *  as i16 as u16)`, where `chunkQ = zoneQ / ZONE_SIZE`. */
-export function packMacroZone(zoneQ: number, zoneR: number): number {
-  const chunkQ = Math.floor(zoneQ / ZONE_SIZE);
-  const chunkR = Math.floor(zoneR / ZONE_SIZE);
-  return (((chunkQ & 0xffff) << 16) | (chunkR & 0xffff)) >>> 0;
-}
-
-export function unpackMacroZone(macroZone: number): {
+/** The decoded `macro_zone` a client row carries — the full packed `bigint`
+ *  key together with its unpacked parts, derived together so reads never
+ *  pack/unpack and it's clear when `packed` must be rebuilt (only via
+ *  [`makeMacroZone`]). Layout: `[owner:u32 | surface:u8 | i12 zoneQ | i12 zoneR]`.
+ *  - `packed`: the full u64 — the subscription / equality / `ZoneId` key.
+ *  - `owner`: the owning card_id (bits 32-63); `0` is the WORLD sentinel.
+ *  - `surface`: the band (bits 24-31).
+ *  - `zoneQ` / `zoneR`: tile-origin coords (chunk × `ZONE_SIZE`, signed) — read
+ *    as `(q, r)` or `(x, y)` per surface; `(0, 0)` for single-chunk surfaces. */
+export interface MacroZone {
+  packed: bigint;
+  owner: number;
+  surface: number;
   zoneQ: number;
   zoneR: number;
-} {
-  const rawQ = (macroZone >>> 16) & 0xffff;
-  const rawR = macroZone & 0xffff;
-  const chunkQ = rawQ >= 0x8000 ? rawQ - 0x10000 : rawQ;
-  const chunkR = rawR >= 0x8000 ? rawR - 0x10000 : rawR;
-  return { zoneQ: chunkQ * ZONE_SIZE, zoneR: chunkR * ZONE_SIZE };
 }
 
-/** Decoded macro-location — what the client carries on a row instead of the
- *  packed `macro_zone`. On world surfaces (`surface >= WORLD_LAYER`) it's the
- *  zone's tile-origin hex coords `(q, r)` (multiples of `ZONE_SIZE`, signed);
- *  on every other surface band `macro_zone` is a bare container id (soul /
- *  player / anchor `card_id`). Carrying the decoded form means the u64 wire
- *  composite never lives client-side — the next phase's upper-32-bit axis
- *  becomes an additive field here, not a `bigint` migration. */
-export type MacroLoc =
-  | { kind: "world"; q: number; r: number }
-  | { kind: "container"; id: number };
-
-/** Decode the wire `macro_zone` (a `u64` → SDK `bigint`) into a `MacroLoc`,
- *  dispatching on surface band. World surfaces unpack the packed
- *  `(chunkQ | chunkR)` low 32 bits into tile-origin coords; non-world
- *  surfaces carry the bare id (a u32, fits in `number`). The high 32 bits are
- *  reserved (zero today) — we read only the low 32. */
-export function decodeMacroLoc(macroZone: bigint, surface: number): MacroLoc {
-  if (surface >= WORLD_LAYER) {
-    const { zoneQ, zoneR } = unpackMacroZone(Number(macroZone & 0xffffffffn));
-    return { kind: "world", q: zoneQ, r: zoneR };
-  }
-  return { kind: "container", id: Number(macroZone) };
+/** Decode the wire `macro_zone` (`u64` → SDK `bigint`) into a [`MacroZone`].
+ *  Mirrors `pack_macro_zone_full` / the accessors in `content/src/packed.rs`. */
+export function decodeMacroZone(packed: bigint): MacroZone {
+  const rawQ = Number((packed >> 12n) & 0xfffn);
+  const rawR = Number(packed & 0xfffn);
+  const chunkQ = rawQ >= 0x800 ? rawQ - 0x1000 : rawQ;
+  const chunkR = rawR >= 0x800 ? rawR - 0x1000 : rawR;
+  return {
+    packed,
+    owner: Number((packed >> 32n) & 0xffff_ffffn),
+    surface: Number((packed >> 24n) & 0xffn),
+    zoneQ: chunkQ * ZONE_SIZE,
+    zoneR: chunkR * ZONE_SIZE,
+  };
 }
 
-/** Inverse of [`decodeMacroLoc`] — re-pack a `MacroLoc` into the low-32-bit
- *  `macro_zone` number (world: packed chunk coords; container: the id). */
-export function encodeMacroZone(macro: MacroLoc): number {
-  return macro.kind === "world" ? packMacroZone(macro.q, macro.r) : macro.id;
-}
-
-/** The two macro-location fields a client row carries: the packed
- *  `macroZone` (the location *key* — used directly for equality, `ZoneId`
- *  keying, subscription SQL, and reducer args) and the decoded `macro` (the
- *  *coords* — used directly for rendering / pathfinding). A row holds **both**
- *  so reads never pack or unpack. This is the single write helper: any code
- *  constructing a row from a `MacroLoc` calls it so the two stay in lockstep
- *  — encoding happens here and nowhere else. (Copies between rows just carry
- *  both fields across.) */
-export function macroFields(macro: MacroLoc): { macroZone: number; macro: MacroLoc } {
-  return { macroZone: encodeMacroZone(macro), macro };
+/** The single write helper — build a [`MacroZone`] from its parts, packing
+ *  `packed` in lockstep. `owner` is a card_id (`0` = WORLD); `zoneQ` / `zoneR`
+ *  are tile origins (folded to i12 chunk coords). Mirrors
+ *  `pack_macro_zone_full` in `content/src/packed.rs`. */
+export function makeMacroZone(
+  owner: number,
+  surface: number,
+  zoneQ: number,
+  zoneR: number,
+): MacroZone {
+  const chunkQ = Math.floor(zoneQ / ZONE_SIZE);
+  const chunkR = Math.floor(zoneR / ZONE_SIZE);
+  const packed =
+    (BigInt(owner >>> 0) << 32n) |
+    (BigInt(surface & 0xff) << 24n) |
+    (BigInt(chunkQ & 0xfff) << 12n) |
+    BigInt(chunkR & 0xfff);
+  return { packed, owner: owner >>> 0, surface: surface & 0xff, zoneQ, zoneR };
 }
 
 /** Pack `(localQ, localR, stackedState)` into a u8 microZone under the

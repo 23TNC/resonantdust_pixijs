@@ -1,9 +1,40 @@
-import { INVENTORY_LAYER, packZoneId, PLAYER_INVENTORY_LAYER, type ZoneId } from "../../server/data/packing";
-import { packMacroZone, WORLD_LAYER, zonesAroundAnchor } from "../world/worldCoords";
+import { type ZoneId, INVENTORY_LAYER, makeMacroZone, PLAYER_INVENTORY_LAYER } from "../../server/data/packing";
+import { chunksAroundAnchor, WORLD_LAYER } from "../world/worldCoords";
 
+/**
+ * Subscription/render tier for a tracked zone, in a demotion-only distance
+ * waterfall around the viewport anchors:
+ *
+ * - `active` — within `activeDistance`. Full subscription (zones+cards+souls for
+ *   world, cards for inventory) AND render-registered. The only tier subscribed
+ *   *proactively*; the active ring extends ahead of travel for load lead time.
+ * - `hot` — the trailing wake: only entered by demotion from `active` (never a
+ *   leading band). Same full subscription, held across active↔hot so panning
+ *   back doesn't re-snapshot, but NOT render-registered. Drops to `cold` once it
+ *   falls past `hotDistance`.
+ * - `cold` — entered by demotion from `hot`. Subscribes the `zones` table ONLY
+ *   (tile skeleton — no card/soul streaming) for a cheap keepalive of explored
+ *   ground. **Terminal: never demoted out** (no `cold→null`); only promoted
+ *   `cold→active` by re-entering the active ring. (A future `coldDistance` / LRU
+ *   will bound it; today it accumulates.)
+ *
+ * Promotion is asymmetric — a zone only rises by re-entering the `active` ring;
+ * re-entering the hot radius alone does not re-promote. That prevents boundary
+ * flapping.
+ */
 export type ZoneTier = "active" | "hot" | "cold";
 
 export type ZoneListener = (zoneId: ZoneId) => void;
+
+/** The set of SpacetimeDB queries a tier subscribes. `active`+`hot` share
+ *  `full` (so active↔hot never re-subscribes); `cold` is the lighter
+ *  `skeleton` (zones table only); `none` holds no subscription. */
+export type QueryClass = "full" | "skeleton" | "none";
+
+export type SubscriptionChangeListener = (
+  zoneId: ZoneId,
+  queryClass: QueryClass,
+) => void;
 
 export type AnchorName = string;
 /** Named viewport anchor. Carries the surface it's pinned to so
@@ -26,6 +57,16 @@ export type AnchorListener = (
 
 const TIERS: readonly ZoneTier[] = ["active", "hot", "cold"];
 
+/** Map a tier to its subscription query class. `active`+`hot` → `full`,
+ *  `cold` → `skeleton`, `null` → `none`. `set()` fires
+ *  `onSubscriptionChange` only when this value changes, so active↔hot (both
+ *  `full`) stays silent while hot→cold / cold→active re-subscribe. */
+function subClassOf(tier: ZoneTier | null | undefined): QueryClass {
+  if (tier === "active" || tier === "hot") return "full";
+  if (tier === "cold") return "skeleton";
+  return "none";
+}
+
 export class ZoneManager {
   private readonly entries = new Map<ZoneId, ZoneTier>();
   private readonly refs = new Map<ZoneId, number>();
@@ -40,14 +81,56 @@ export class ZoneManager {
     cold: new Set(),
   };
 
+  // Subscription-class listeners. Fire only when a zone's query class changes
+  // (full / skeleton / none) — so active↔hot (both `full`) stays silent while
+  // hot→cold and cold→active re-subscribe. `main.ts` drives the actual
+  // SpacetimeDB subscribe/unsubscribe off these; the per-tier `onAdded`/
+  // `onRemoved` listeners drive render registration (which toggles on
+  // active↔hot).
+  private readonly subscriptionChangeListeners = new Set<SubscriptionChangeListener>();
+
+  // Recency order of `hot` zones (Map preserves insertion order). A zone is
+  // (re-)inserted at the back when it ENTERS hot (i.e. just left active on a
+  // pan — the trailing edge most likely to be panned back into), so the
+  // front is the least-recently-left zone, demoted to cold first when over
+  // `maxHotZones`.
+  private readonly hotLru = new Map<ZoneId, true>();
+
+  // The churning wake = zones currently `active` or `hot`. Cold zones live in
+  // `entries` but NOT here, so the demote pass in `recomputeAnchorZones` stays
+  // O(active+hot) even as cold accumulates. A zone joins on promotion to
+  // active and leaves when it demotes to cold.
+  private readonly wake = new Set<ZoneId>();
+
   // ── World coordinate anchors ─────────────────────────────────────────────
   private readonly anchors = new Map<AnchorName, WorldAnchor>();
   private readonly anchorListeners = new Set<AnchorListener>();
 
-  /** How many hex rings around each anchor to keep subscribed. */
-  anchorRadius = 2;
+  /** Active ring distance (Chebyshev, in chunks): zones within this many chunk
+   *  rings of any anchor are `active` (full sub + rendered). Also the forward
+   *  load-lead distance — the ring includes the next chunk before you reach it.
+   *  Sizing rule: ≥ the render reach in chunks (≈1 at fullscreen; raise when
+   *  zoomed out / on large panels, or for more lead at high pan speed).
+   *  Mutable so callers can drive it from zoom / panel size. */
+  activeDistance = 1;
 
-  private prevAnchorZones = new Set<ZoneId>();
+  /** Hot wake depth (Chebyshev, in chunks): how far a demoted zone trails as a
+   *  *full* subscription before downgrading to `cold` (skeleton). The bandwidth
+   *  lever for expensive subs. Must be ≥ `activeDistance`. */
+  hotDistance = 2;
+
+  /** Hard ceiling on `hot` (full) subscriptions, as a multi-anchor safety
+   *  valve. Per-anchor geometry already bounds the wake; this only binds when
+   *  several anchors' wakes sum past it. Over-cap zones demote to `cold`
+   *  (shedding cards/souls, keeping the skeleton) rather than dropping. Keep it
+   *  above a single anchor's wake to avoid churn in the common case. Evicts
+   *  least-recently-left first. */
+  maxHotZones = 32;
+
+  /** Whether the viewport this manager serves is a hex or rectangular grid.
+   *  Informational forward hook (shear-aware selection / future rect surfaces);
+   *  not branched on yet — selection is square chunk rings either way. */
+  viewportGridType: "hex" | "rect" = "hex";
 
   /** Local player_id, set when login resolves. Read by client-local
    *  "who am I signed in as" lookups (e.g. `localPlayerFactionFolder`
@@ -83,15 +166,22 @@ export class ZoneManager {
     const prev = this.entries.get(zoneId);
     if (prev === tier) return;
 
+    const prevClass = subClassOf(prev);
+
     if (prev !== undefined) {
       this.entries.delete(zoneId);
+      if (prev === "hot") this.hotLru.delete(zoneId);
       this.fireRemoved(prev, zoneId);
     }
 
     if (tier) {
       this.entries.set(zoneId, tier);
+      if (tier === "hot") this.hotLru.set(zoneId, true); // MRU
       this.fireAdded(tier, zoneId);
     }
+
+    const newClass = subClassOf(tier);
+    if (prevClass !== newClass) this.fireSubscriptionChange(zoneId, newClass);
   }
 
   remove(zoneId: ZoneId): void {
@@ -120,13 +210,13 @@ export class ZoneManager {
   /**
    * Convenience wrapper around `ensure` for the per-soul inventory
    * zone. Callers pass the soul's `card_id`; the inventory zone id
-   * is computed here (`packZoneId(soulCardId, INVENTORY_LAYER)`) so
+   * is computed here (`makeMacroZone(soulCardId, INVENTORY_LAYER, 0, 0).packed`) so
    * the surface-layer constant doesn't have to leak into every
    * consumer. Returns the same refcounted release fn shape as
    * `ensure`.
    */
   ensureInventory(soulCardId: number): () => void {
-    return this.ensure(packZoneId(soulCardId, INVENTORY_LAYER));
+    return this.ensure(makeMacroZone(soulCardId, INVENTORY_LAYER, 0, 0).packed);
   }
 
   /**
@@ -137,7 +227,7 @@ export class ZoneManager {
    * same refcounted release fn.
    */
   ensurePlayerInventory(playerId: number): () => void {
-    return this.ensure(packZoneId(playerId, PLAYER_INVENTORY_LAYER));
+    return this.ensure(makeMacroZone(playerId, PLAYER_INVENTORY_LAYER, 0, 0).packed);
   }
 
   private release(zoneId: ZoneId): void {
@@ -164,6 +254,16 @@ export class ZoneManager {
     }
   }
 
+  /** Every zone currently holding a live subscription, with its query class
+   *  (`full` or `skeleton`). Used by `main.ts` for the initial catch-up before
+   *  its `onSubscriptionChange` listener is registered. */
+  *subscribedZones(): Generator<{ zoneId: ZoneId; queryClass: QueryClass }> {
+    for (const [zoneId, t] of this.entries) {
+      const queryClass = subClassOf(t);
+      if (queryClass !== "none") yield { zoneId, queryClass };
+    }
+  }
+
   onAdded(tier: ZoneTier, listener: ZoneListener): () => void {
     this.addedListeners[tier].add(listener);
     return () => {
@@ -175,6 +275,17 @@ export class ZoneManager {
     this.removedListeners[tier].add(listener);
     return () => {
       this.removedListeners[tier].delete(listener);
+    };
+  }
+
+  /** Fires when a zone's subscription query class changes (full / skeleton /
+   *  none) — i.e. on null→sub, sub→null, and hot↔cold, but NOT on active↔hot
+   *  (both `full`). The listener installs/swaps/drops the SpacetimeDB
+   *  subscription accordingly. */
+  onSubscriptionChange(listener: SubscriptionChangeListener): () => void {
+    this.subscriptionChangeListeners.add(listener);
+    return () => {
+      this.subscriptionChangeListeners.delete(listener);
     };
   }
 
@@ -226,24 +337,62 @@ export class ZoneManager {
     return () => { this.anchorListeners.delete(listener); };
   }
 
-  /** Walk every anchor, pack a zone_id per `(zoneQ, zoneR)` in the
-   *  anchor's `anchorRadius` ring on the anchor's surface, diff
-   *  against the previous set, promote/demote zones accordingly.
-   *  Same shape as the old world-only version; now surface-keyed. */
+  /** Demotion-only distance waterfall over square (Chebyshev) chunk rings,
+   *  surface-keyed (each anchor packs zone_ids on its own layer):
+   *
+   *  1. Demote pass over the current wake (active ∪ hot) only — cold is
+   *     terminal and skipped. A zone that left the active ring → `hot`; a hot
+   *     zone that fell past `hotDistance` → `cold` (and leaves the wake).
+   *  2. Promote pass — the active ring (within `activeDistance`) is the ONLY
+   *     proactive subscribe, promoting from hot / cold / fresh.
+   *  3. Multi-anchor LRU valve — excess full (hot) subs demote to `cold`.
+   *
+   *  Promotion happens only here via the active ring, so a cold/hot zone never
+   *  rises by merely re-entering the hot radius — preventing boundary flapping. */
   private recomputeAnchorZones(): void {
-    const next = new Set<ZoneId>();
+    const activeSet = new Set<ZoneId>();
+    const hotEligible = new Set<ZoneId>();
     for (const { q, r, surface } of this.anchors.values()) {
-      for (const { zoneQ, zoneR } of zonesAroundAnchor(q, r, this.anchorRadius)) {
-        next.add(packZoneId(packMacroZone(zoneQ, zoneR), surface));
+      for (const { zoneQ, zoneR } of chunksAroundAnchor(q, r, this.activeDistance)) {
+        activeSet.add(makeMacroZone(0, surface, zoneQ, zoneR).packed);
+      }
+      for (const { zoneQ, zoneR } of chunksAroundAnchor(q, r, this.hotDistance)) {
+        hotEligible.add(makeMacroZone(0, surface, zoneQ, zoneR).packed);
       }
     }
-    for (const zoneId of this.prevAnchorZones) {
-      if (!next.has(zoneId)) this.set(zoneId, null);
+
+    // 1. Demote pass — wake (active ∪ hot) only. Safe to delete from `wake`
+    //    mid-iteration (the current element is simply not revisited). A zone
+    //    that left the active ring goes to `hot`, or straight to `cold` if it
+    //    also jumped past `hotDistance` (a teleport) — so the wake never holds
+    //    a stale full sub for an out-of-range chunk.
+    for (const zoneId of this.wake) {
+      if (activeSet.has(zoneId)) continue;
+      if (hotEligible.has(zoneId)) {
+        // Within the wake: a zone that just left the active ring becomes hot;
+        // a zone already hot stays hot (set() no-ops on same tier).
+        this.set(zoneId, "hot");
+      } else {
+        // Past the wake (normal trailing edge, or a teleport jump) → cold
+        // skeleton (terminal).
+        this.set(zoneId, "cold");
+        this.wake.delete(zoneId);
+      }
     }
-    for (const zoneId of next) {
-      if (!this.prevAnchorZones.has(zoneId)) this.set(zoneId, "active");
+
+    // 2. Promote pass — active ring is the only proactive subscribe.
+    for (const zoneId of activeSet) {
+      this.set(zoneId, "active"); // hot→active register-only; cold→active upgrades to full
+      this.wake.add(zoneId);
     }
-    this.prevAnchorZones = next;
+
+    // 3. Multi-anchor LRU valve — excess full subs shed cards/souls to cold.
+    while (this.hotLru.size > this.maxHotZones) {
+      const lru = this.hotLru.keys().next().value;
+      if (lru === undefined) break;
+      this.set(lru, "cold");
+      this.wake.delete(lru);
+    }
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -251,10 +400,13 @@ export class ZoneManager {
   dispose(): void {
     this.entries.clear();
     this.refs.clear();
+    this.hotLru.clear();
+    this.wake.clear();
     for (const tier of TIERS) {
       this.addedListeners[tier].clear();
       this.removedListeners[tier].clear();
     }
+    this.subscriptionChangeListeners.clear();
     this.anchors.clear();
     this.anchorListeners.clear();
   }
@@ -275,6 +427,16 @@ export class ZoneManager {
         listener(zoneId);
       } catch (err) {
         console.error(`[ZoneManager] ${tier} removed listener threw`, err);
+      }
+    }
+  }
+
+  private fireSubscriptionChange(zoneId: ZoneId, queryClass: QueryClass): void {
+    for (const listener of this.subscriptionChangeListeners) {
+      try {
+        listener(zoneId, queryClass);
+      } catch (err) {
+        console.error(`[ZoneManager] subscriptionChange listener threw`, err);
       }
     }
   }

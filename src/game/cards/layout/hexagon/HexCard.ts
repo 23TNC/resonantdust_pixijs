@@ -30,7 +30,6 @@ import {
   unpackMicroZone,
   WORLD_LAYER,
 } from "../../../../server/data/packing";
-import { macroOrigin } from "../../../world/worldCoords";
 
 /** Size of the hex card's *physical* footprint — the rectangle used by
  *  inventory push-collision (`GameInventory.tryPush`). Owned by
@@ -288,8 +287,8 @@ export class LayoutHexCard extends LayoutCard {
     // world origin (which is where `LayoutWorld.worldCardSurface` is
     // positioned), then center the card on its hex by subtracting
     // half-width / half-height.
-    if (row.surface >= WORLD_LAYER) {
-      const { zoneQ, zoneR } = macroOrigin(row.macro);
+    if (row.macroZone.surface >= WORLD_LAYER) {
+      const { zoneQ, zoneR } = row.macroZone;
       const { localQ, localR } = unpackMicroZone(row.microZone);
       const q = zoneQ + localQ;
       const r = zoneR + localR;

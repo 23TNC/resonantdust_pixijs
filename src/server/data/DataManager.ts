@@ -6,10 +6,10 @@ import type { ConnectionRegistry } from "../spacetime/ConnectionRegistry";
 import type { ReducerManager } from "../spacetime/ReducerManager";
 import { SubscriptionManager } from "../spacetime/SubscriptionManager";
 import {
-  decodeMacroLoc,
+  decodeMacroZone,
   isStackLayout,
-  type MacroLoc,
-  macroFields,
+  type MacroZone,
+  makeMacroZone,
   packStackMicroZone,
   unpackStackMicroZone,
 } from "./packing";
@@ -19,21 +19,21 @@ import { ValidAtTable, type TableChange, type TableListener } from "./ValidAtTab
 import { AppendTable } from "./AppendTable";
 import type { CardManager } from "../../game/cards/CardManager";
 
-/** Decode a server row at the ingestion boundary: carry the macro-location in
- *  both forms — the packed `macroZone` narrowed `bigint` → `number` (the
- *  location key, read directly for equality / keying / SQL / reducer args) and
- *  the decoded [`MacroLoc`] (the coords, read directly for rendering). Every
- *  client tier (`ValidAtTable.server` → `current` → `*Local`) holds both, so
- *  reads never pack or unpack. Applied to the macro_zone-bearing tables
- *  (`cards` / `souls` / `zones`); the flat `soul_privates` / `player_profiles`
- *  carry no `macro_zone`. (Phase 2 extends this to `micro_zone` /
- *  `micro_location`.) */
-const decodeMacro = <T extends { macroZone: bigint; surface: number }>(
+/** Decode a server row at the ingestion boundary into the three derived
+ *  macro-location forms — the folded packed `macroZone` (`bigint` → `number`,
+ *  the location key for equality / keying / SQL), the decoded [`MacroLoc`]
+ *  (coords for rendering), and the `surface` band (bits 24-31, for the many
+ *  `row.surface` reads). `macro_zone` now encodes surface, so there's no
+ *  separate surface column. Every client tier (`ValidAtTable.server` →
+ *  `current` → `*Local`) holds all three, so reads never pack or unpack.
+ *  Applied to the macro_zone-bearing tables (`cards` / `souls` / `zones`); the
+ *  flat `soul_privates` / `player_profiles` carry no `macro_zone`. (Phase 2
+ *  extends this to `micro_zone` / `micro_location`.) */
+const decodeMacro = <T extends { macroZone: bigint }>(
   row: T,
-): Omit<T, "macroZone"> & { macroZone: number; macro: MacroLoc } => ({
+): Omit<T, "macroZone"> & { macroZone: MacroZone } => ({
   ...row,
-  macroZone: Number(row.macroZone),
-  macro: decodeMacroLoc(row.macroZone, row.surface),
+  macroZone: decodeMacroZone(row.macroZone),
 });
 
 const INVENTORY_LAYER = 1;
@@ -658,7 +658,7 @@ export class DataManager {
     const cardId = change.key;
     const isAnchorNow =
       change.kind !== "removed"
-      && (change.kind === "added" ? change.row : change.newRow).surface === WORLD_LAYER
+      && (change.kind === "added" ? change.row : change.newRow).macroZone.surface === WORLD_LAYER
       && this.definitions.isCardType(
         (change.kind === "added" ? change.row : change.newRow).packedDefinition,
         "mini_zone",
@@ -691,7 +691,7 @@ export class DataManager {
     if (change.kind === "removed") {
       debug.log(
         ["spacetime"],
-        `[spacetime] card row removed t=${nowSecs} id=${change.key} prev=${prev ? `flagsState=0x${prev.flagsState.toString(16)} flagsBk=0x${prev.flagsBk.toString(16)} microZone=0x${prev.microZone.toString(16)} microLocation=${prev.microLocation} macro=${JSON.stringify(prev.macro)} surface=${prev.surface}` : "absent"}`,
+        `[spacetime] card row removed t=${nowSecs} id=${change.key} prev=${prev ? `flagsState=0x${prev.flagsState.toString(16)} flagsBk=0x${prev.flagsBk.toString(16)} microZone=0x${prev.microZone.toString(16)} microLocation=${prev.microLocation} macroZone=${prev.macroZone.packed} surface=${prev.macroZone.surface}` : "absent"}`,
         0,
       );
       if (prev === undefined) return;
@@ -704,7 +704,7 @@ export class DataManager {
     const serverState = serverRow.microZone & 0x3;
     debug.log(
       ["spacetime"],
-      `[spacetime] card row ${change.kind} t=${nowSecs} id=${change.key} validAt=${validAtOf(serverRow.validAt)} state=${serverState} flagsState=0x${serverRow.flagsState.toString(16)} flagsBk=0x${serverRow.flagsBk.toString(16)} microZone=0x${serverRow.microZone.toString(16)} microLocation=${serverRow.microLocation} macro=${JSON.stringify(serverRow.macro)} surface=${serverRow.surface}`,
+      `[spacetime] card row ${change.kind} t=${nowSecs} id=${change.key} validAt=${validAtOf(serverRow.validAt)} state=${serverState} flagsState=0x${serverRow.flagsState.toString(16)} flagsBk=0x${serverRow.flagsBk.toString(16)} microZone=0x${serverRow.microZone.toString(16)} microLocation=${serverRow.microLocation} macroZone=${serverRow.macroZone.packed} surface=${serverRow.macroZone.surface}`,
       0,
     );
 
@@ -801,7 +801,7 @@ export class DataManager {
         //     local row here would silently drop those moves and
         //     leave the client's view permanently stuck at the
         //     pre-move position.
-        preservePosition = serverRow.surface < WORLD_LAYER;
+        preservePosition = serverRow.macroZone.surface < WORLD_LAYER;
       } else if (serverState === 1 /* STACKED_SLOT */) {
         // State-1 chain members carry `microLocation = predecessor`
         // and `microZone = direction`. The client owns the chain
@@ -822,7 +822,7 @@ export class DataManager {
         // path.
         const forced = (serverRow.flagsState & (FLAG_POS_NEED | FLAG_POS_WANT)) !== 0;
         preservePosition = !forced;
-      } else if (isStackLayout(serverState, serverRow.surface)) {
+      } else if (isStackLayout(serverState, serverRow.macroZone.surface)) {
         // State-2 OnRoot on inventory — same placement-assertion
         // gate as the state-1 branch above.
         const forced = (serverRow.flagsState & (FLAG_POS_NEED | FLAG_POS_WANT)) !== 0;
@@ -853,8 +853,7 @@ export class DataManager {
     let baseRow: Card = orphanSlot
       ? {
           ...serverRow,
-          ...macroFields({ kind: "container", id: orphanInventoryBucket }),
-          surface:       INVENTORY_LAYER,
+          macroZone:     makeMacroZone(orphanInventoryBucket, INVENTORY_LAYER, 0, 0),
           microLocation: 0, // encodeLooseXY(0, 0) === 0
           microZone:     serverRow.microZone & ~0x3, // state → STACKED_LOOSE
         }
@@ -862,10 +861,8 @@ export class DataManager {
       ? {
           ...serverRow,
           macroZone:     prev.macroZone,
-          macro:         prev.macro,
           microZone:     prev.microZone,
           microLocation: prev.microLocation,
-          surface:       prev.surface,
         }
       : serverRow;
 
@@ -1074,7 +1071,7 @@ export class DataManager {
    *  so downstream listeners (Card.onDataChange) tween. */
   private renumberAfterForcedStackPosition(forcedId: number, forced: LocalCard): void {
     const forcedState = forced.microZone & 0x3;
-    if (!isStackLayout(forcedState, forced.surface)) return;
+    if (!isStackLayout(forcedState, forced.macroZone.surface)) return;
     const { position: forcedPos, direction: forcedDir } = unpackStackMicroZone(forced.microZone);
     const forcedRoot = forced.microLocation;
     if (forcedPos === 0) return;
@@ -1083,7 +1080,7 @@ export class DataManager {
     for (const [id, row] of this.cardsLocal) {
       if (id === forcedId) continue;
       if ((row.microZone & 0x3) !== forcedState) continue;
-      if (!isStackLayout(forcedState, row.surface)) continue;
+      if (!isStackLayout(forcedState, row.macroZone.surface)) continue;
       if (row.microLocation !== forcedRoot) continue;
       const { position, direction } = unpackStackMicroZone(row.microZone);
       // Only bump cards in the SAME direction — top and bottom chains

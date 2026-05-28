@@ -13,7 +13,6 @@ import {
 export const Card = __t.object("Card", {
   validAt: __t.u64(),
   cardId: __t.u32(),
-  surface: __t.u8(),
   macroZone: __t.u64(),
   microZone: __t.u8(),
   microLocation: __t.u32(),
@@ -99,7 +98,6 @@ export const Soul = __t.object("Soul", {
   validAt: __t.u64(),
   cardId: __t.u32(),
   ownerId: __t.u32(),
-  surface: __t.u8(),
   macroZone: __t.u64(),
   microZone: __t.u8(),
   microLocation: __t.u32(),
@@ -126,7 +124,6 @@ export type TilePoint = __Infer<typeof TilePoint>;
 export const Zone = __t.object("Zone", {
   validAt: __t.u64(),
   zoneId: __t.u32(),
-  surface: __t.u8(),
   macroZone: __t.u64(),
   packedDefinition: __t.u8(),
   ownerId: __t.u32(),

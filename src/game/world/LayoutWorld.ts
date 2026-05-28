@@ -6,8 +6,8 @@ import { debug } from "../../debug";
 import { WORLD_HEX_HEIGHT, WORLD_HEX_RADIUS, WORLD_HEX_WIDTH } from "./hexSize";
 import { getTextureRegistry, type TextureDefinition } from "../definitions/TextureRegistry";
 import type { CardDefinition } from "../definitions/DefinitionManager";
-import { decodeZoneTiles, macroOrigin, WORLD_LAYER } from "./worldCoords";
-import { unpackZoneId } from "../../server/data/packing";
+import { decodeZoneTiles, WORLD_LAYER } from "./worldCoords";
+import { decodeMacroZone, type ZoneId } from "../../server/data/packing";
 import { getStackedState, STACKED_LOOSE } from "../cards/cardData";
 import { localPlayerFactionFolder } from "../../server/player/playerFlags";
 import type { LocalCard } from "../../server/data/DataManager";
@@ -397,18 +397,23 @@ export class LayoutWorld extends LayoutNode {
     // The `=== this.surface` check means a world LayoutWorld and a
     // mini-zone LayoutWorld can coexist without stealing each
     // other's zone registrations.
-    const registerZone = (zoneId: number): void => {
-      if (unpackZoneId(zoneId).layer === this.surface) {
+    const registerZone = (zoneId: ZoneId): void => {
+      if (decodeMacroZone(zoneId).surface === this.surface) {
         layoutManager.register(zoneId, this.worldCardSurface);
       }
     };
-    const unregisterZone = (zoneId: number): void => {
-      if (unpackZoneId(zoneId).layer === this.surface) {
+    const unregisterZone = (zoneId: ZoneId): void => {
+      if (decodeMacroZone(zoneId).surface === this.surface) {
         layoutManager.unregister(zoneId);
       }
     };
+    // Render registration tracks the `active` tier only. `hot` (full sub) and
+    // `cold` (zones-only skeleton) zones are subscribed but deliberately not
+    // rendered — their card surface registers when they re-enter `active`
+    // (onAdded fires on the →active transition) and unregisters on active→hot
+    // (onRemoved). Tile data still hydrates for hot/cold zones, but they sit
+    // outside the visible rect so nothing draws until promoted.
     for (const zoneId of ctx.zones.zonesIn("active")) registerZone(zoneId);
-    for (const zoneId of ctx.zones.zonesIn("hot")) registerZone(zoneId);
     this.unsubZoneAdded = ctx.zones.onAdded("active", registerZone);
     this.unsubZoneRemoved = ctx.zones.onRemoved("active", unregisterZone);
 
@@ -458,7 +463,7 @@ export class LayoutWorld extends LayoutNode {
     // world tiles (and vice versa) — necessary now that multiple
     // surfaces can have Zone rows in `current` simultaneously.
     for (const zone of ctx.data.zones.current.values()) {
-      if (zone.surface !== this.surface) continue;
+      if (zone.macroZone.surface !== this.surface) continue;
       for (const tile of decodeZoneTiles(zone, ctx.definitions)) {
         this.tileData.set(`${tile.q},${tile.r}`, {
           packed: tile.packed,
@@ -501,7 +506,7 @@ export class LayoutWorld extends LayoutNode {
         change.kind === "removed" ? change.oldRow
         : change.kind === "added" ? change.row
         : change.newRow;
-      if (row.surface !== this.surface) return;
+      if (row.macroZone.surface !== this.surface) return;
       const cardType = (row.packedDefinition >> 12) & 0xf;
       if (cardType !== TILE_CARD_TYPE) return;
       // A tile-card landed / moved / was reaped — its hex (and any hex
@@ -523,8 +528,8 @@ export class LayoutWorld extends LayoutNode {
         : change.newRow;
       // Filter to this view's surface so a world LayoutWorld
       // doesn't react to mini-zone zone changes (and vice versa).
-      if (zone.surface !== this.surface) return;
-      const { zoneQ, zoneR } = macroOrigin(zone.macro);
+      if (zone.macroZone.surface !== this.surface) return;
+      const { zoneQ, zoneR } = zone.macroZone;
       for (let t = 0; t < 8; t++) {
         for (let b = 0; b < 8; b++) {
           this.tileData.delete(`${zoneQ + b},${zoneR + t}`);
@@ -569,13 +574,13 @@ export class LayoutWorld extends LayoutNode {
     if (newSurface === this.surface) return;
     const oldSurface = this.surface;
     for (const zoneId of this.ctx.zones.zonesIn("active")) {
-      if (unpackZoneId(zoneId).layer === oldSurface) {
+      if (decodeMacroZone(zoneId).surface === oldSurface) {
         this.layoutManagerRef.unregister(zoneId);
       }
     }
     this.surface = newSurface;
     for (const zoneId of this.ctx.zones.zonesIn("active")) {
-      if (unpackZoneId(zoneId).layer === newSurface) {
+      if (decodeMacroZone(zoneId).surface === newSurface) {
         this.layoutManagerRef.register(zoneId, this.worldCardSurface);
       }
     }
@@ -585,7 +590,7 @@ export class LayoutWorld extends LayoutNode {
     // already in `data.zones.current`.
     this.tileData.clear();
     for (const zone of this.ctx.data.zones.current.values()) {
-      if (zone.surface !== this.surface) continue;
+      if (zone.macroZone.surface !== this.surface) continue;
       for (const tile of decodeZoneTiles(zone, this.ctx.definitions)) {
         this.tileData.set(`${tile.q},${tile.r}`, {
           packed: tile.packed,
@@ -1020,12 +1025,12 @@ export class LayoutWorld extends LayoutNode {
   private rebuildTileCardIndex(): void {
     this.tileCardIndex.clear();
     for (const row of this.ctx.data.cardsLocal.values()) {
-      if (row.surface !== this.surface) continue;
+      if (row.macroZone.surface !== this.surface) continue;
       const cardType = (row.packedDefinition >> 12) & 0xf;
       if (cardType !== TILE_CARD_TYPE) continue;
       const hex = this.resolveTileCardHex(row);
       if (hex === null) continue;
-      const { zoneQ, zoneR } = macroOrigin(row.macro);
+      const { zoneQ, zoneR } = row.macroZone;
       this.tileCardIndex.set(`${zoneQ + hex.q},${zoneR + hex.r}`, row);
     }
   }

@@ -2,7 +2,7 @@ import { debug } from "../../debug";
 import type { GameContext } from "../../GameContext";
 import type { Card as CardRow } from "../../server/spacetime/bindings/types";
 import {
-  macroFields,
+  makeMacroZone,
   INVENTORY_LAYER,
   packMicroZone,
   packSlotMicroZone,
@@ -51,7 +51,7 @@ export type CardListener = (kind: CardChangeKind, card: Card) => void;
  *  tier (stack-leaf, loose at q/r, inventory) before committing. */
 export type PlacementTarget =
   | { kind: "stack-leaf"; parentId: number; direction: number }
-  | { kind: "loose"; surface: number; macroZone: number; q: number; r: number }
+  | { kind: "loose"; surface: number; macroZone: bigint; q: number; r: number }
   | { kind: "inventory"; soulId: number };
 /**
  * Fired when a stack is "modified" — a card joined, left, or changed
@@ -178,7 +178,7 @@ export class CardManager {
 
     debug.log(
       ["splice"],
-      `[splice] enter card=${cardId} state=${state} microZone=0x${row.microZone.toString(16)} microLocation=${row.microLocation} macro=${JSON.stringify(row.macro)} surface=${row.surface} stackedTop=${card.stackedTop} stackedBottom=${card.stackedBottom} stackedHex=${card.stackedHex}`,
+      `[splice] enter card=${cardId} state=${state} microZone=0x${row.microZone.toString(16)} microLocation=${row.microLocation} macroZone=${row.macroZone.packed} surface=${row.macroZone.surface} stackedTop=${card.stackedTop} stackedBottom=${card.stackedBottom} stackedHex=${card.stackedHex}`,
       1,
     );
 
@@ -211,11 +211,11 @@ export class CardManager {
   private spliceLooseRoot(D_id: number, D_row: CardRow): void {
     const topChain = this.buildChain(D_id, STACK_DIRECTION_UP).map((c) => c.cardId);
     const bottomChain = this.buildChain(D_id, STACK_DIRECTION_DOWN).map((c) => c.cardId);
-    const onWorld = D_row.surface >= WORLD_LAYER;
+    const onWorld = D_row.macroZone.surface >= WORLD_LAYER;
 
     debug.log(
       ["splice"],
-      `[splice] LOOSE D=${D_id} surface=${D_row.surface} top=[${topChain.join(",")}] bottom=[${bottomChain.join(",")}]`,
+      `[splice] LOOSE D=${D_id} surface=${D_row.macroZone.surface} top=[${topChain.join(",")}] bottom=[${bottomChain.join(",")}]`,
       1,
     );
 
@@ -251,13 +251,12 @@ export class CardManager {
         const newMicroZone = clearStackedState(D_row.microZone);
         debug.log(
           ["splice"],
-          `[splice]   promote ${newRootId} to world-loose on dying tile (macro=${JSON.stringify(D_row.macro)} microZone=0x${newMicroZone.toString(16)})`,
+          `[splice]   promote ${newRootId} to world-loose on dying tile (macroZone=${D_row.macroZone.packed} microZone=0x${newMicroZone.toString(16)})`,
           2,
         );
         this.ctx.data.setLocalCard(newRootId, {
           ...inheritorRow,
-          surface:       D_row.surface,
-          ...macroFields(D_row.macro),
+          macroZone:     D_row.macroZone,
           microZone:     newMicroZone,
           microLocation: 0,
         });
@@ -302,8 +301,7 @@ export class CardManager {
       debug.log(["splice"], `[splice]   reparent ${childId} (dir=${dir}) → ${parentId}`, 2);
       this.ctx.data.setLocalCard(childId, {
         ...childRow,
-        ...macroFields(D_row.macro),
-        surface:       D_row.surface,
+        macroZone:     D_row.macroZone,
         microZone:     packSlotMicroZone(dir),
         microLocation: parentId,
       });
@@ -344,8 +342,7 @@ export class CardManager {
         debug.log(["splice"], `[splice]   ${sameDirChild} inherits D's state-2 slot pos=${dyingPos}`, 2);
         this.ctx.data.setLocalCard(sameDirChild, {
           ...childRow,
-          ...macroFields(D_row.macro),
-          surface:       D_row.surface,
+          macroZone:     D_row.macroZone,
           microZone:     D_row.microZone,
           microLocation: dyingRoot,
         });
@@ -367,8 +364,7 @@ export class CardManager {
         debug.log(["splice"], `[splice]   reparent opp ${oppDirChild} (dir=${oppDir}) → ${dyingRoot}`, 2);
         this.ctx.data.setLocalCard(oppDirChild, {
           ...childRow,
-          ...macroFields(D_row.macro),
-          surface:       D_row.surface,
+          macroZone:     D_row.macroZone,
           microZone:     packSlotMicroZone(oppDir),
           microLocation: dyingRoot,
         });
@@ -505,8 +501,7 @@ export class CardManager {
       const existingAbove = this.findSlotChild(target.cardId, direction);
       incomingRow = {
         ...incoming,
-        surface:       target.surface,
-        ...macroFields(target.macro),
+        macroZone:     target.macroZone,
         microZone:     packSlotMicroZone(direction),
         microLocation: target.cardId,
       };
@@ -612,15 +607,14 @@ export class CardManager {
       );
       this.ctx.data.setLocalCard(card.cardId, {
         ...card,
-        surface:       INVENTORY_LAYER,
-        ...macroFields({ kind: "container", id: soul.soulCardId }),
+        macroZone:     makeMacroZone(soul.soulCardId, INVENTORY_LAYER, 0, 0),
         microZone:     card.microZone & ~0x3, // state → STACKED_LOOSE
         microLocation: 0,                      // encodeLooseXY(0, 0) === 0
       });
       return;
     }
     const rootRow = this.chainRootRow(card);
-    if (rootRow && rootRow.surface >= WORLD_LAYER) {
+    if (rootRow && rootRow.macroZone.surface >= WORLD_LAYER) {
       const { localQ, localR } = unpackMicroZone(rootRow.microZone);
       debug.log(
         ["splice", "evict"],
@@ -629,8 +623,7 @@ export class CardManager {
       );
       this.ctx.data.setLocalCard(card.cardId, {
         ...card,
-        surface:       rootRow.surface,
-        ...macroFields(rootRow.macro),
+        macroZone:     rootRow.macroZone,
         microZone:     packMicroZone(localQ, localR, STACKED_LOOSE),
         microLocation: encodeLooseXY(8, 8),
       });
@@ -698,8 +691,7 @@ export class CardManager {
             );
             this.ctx.data.setLocalCard(deferredRow.cardId, {
               ...deferredRow,
-              surface:       host.surface,
-              ...macroFields(host.macro),
+              macroZone:     host.macroZone,
               microZone:     packSlotMicroZone(leaf.direction),
               microLocation: leaf.cardId,
             });
@@ -712,8 +704,8 @@ export class CardManager {
     // ---- Tier 2: loose at fallback (q, r) -------------------------
     const looseTarget: PlacementTarget = {
       kind: "loose",
-      surface: deferredRow.surface,
-      macroZone: deferredRow.macroZone,
+      surface: deferredRow.macroZone.surface,
+      macroZone: deferredRow.macroZone.packed,
       q: fallbackQ,
       r: fallbackR,
     };
@@ -743,8 +735,7 @@ export class CardManager {
         );
         this.ctx.data.setLocalCard(deferredRow.cardId, {
           ...deferredRow,
-          surface:       INVENTORY_LAYER,
-          ...macroFields({ kind: "container", id: soul.soulCardId }),
+          macroZone:     makeMacroZone(soul.soulCardId, INVENTORY_LAYER, 0, 0),
           microZone:     packMicroZone(0, 0, STACKED_LOOSE),
           microLocation: 0,
         });
@@ -755,8 +746,8 @@ export class CardManager {
     // ---- Tier 4: spiral-search free (q, r) in macroZone -----------
     const spiralHit = this.findFreeTileInMacroZone(
       deferredRow,
-      deferredRow.surface,
-      deferredRow.macroZone,
+      deferredRow.macroZone.surface,
+      deferredRow.macroZone.packed,
       fallbackQ,
       fallbackR,
     );
@@ -844,7 +835,7 @@ export class CardManager {
   private findFreeTileInMacroZone(
     card: CardRow,
     surface: number,
-    macroZone: number,
+    macroZone: bigint,
     startQ: number,
     startR: number,
   ): { q: number; r: number } | null {
@@ -1009,8 +1000,7 @@ export class CardManager {
       // transfer reducer (TBD) changes who owns the card.
       newRow = {
         ...row,
-        ...macroFields({ kind: "container", id: state.soulCardId }),
-        surface: state.surface ?? 1,
+        macroZone: makeMacroZone(state.soulCardId, state.surface ?? INVENTORY_LAYER, 0, 0),
         microLocation: encodeLooseXY(state.x, state.y),
         microZone: clearStackedState(row.microZone),
       };
@@ -1030,8 +1020,7 @@ export class CardManager {
         // card isn't a drop UI today.
         newRow = {
           ...row,
-          ...macroFields(parentRow?.macro ?? row.macro),
-          surface:       parentRow?.surface   ?? row.surface,
+          macroZone:     parentRow?.macroZone ?? row.macroZone,
           microLocation: state.parentId,
           microZone:     packStackMicroZone(1, STACK_DIRECTION_HEX, STACKED_ON_ROOT),
         };
@@ -1059,8 +1048,7 @@ export class CardManager {
           state.direction === "top" ? STACK_DIRECTION_UP : STACK_DIRECTION_DOWN;
         newRow = {
           ...row,
-          ...macroFields(parentRow?.macro ?? row.macro),
-          surface:       parentRow?.surface   ?? row.surface,
+          macroZone:     parentRow?.macroZone ?? row.macroZone,
           microLocation: state.parentId,
           microZone:     packSlotMicroZone(direction),
         };
@@ -1098,8 +1086,7 @@ export class CardManager {
         // World / mini-zone / any hex-grid surface — caller supplies
         // the surface in the state. Defaults to `WORLD_LAYER` for
         // back-compat.
-        surface:       state.surface ?? WORLD_LAYER,
-        ...macroFields({ kind: "world", q: zoneQ, r: zoneR }),
+        macroZone:     makeMacroZone(0, state.surface ?? WORLD_LAYER, zoneQ, zoneR),
         microZone:     newMicroZone,
         microLocation: 0,
       };

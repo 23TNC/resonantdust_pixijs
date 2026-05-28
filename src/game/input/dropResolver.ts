@@ -14,9 +14,8 @@ import type { GameContext } from "../../GameContext";
 import type { LayoutNode } from "../layout/LayoutNode";
 import {
   INVENTORY_LAYER,
-  packMacroZone,
-  packZoneId,
-  unpackZoneId,
+  decodeMacroZone,
+  makeMacroZone,
   WORLD_LAYER,
   ZONE_SIZE,
 } from "../../server/data/packing";
@@ -193,10 +192,10 @@ export function applySourceGate(
   }
   const destSurface = destinationSurface(intent, ctx);
   if (destSurface === null) return intent;
-  if (destSurface === sourceRow.surface) return intent;
+  if (destSurface === sourceRow.macroZone.surface) return intent;
   return {
     kind: "rejected",
-    reason: `surface_locked source (surface=${sourceRow.surface}) cannot move to surface=${destSurface}`,
+    reason: `surface_locked source (surface=${sourceRow.macroZone.surface}) cannot move to surface=${destSurface}`,
   };
 }
 
@@ -302,17 +301,18 @@ function intentForCardTarget(c: DropContext, target: Card): DropIntent | null {
 function resolveInventoryDropTarget(c: DropContext): DropIntent | null {
   const inv = findLayoutInventoryInChain(c.up.hit);
   if (!inv) return null;
-  const { macroZone, layer } = unpackZoneId(inv.zoneId);
+  const dest = decodeMacroZone(inv.zoneId);
   // Same-bucket short-circuit — fall through to the loose path so
   // in-inventory rearrangement doesn't pay a server round-trip.
-  if (c.sourceRow.surface === layer && c.sourceRow.macroZone === macroZone) {
+  if (c.sourceRow.macroZone.packed === inv.zoneId) {
     return null;
   }
   const ig = inv.container.getGlobalPosition();
   return {
     kind: "inventory",
-    soulCardId: macroZone,
-    surface: layer,
+    // The bucket id is the zone's owner band; the surface band is the layer.
+    soulCardId: dest.owner,
+    surface: dest.surface,
     x: c.up.x - ig.x - c.offsetX,
     y: c.up.y - ig.y - c.offsetY,
   };
@@ -340,11 +340,11 @@ function findLayoutInventoryInChain(hit: LayoutNode | null): LayoutInventory | n
  *  through the inventory branch here; `applySourceGate` converts to
  *  `rejected` downstream. */
 function resolveFallback(c: DropContext): DropIntent {
-  if (c.sourceRow.surface >= WORLD_LAYER) {
+  if (c.sourceRow.macroZone.surface >= WORLD_LAYER) {
     const ownedSoul = owningSoul(c.ctx, c.card.cardId);
     const soulId = ownedSoul?.soulCardId ?? c.ctx.souls.getSoulId() ?? 0;
     if (soulId !== 0) {
-      const inv = c.ctx.layout?.surfaceFor(packZoneId(soulId, INVENTORY_LAYER));
+      const inv = c.ctx.layout?.surfaceFor(makeMacroZone(soulId, INVENTORY_LAYER, 0, 0).packed);
       if (inv) {
         const ig = inv.container.getGlobalPosition();
         return {
@@ -404,7 +404,7 @@ function destinationSurface(intent: DropIntent, ctx: GameContext): number | null
   switch (intent.kind) {
     case "stack": {
       const targetRow = ctx.data.cardsLocal.get(intent.target.cardId);
-      return targetRow?.surface ?? null;
+      return targetRow?.macroZone.surface ?? null;
     }
     case "world":
       return intent.surface;
@@ -564,14 +564,16 @@ function findCardAtTile(
   const zoneR = Math.floor(r / ZONE_SIZE) * ZONE_SIZE;
   const localQ = q - zoneQ;
   const localR = r - zoneR;
-  const targetMacroZone = packMacroZone(zoneQ, zoneR);
+  // Full packed world key (owner 0, this surface, chunk origin) — matches the
+  // `macroZone.packed` on world rows exactly.
+  const targetMacroZone = makeMacroZone(0, surface, zoneQ, zoneR).packed;
 
   let hexCard: Card | null = null;
   let rectCard: Card | null = null;
   for (const [id, row] of ctx.data.cardsLocal) {
     if (id === excludeId) continue;
-    if (row.surface !== surface) continue;
-    if (row.macroZone !== targetMacroZone) continue;
+    if (row.macroZone.surface !== surface) continue;
+    if (row.macroZone.packed !== targetMacroZone) continue;
     // Skip dead cards — `action_completion` flips `dead` at recipe
     // completion (e.g. `cut_tree` on the actor faculty) but the row
     // sits in `cardsLocal` until GC retention runs. Letting the
@@ -658,11 +660,11 @@ function shouldSyncPlacement(c: DropContext, intent: DropIntent): boolean {
     case "stack":
       return true;
     case "world":
-      return intent.surface !== c.sourceRow.surface;
+      return intent.surface !== c.sourceRow.macroZone.surface;
     case "inventory":
       return (
-        intent.surface !== c.sourceRow.surface ||
-        intent.soulCardId !== c.sourceRow.macroZone
+        intent.surface !== c.sourceRow.macroZone.surface ||
+        intent.soulCardId !== c.sourceRow.macroZone.owner
       );
     case "loose":
     case "rejected":
@@ -682,7 +684,7 @@ function buildPlacement(
   parentId: number;
   direction: number;
   surface: number;
-  macroZone: number;
+  macroZone: bigint;
   q: number;
   r: number;
   xy: number;
@@ -698,7 +700,7 @@ function buildPlacement(
         parentId: intent.target.cardId,
         direction,
         surface: 0,
-        macroZone: 0,
+        macroZone: 0n,
         q: 0,
         r: 0,
         xy: 0,
@@ -716,7 +718,8 @@ function buildPlacement(
         parentId: 0,
         direction: 0,
         surface: intent.surface,
-        macroZone: packMacroZone(zoneQ, zoneR),
+        // Owner 0 (WORLD); server stamps the surface band via `with_surface`.
+        macroZone: makeMacroZone(0, intent.surface, zoneQ, zoneR).packed,
         q: localQ,
         r: localR,
         xy: 0,
@@ -743,7 +746,8 @@ function buildPlacement(
         parentId: 0,
         direction: 0,
         surface: intent.surface,
-        macroZone: intent.soulCardId,
+        // Bucket id lives in the owner band; server reads it via `owner_of`.
+        macroZone: makeMacroZone(intent.soulCardId, intent.surface, 0, 0).packed,
         q: 0,
         r: 0,
         xy,

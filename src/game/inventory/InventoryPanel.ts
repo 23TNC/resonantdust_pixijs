@@ -2,7 +2,7 @@ import type { GameContext } from "../../GameContext";
 import { GameInventory } from "./InventoryGame";
 import { LayoutInventory } from "./InventoryLayout";
 import type { LayoutNode } from "../layout/LayoutNode";
-import { INVENTORY_LAYER, packZoneId, PLAYER_INVENTORY_LAYER } from "../../server/data/packing";
+import { INVENTORY_LAYER, makeMacroZone, PLAYER_INVENTORY_LAYER } from "../../server/data/packing";
 import type { ManagedPanel } from "../../ui/panels/PanelManager";
 import { PanelTaskbar } from "../../ui/dom/PanelTaskbar";
 import { PixiPanel } from "../../ui/dom/PixiPanel";
@@ -115,7 +115,7 @@ export class InventoryPanel implements ManagedPanel {
     this.surface = options.surface ?? INVENTORY_LAYER;
     this.mode = options.mode ?? "default";
     this.capacity = options.capacity ?? Infinity;
-    const zoneId = packZoneId(ownerId, this.surface);
+    const zoneId = makeMacroZone(ownerId, this.surface, 0, 0).packed;
 
     this.layoutInventory = new LayoutInventory(ctx.layout, zoneId);
 

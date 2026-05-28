@@ -599,7 +599,7 @@ export class ReducerManager {
    *  [docs/MOVEMENT_REWRITE.md](../../../../docs/MOVEMENT_REWRITE.md). */
   async moveSoul(args: {
     soulId: number;
-    path: Array<{ surface: number; macroZone: number; microZone: number }>;
+    path: Array<{ surface: number; macroZone: bigint; microZone: number }>;
   }): Promise<void> {
     const clientTimeMs = BigInt(Math.round(this.serverNowMs()));
     debug.log(
@@ -610,11 +610,7 @@ export class ReducerManager {
     const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.moveSoul({
-        ...args,
-        path: args.path.map((p) => ({ ...p, macroZone: BigInt(p.macroZone) })),
-        clientTimeMs,
-      });
+      await conn.reducers.moveSoul({ ...args, clientTimeMs });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
@@ -641,7 +637,7 @@ export class ReducerManager {
       parentId: number;
       direction: number;
       surface: number;
-      macroZone: number;
+      macroZone: bigint;
       q: number;
       r: number;
       xy: number;
@@ -656,14 +652,7 @@ export class ReducerManager {
     const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.placeCard({
-        ...args,
-        placement: {
-          ...args.placement,
-          macroZone: BigInt(args.placement.macroZone),
-        },
-        clientTimeMs,
-      });
+      await conn.reducers.placeCard({ ...args, clientTimeMs });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
@@ -684,7 +673,7 @@ export class ReducerManager {
     soulCardId: number;
     blueprintId: number;
     surface: number;
-    macroZone: number;
+    macroZone: bigint;
     microZone: number;
     microLocation: number;
   }): Promise<void> {
@@ -699,11 +688,7 @@ export class ReducerManager {
     const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.requestBlueprint({
-        ...args,
-        macroZone: BigInt(args.macroZone),
-        clientTimeMs,
-      });
+      await conn.reducers.requestBlueprint({ ...args, clientTimeMs });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
@@ -749,7 +734,7 @@ export class ReducerManager {
   async proposeAction(args: {
     recipeId: number;
     surface: number;
-    macroZone: number;
+    macroZone: bigint;
     microZone: number;
     root: number;
     bindings: number[][];
@@ -763,11 +748,7 @@ export class ReducerManager {
     const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.proposeAction({
-        ...args,
-        macroZone: BigInt(args.macroZone),
-        clientTimeMs,
-      });
+      await conn.reducers.proposeAction({ ...args, clientTimeMs });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;

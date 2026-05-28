@@ -376,8 +376,8 @@ export class LifecycleResolutionManager {
     try {
       await this.ctx.reducers.proposeAction({
         recipeId,
-        surface: card.surface,
-        macroZone: card.macroZone,
+        surface: card.macroZone.surface,
+        macroZone: card.macroZone.packed,
         microZone: card.microZone,
         root: card.cardId,
         bindings,
@@ -448,8 +448,7 @@ export class LifecycleResolutionManager {
     // inventory bucket (`macro_zone = soul.card_id`).
     for (const c of this.ctx.data.cardsLocal.values()) {
       if (c.cardId === magneticCard.cardId) continue;
-      if (c.macroZone !== magneticCard.macroZone) continue;
-      if (c.surface !== magneticCard.surface) continue;
+      if (c.macroZone.packed !== magneticCard.macroZone.packed) continue;
       const def = this.ctx.definitions;
       if (def.hasCardFlag(c.flagsState, c.flagsBk, "magnetic")) continue;
       if ((def.cardFlagFieldValueIn("cards_bk", c.flagsBk, "slot_hold_count") ?? 0) > 0) continue;

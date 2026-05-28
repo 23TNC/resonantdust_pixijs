@@ -17,37 +17,11 @@ export const TILE_SIZE = 80;
  *  already import other world-coord helpers from this module. */
 export { WORLD_LAYER } from "../../server/data/packing";
 import { MINI_ZONE_LAYER } from "../../server/data/packing";
-import type { MacroLoc } from "../../server/data/packing";
+import type { ZoneId } from "../../server/data/packing";
 
-// Server packs macro_zone as: ((zone_q as i16 as u16) << 16) | (zone_r as i16 as u16)
-// where zone_q/zone_r are the chunk indices (signed, not biased).
-// zoneQ/zoneR parameters here are tile origins (multiples of ZONE_SIZE).
-
-export function packMacroZone(zoneQ: number, zoneR: number): number {
-  const chunkQ = Math.floor(zoneQ / ZONE_SIZE);
-  const chunkR = Math.floor(zoneR / ZONE_SIZE);
-  return (((chunkQ & 0xFFFF) << 16) | (chunkR & 0xFFFF)) >>> 0;
-}
-
-export function unpackMacroZone(macroZone: number): { zoneQ: number; zoneR: number } {
-  const rawQ = (macroZone >>> 16) & 0xFFFF;
-  const rawR = macroZone & 0xFFFF;
-  const chunkQ = rawQ >= 0x8000 ? rawQ - 0x10000 : rawQ;
-  const chunkR = rawR >= 0x8000 ? rawR - 0x10000 : rawR;
-  return { zoneQ: chunkQ * ZONE_SIZE, zoneR: chunkR * ZONE_SIZE };
-}
-
-/** Tile-origin `(zoneQ, zoneR)` for a decoded zone macro-location. World
- *  zones use their hex coords directly. Container zones (mini_zone) reuse the
- *  legacy behavior of treating the anchor id as a packed origin — that origin
- *  is arbitrary but keys the view's local `tileData` consistently between the
- *  decode pass and the clear pass. (Revisit when mini_zone rendering moves to
- *  the anchor's real world position.) */
-export function macroOrigin(macro: MacroLoc): { zoneQ: number; zoneR: number } {
-  return macro.kind === "world"
-    ? { zoneQ: macro.q, zoneR: macro.r }
-    : unpackMacroZone(macro.id);
-}
+// A row's decoded `macroZone: MacroZone` already carries the tile-origin
+// coords (`zoneQ` / `zoneR`) and the packed `bigint` key — read them directly;
+// pack/unpack helpers are no longer needed here. See `server/data/packing.ts`.
 
 /** Number of u64 tile-data fields on a `Zone` row. Mirrors
  *  `ZONE_TILE_U64_COUNT` in `content/src/packed.rs`. */
@@ -122,7 +96,7 @@ export function decodeZoneTiles(
   zone: Zone,
   definitions: DefinitionManager,
 ): ZoneTile[] {
-  const { zoneQ, zoneR } = macroOrigin(zone.macro);
+  const { zoneQ, zoneR } = zone.macroZone;
   // `zone.packedDefinition` is u8 = `[card_type:u4 | 0:u4]` after the
   // category retire. Top nibble is the type; low nibble is reserved
   // (always 0). See docs/CATEGORY_RETIRE_AND_TILE_EXPAND.md.
@@ -130,7 +104,7 @@ export function decodeZoneTiles(
   const ts = zoneTilesArray(zone);
 
   debug.log(["zone"],
-    `[decodeZoneTiles] macro=${JSON.stringify(zone.macro)} → zoneQ=${zoneQ} zoneR=${zoneR}` +
+    `[decodeZoneTiles] macroZone=${zone.macroZone.packed} → zoneQ=${zoneQ} zoneR=${zoneR}` +
     ` packedDef=0x${zone.packedDefinition.toString(16).padStart(2,"0")}` +
     ` typeId=${typeId}` +
     ` t=[${ts.map(t => "0x" + t.toString(16)).join(", ")}]`,
@@ -191,7 +165,7 @@ export function decodeZoneTiles(
  */
 export function getZoneTileDef(
   zonesLocal: ReadonlyMap<number, Zone>,
-  macroZone: number,
+  macroZone: ZoneId,
   localQ: number,
   localR: number,
 ): number {
@@ -212,7 +186,7 @@ export function getZoneTileDef(
  */
 export function getZoneTileSlot(
   zonesLocal: ReadonlyMap<number, Zone>,
-  macroZone: number,
+  macroZone: ZoneId,
   localQ: number,
   localR: number,
 ): { packed: number; stock0: number; stock1: number } {
@@ -220,11 +194,11 @@ export function getZoneTileSlot(
     return { packed: 0, stock0: 0, stock1: 0 };
   }
   for (const zone of zonesLocal.values()) {
-    if (zone.macroZone !== macroZone) continue;
+    if (zone.macroZone.packed !== macroZone) continue;
     // Skip surfaces with no tile bitfield (inventory layers). Admits
     // MINI_ZONE_LAYER (63) and WORLD_LAYER (64+) — the tile-bearing
     // surfaces today.
-    if (zone.surface < MINI_ZONE_LAYER) continue;
+    if (zone.macroZone.surface < MINI_ZONE_LAYER) continue;
     const typeId = (zone.packedDefinition >> 4) & 0xF;
     const slot = tileAt(zoneTilesArray(zone), localR * 8 + localQ);
     if (slot.defId === 0) return { packed: 0, stock0: 0, stock1: 0 };
@@ -238,21 +212,22 @@ export function getZoneTileSlot(
 }
 
 /**
- * All zone origins (multiples of ZONE_SIZE) that cover the hex area within
- * `radius` zone-rings of anchor hex position (aq, ar).
+ * All zone origins (multiples of ZONE_SIZE) in the square (Chebyshev) block of
+ * `distance` chunk-rings around anchor hex position (aq, ar) — a `(2·distance+1)²`
+ * set of chunks. Matches the rectangular viewport better than a hex disc; the
+ * hex shear (a screen rect maps to a sheared chunk parallelogram) is absorbed by
+ * holding whole rings. `distance` 0 = just the anchor's chunk.
  */
-export function zonesAroundAnchor(
+export function chunksAroundAnchor(
   aq: number,
   ar: number,
-  radius: number,
+  distance: number,
 ): { zoneQ: number; zoneR: number }[] {
   const centerChunkQ = Math.floor(aq / ZONE_SIZE);
   const centerChunkR = Math.floor(ar / ZONE_SIZE);
   const results: { zoneQ: number; zoneR: number }[] = [];
-  for (let dq = -radius; dq <= radius; dq++) {
-    const r1 = Math.max(-radius, -dq - radius);
-    const r2 = Math.min(radius, -dq + radius);
-    for (let dr = r1; dr <= r2; dr++) {
+  for (let dq = -distance; dq <= distance; dq++) {
+    for (let dr = -distance; dr <= distance; dr++) {
       results.push({
         zoneQ: (centerChunkQ + dq) * ZONE_SIZE,
         zoneR: (centerChunkR + dr) * ZONE_SIZE,

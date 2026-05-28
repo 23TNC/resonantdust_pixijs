@@ -5,7 +5,7 @@ import { debug } from "../../debug";
 import type { GameContext } from "../../GameContext";
 import type { LayoutNode } from "../layout/LayoutNode";
 import type { Card as CardRow } from "../../server/spacetime/bindings/types";
-import { packZoneId, WORLD_LAYER, type ZoneId } from "../../server/data/packing";
+import { WORLD_LAYER, type ZoneId } from "../../server/data/packing";
 import type { TableChange } from "../../server/data/ValidAtTable";
 import {
   getStackDirection,
@@ -235,9 +235,7 @@ export class Card {
     // / direction at spawn time.
     const initialRow =
       ctx.data.cards.current.get(cardId) ?? ctx.data.cardsLocal.get(cardId);
-    this.currentZoneId = initialRow
-      ? packZoneId(initialRow.macroZone, initialRow.surface)
-      : Number.NaN;
+    this.currentZoneId = initialRow ? initialRow.macroZone.packed : -1n;
 
     if (initialRow) {
       // Decide where this card lives on the layout tree before we apply data,
@@ -259,7 +257,7 @@ export class Card {
         // post-fallback read must come from `cardsLocal` to pick up
         // that rewrite — `cards.current` still has the orphan shape.
         row = ctx.data.cardsLocal.get(cardId) ?? initialRow;
-        this.currentZoneId = packZoneId(row.macroZone, row.surface);
+        this.currentZoneId = row.macroZone.packed;
         this.currentParentId = 0;
         this.currentStackDirection = null;
         this.currentMicroZone = row.microZone;
@@ -509,7 +507,7 @@ export class Card {
     if (change.kind === "removed") return;
     const row = change.kind === "added" ? change.row : change.newRow;
 
-    const newZoneId = packZoneId(row.macroZone, row.surface);
+    const newZoneId = row.macroZone.packed;
     const newParentId = Card.stackParentOf(row, this.layoutCard.ctx.data.cardsLocal);
     const newStackDirection = Card.stackDirectionOf(row);
     const newMicroZone = row.microZone;
@@ -531,7 +529,7 @@ export class Card {
     const newState = getStackedState(newMicroZone);
     const tileChanged =
       newState === 0 /* STACKED_LOOSE */ &&
-      row.surface >= WORLD_LAYER &&
+      row.macroZone.surface >= WORLD_LAYER &&
       newMicroZone !== this.currentMicroZone;
 
     if (zoneChanged || parentChanged || directionChanged || tileChanged) {

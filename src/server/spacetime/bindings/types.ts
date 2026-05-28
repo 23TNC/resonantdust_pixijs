@@ -14,21 +14,20 @@ import type {
   Soul as GenSoul,
   Zone as GenZone,
 } from "./shard/types";
-import type { MacroLoc } from "../../data/packing";
+import type { MacroZone } from "../../data/packing";
 
-// The client row carries the macro-location in BOTH forms: the packed
-// `macroZone` (a `number` — the low-32-bit location *key*, used directly for
-// equality / `ZoneId` keying / subscription SQL / reducer args) and the
-// decoded `macro` (a `MacroLoc` — the *coords*, used directly for rendering /
-// pathfinding). Holding both means reads never pack or unpack; `DataManager`
-// sets both at the ingestion boundary and `macroFields()` keeps them in
-// lockstep at write sites (the only place encoding happens). The generated
-// `macroZone` is a `bigint` (u64 wire); the client narrows it to `number`
-// (safe while the high 32 bits are zero). `micro_zone` / `micro_location` are
-// decoded in Phase 2. See `server/data/packing.ts`.
-export type Card = Omit<GenCard, "macroZone"> & { macroZone: number; macro: MacroLoc };
-export type Soul = Omit<GenSoul, "macroZone"> & { macroZone: number; macro: MacroLoc };
-export type Zone = Omit<GenZone, "macroZone"> & { macroZone: number; macro: MacroLoc };
+// `macro_zone` is the complete packed location key
+// `[owner_card_id:u32 | surface:u8 | i12 zoneQ | i12 zoneR]` — a full u64, now
+// that the owner band is populated. The client carries it as one decoded
+// `MacroZone` object: the `packed` bigint (the equality / `ZoneId` / SQL key)
+// plus its unpacked `owner` / `surface` / `zoneQ` / `zoneR`, all derived
+// together at the `DataManager` ingestion boundary and kept in lockstep by
+// `makeMacroZone()` at write sites (the only place encoding happens). Reads
+// (`row.macroZone.surface`, `.owner`, `.zoneQ/.zoneR`) never pack or unpack.
+// `micro_zone` / `micro_location` are decoded in Phase 2. See `server/data/packing.ts`.
+export type Card = Omit<GenCard, "macroZone"> & { macroZone: MacroZone };
+export type Soul = Omit<GenSoul, "macroZone"> & { macroZone: MacroZone };
+export type Zone = Omit<GenZone, "macroZone"> & { macroZone: MacroZone };
 
 export type {
   Player,

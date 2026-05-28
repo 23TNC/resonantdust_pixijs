@@ -1,7 +1,6 @@
 import {
   MINI_ZONE_LAYER,
-  unpackZoneId,
-  WORLD_LAYER,
+  makeMacroZone,
   type ZoneId,
 } from "../data/packing";
 import { DbConnection as ShardDbConnection } from "./bindings/shard";
@@ -136,11 +135,10 @@ export class SubscriptionManager extends SubscriptionBase<
   }
 
   async subscribeCards(zoneId: ZoneId): Promise<void> {
-    const { macroZone, layer: surface } = unpackZoneId(zoneId);
+    // `zoneId` IS the folded `macro_zone` (surface in bits 24-31), so a single
+    // equality is exact — there's no separate `surface` column to filter on.
     return this.installSubscription(`cards:${zoneId}`, {
-      queries: [
-        `SELECT * FROM cards WHERE macro_zone = ${macroZone} AND surface = ${surface}`,
-      ],
+      queries: [`SELECT * FROM cards WHERE macro_zone = ${zoneId}`],
       scopeKey: `zone:${zoneId}`,
     });
   }
@@ -172,32 +170,46 @@ export class SubscriptionManager extends SubscriptionBase<
     this.removeSubscription(`player:name:${name}`);
   }
 
-  async subscribeWorldZone(macroZone: number): Promise<void> {
-    return this.installSubscription(`zones:${macroZone}`, {
+  async subscribeWorldZone(key: ZoneId): Promise<void> {
+    // `key` is the full packed world `macro_zone` (owner 0, surface WORLD,
+    // chunk coords) — a single equality is the exact scope.
+    return this.installSubscription(`zones:${key}`, {
       queries: [
-        // Scope to the world surface explicitly: a chunk's packed
-        // `macro_zone` can numerically coincide with rows on other
-        // surfaces (e.g. a mini_zone keyed by an anchor card_id), and
-        // without this filter those would leak into the world
-        // ValidAtTable and clobber the world Zone at matching
-        // macro_zone.
-        `SELECT * FROM zones WHERE macro_zone = ${macroZone} AND surface = ${WORLD_LAYER}`,
-        `SELECT * FROM cards WHERE macro_zone = ${macroZone} AND surface = ${WORLD_LAYER}`,
-        `SELECT * FROM souls WHERE macro_zone = ${macroZone} AND surface = ${WORLD_LAYER}`,
+        `SELECT * FROM zones WHERE macro_zone = ${key}`,
+        `SELECT * FROM cards WHERE macro_zone = ${key}`,
+        `SELECT * FROM souls WHERE macro_zone = ${key}`,
       ],
-      scopeKey: `macroZone:${macroZone}`,
+      // Distinct from the skeleton scopeKey so a full↔skeleton swap on the same
+      // sub name re-issues the subscription (see `subscribeWorldZoneSkeleton`).
+      scopeKey: `macroZone:full:${key}`,
     });
   }
 
-  unsubscribeWorldZone(macroZone: number): void {
-    this.removeSubscription(`zones:${macroZone}`);
+  /** Lighter "cold tier" subscription for a world chunk: the `zones` table
+   *  only (tile skeleton) — no cards/souls streaming. Reuses the SAME sub name
+   *  as `subscribeWorldZone` with a different scopeKey, so installing one over
+   *  the other cleanly swaps the live subscription (`installSubscription`
+   *  re-issues on a scopeKey change) — dropping cards/souls on downgrade and
+   *  re-adding them on upgrade. */
+  async subscribeWorldZoneSkeleton(key: ZoneId): Promise<void> {
+    return this.installSubscription(`zones:${key}`, {
+      queries: [`SELECT * FROM zones WHERE macro_zone = ${key}`],
+      scopeKey: `macroZone:skeleton:${key}`,
+    });
+  }
+
+  unsubscribeWorldZone(key: ZoneId): void {
+    this.removeSubscription(`zones:${key}`);
   }
 
   async subscribeMiniZone(anchorCardId: number): Promise<void> {
+    // The mini_zone Zone and its tile cards share the folded key
+    // `(owner = anchor card_id, surface = MINI_ZONE_LAYER)`.
+    const key = makeMacroZone(anchorCardId, MINI_ZONE_LAYER, 0, 0).packed;
     return this.installSubscription(`mini_zone:${anchorCardId}`, {
       queries: [
-        `SELECT * FROM zones WHERE macro_zone = ${anchorCardId} AND surface = ${MINI_ZONE_LAYER}`,
-        `SELECT * FROM cards WHERE macro_zone = ${anchorCardId} AND surface = ${MINI_ZONE_LAYER}`,
+        `SELECT * FROM zones WHERE macro_zone = ${key}`,
+        `SELECT * FROM cards WHERE macro_zone = ${key}`,
       ],
       scopeKey: `mini_zone:${anchorCardId}`,
     });

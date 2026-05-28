@@ -26,8 +26,8 @@ import { ReducerManager } from "./server/spacetime/ReducerManager";
 import { DataManager } from "./server/data/DataManager";
 import { DomPanel } from "./ui/dom/DomPanel";
 import panelDefaults from "./content/panels/defaults.json";
-import { ZoneManager } from "./game/zones/ZoneManager";
-import { unpackZoneId, WORLD_LAYER } from "./server/data/packing";
+import { ZoneManager, type QueryClass } from "./game/zones/ZoneManager";
+import { decodeMacroZone, WORLD_LAYER, type ZoneId } from "./server/data/packing";
 import { PanelTaskbar } from "./ui/dom/PanelTaskbar";
 import { UiEditMode } from "./ui/dom/UiEditMode";
 import { PanelSettingsPopup } from "./ui/dom/PanelSettingsPopup";
@@ -224,38 +224,38 @@ async function main(): Promise<Runtime> {
   // (0, 0), the "active" set starts empty at app boot — no zone
   // subscriptions until a caller actually sets an anchor.
   //
-  // Two flavors, branched on the zoneId's layer:
+  // Driven by the zone's query class (full / skeleton / none), branched on
+  // the zoneId's layer:
   //
-  //  - World zones (`layer === WORLD_LAYER`): `subscribeWorldZone`
-  //    pulls both the `zones` row (tile data) AND world-surface
-  //    `cards` / `souls` for that macro_zone.
-  //  - Inventory / non-world zones: `subscribeCards` pulls cards
-  //    for `(macro_zone, surface)`. No `zones` row to fetch.
-  const subscribeZone = (zoneId: number) => {
-    const { macroZone, layer } = unpackZoneId(zoneId);
-    if (layer === WORLD_LAYER) {
-      void data.subscriptions.subscribeWorldZone(macroZone);
-    } else {
-      void data.subscriptions.subscribeCards(zoneId);
+  //  - World zones (`layer === WORLD_LAYER`):
+  //      full     → `subscribeWorldZone` (zones row + cards + souls)
+  //      skeleton → `subscribeWorldZoneSkeleton` (zones row only — the cold
+  //                 tier's tile keepalive, no card/soul streaming)
+  //      none     → `unsubscribeWorldZone`
+  //    full↔skeleton swaps reuse the same sub name, so the SDK re-issues in
+  //    place (drops/re-adds cards+souls) rather than tearing down the row.
+  //  - Inventory / non-world zones: ref-pinned and always full — they never
+  //    enter the cold tier, so only full/none apply via `subscribeCards`.
+  const applySubscriptionClass = (zoneId: ZoneId, queryClass: QueryClass) => {
+    // `zoneId` is the full packed `macro_zone` bigint; its surface band picks
+    // world (cold-tierable) vs inventory (always-full) handling.
+    if (decodeMacroZone(zoneId).surface !== WORLD_LAYER) {
+      if (queryClass === "none") data.subscriptions.unsubscribeCards(zoneId);
+      else void data.subscriptions.subscribeCards(zoneId);
+      return;
     }
+    if (queryClass === "full") void data.subscriptions.subscribeWorldZone(zoneId);
+    else if (queryClass === "skeleton") void data.subscriptions.subscribeWorldZoneSkeleton(zoneId);
+    else data.subscriptions.unsubscribeWorldZone(zoneId);
   };
-  const unsubscribeZone = (zoneId: number) => {
-    const { macroZone, layer } = unpackZoneId(zoneId);
-    if (layer === WORLD_LAYER) {
-      data.subscriptions.unsubscribeWorldZone(macroZone);
-    } else {
-      data.subscriptions.unsubscribeCards(zoneId);
-    }
-  };
-  // Catch zones already in "active" — ZoneManager's constructor runs
-  // `recomputeWorldZones` and seeds the active tier before any listener
-  // can register. `onAdded` does NOT replay existing entries, so a
-  // listener registered after construction would miss everything that
-  // landed during construction. Iterate the initial set explicitly,
-  // then subscribe for future additions.
-  for (const zoneId of zones.zonesIn("active")) subscribeZone(zoneId);
-  zones.onAdded("active", subscribeZone);
-  zones.onRemoved("active", unsubscribeZone);
+  // `onSubscriptionChange` fires on full/skeleton/none transitions (so
+  // active↔hot — both `full` — never churns the wire) but does NOT replay
+  // existing entries, so iterate the initial subscribed set explicitly (covers
+  // any zones seeded before this listener registered), then react to changes.
+  for (const { zoneId, queryClass } of zones.subscribedZones()) {
+    applySubscriptionClass(zoneId, queryClass);
+  }
+  zones.onSubscriptionChange(applySubscriptionClass);
 
   const playerSession = new PlayerManager(reducers, data);
   const souls = new SoulManager(playerSession, data, zones);

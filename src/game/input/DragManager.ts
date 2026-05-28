@@ -19,7 +19,7 @@ import {
 } from "./dropResolver";
 import { LayoutWorld } from "../world/LayoutWorld";
 import type { LayoutNode } from "../layout/LayoutNode";
-import { packMacroZone, packMicroZone, ZONE_SIZE, WORLD_LAYER } from "../../server/data/packing";
+import { makeMacroZone, packMicroZone, ZONE_SIZE, WORLD_LAYER } from "../../server/data/packing";
 import { STACKED_LOOSE } from "../cards/cardData";
 import { findPathForSoul } from "../world/pathfind";
 import type { PointerEventData } from "./InputManager";
@@ -305,7 +305,7 @@ export class DragManager {
     const zoneR = Math.floor(worldDrop.r / ZONE_SIZE) * ZONE_SIZE;
     const localQ = worldDrop.q - zoneQ;
     const localR = worldDrop.r - zoneR;
-    const targetMacroZone = packMacroZone(zoneQ, zoneR);
+    const targetMacroZone = makeMacroZone(0, WORLD_LAYER, zoneQ, zoneR).packed;
     // Target microZone carries the local (q, r) for pathfinding; the
     // state bits are unused by `coordFromTileAddress`. Use
     // STACKED_LOOSE (state 0) — value 3 is now `STACKED_DEFERRED`
@@ -393,7 +393,7 @@ export class DragManager {
     const zoneR = Math.floor(r / ZONE_SIZE) * ZONE_SIZE;
     const localQ = q - zoneQ;
     const localR = r - zoneR;
-    const macroZone = packMacroZone(zoneQ, zoneR);
+    const macroZone = makeMacroZone(0, surface, zoneQ, zoneR).packed;
     const microZone = packMicroZone(localQ, localR, STACKED_LOOSE);
 
     const soulId = this.ctx.souls.getSoulId();
@@ -443,7 +443,7 @@ export class DragManager {
     let inWorld = up.hit === worldView;
     if (!inWorld && up.hit instanceof LayoutCard) {
       const hitRow = this.ctx.data.cardsLocal.get(up.hit.cardId);
-      if (hitRow && hitRow.surface >= WORLD_LAYER) inWorld = true;
+      if (hitRow && hitRow.macroZone.surface >= WORLD_LAYER) inWorld = true;
     }
     if (!inWorld) return null;
 

@@ -204,9 +204,8 @@ export class GameViewPanel implements ManagedPanel {
     if (this.soulId === null) return;
     const soul = this.ctx.data.soulsLocal.get(this.soulId);
     if (!soul) return;
-    if (soul.macro.kind !== "world") return;
     const { localQ, localR } = unpackMicroZone(soul.microZone);
-    this.worldPanManager.tweenTo(soul.macro.q + localQ, soul.macro.r + localR);
+    this.worldPanManager.tweenTo(soul.macroZone.zoneQ + localQ, soul.macroZone.zoneR + localR);
   }
 
   /** Snap the viewport to `(q, r)` on `surface`. Switches the
@@ -255,7 +254,7 @@ export class GameViewPanel implements ManagedPanel {
     let unsubSoul: (() => void) | null = null;
     const recenterOnce = (): boolean => {
       const soul = this.ctx.data.soulsLocal.get(soulId);
-      if (!soul || soul.surface < WORLD_LAYER) return false;
+      if (!soul || soul.macroZone.surface < WORLD_LAYER) return false;
       this.recenter();
       return true;
     };

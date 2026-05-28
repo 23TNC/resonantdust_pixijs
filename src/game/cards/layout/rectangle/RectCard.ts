@@ -33,7 +33,6 @@ import {
   MINI_ZONE_LAYER,
   WORLD_LAYER,
 } from "../../../../server/data/packing";
-import { macroOrigin } from "../../../world/worldCoords";
 
 /** True iff `surface` lays cards out on a hex grid (macroZone +
  *  microZone bit fields) rather than bucket-style xy
@@ -316,7 +315,7 @@ export class LayoutRectCard extends LayoutCard {
 
     if (stacked === STACKED_LOOSE) {
       this.setTitlePosition("top");
-      if (isHexGridSurface(row.surface)) {
+      if (isHexGridSurface(row.macroZone.surface)) {
         // LOOSE on a hex-grid surface (world / mini-zone) — the hex
         // address lives in `macroZone` (chunk q/r)
         // + `microZone` (local q/r bit fields, bits 2..=7 since
@@ -325,7 +324,7 @@ export class LayoutRectCard extends LayoutCard {
         // hex centre (subtract half-w/h to place the top-left
         // corner) so the loose card visually sits on its tile
         // rather than top-left-anchored.
-        const { zoneQ, zoneR } = macroOrigin(row.macro);
+        const { zoneQ, zoneR } = row.macroZone;
         const q = zoneQ + ((row.microZone >> 5) & 0x7);
         const r = zoneR + ((row.microZone >> 2) & 0x7);
         const x = WORLD_HEX_RADIUS * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r);
@@ -358,8 +357,8 @@ export class LayoutRectCard extends LayoutCard {
         // in; reuse it so the orphan stays in the same inventory.
         this.ctx.cards?.get(this.cardId)?.setPosition({
           kind: "inventory",
-          soulCardId: row.macroZone,
-          surface: row.surface,
+          soulCardId: row.macroZone.owner,
+          surface: row.macroZone.surface,
           x: this.targetX,
           y: this.targetY,
         });
@@ -419,7 +418,7 @@ export class LayoutRectCard extends LayoutCard {
       // anchor, not a chain parent) and is ignored for layout —
       // we don't try to render relative to the host because the
       // host might be a rect, hex, or anything else.
-      const { zoneQ, zoneR } = macroOrigin(row.macro);
+      const { zoneQ, zoneR } = row.macroZone;
       const q = zoneQ + ((row.microZone >> 5) & 0x7);
       const r = zoneR + ((row.microZone >> 2) & 0x7);
       const x = WORLD_HEX_RADIUS * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r);

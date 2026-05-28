@@ -16,10 +16,11 @@ import { LayoutWorld } from "./LayoutWorld";
  *
  * The anchor change fans out through `ZoneManager.onAnchorChange`:
  * - `LayoutWorld` updates its `(viewQ, viewR)` and re-renders tiles.
- * - `ZoneManager.recomputeWorldZones()` re-walks the surrounding
- *   `anchorRadius` ring and adds / removes zones from the "active"
- *   tier accordingly, which `main.ts` translates into
- *   `subscribeWorldZone` / `unsubscribeWorldZone` SDK calls.
+ * - `ZoneManager.recomputeAnchorZones()` re-walks the surrounding
+ *   `activeDistance` / `hotDistance` chunk rings (demotion-only waterfall:
+ *   active → hot wake → cold skeleton), which `main.ts` translates into
+ *   `subscribeWorldZone` / `subscribeWorldZoneSkeleton` /
+ *   `unsubscribeWorldZone` SDK calls.
  *
  * Pan math: pointy-top hex to pixel is `(sqrt(3) * q + sqrt(3)/2 * r,
  * 3/2 * r) * WORLD_HEX_RADIUS`. Inverting:
