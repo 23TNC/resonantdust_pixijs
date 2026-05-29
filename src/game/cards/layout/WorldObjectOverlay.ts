@@ -1,5 +1,6 @@
 import { RenderTexture, Sprite } from "pixi.js";
 import type { GameContext } from "../../../GameContext";
+import type { WorldViewServices } from "../../viewport/WorldViewServices";
 
 export interface WorldObjectOverlayOptions {
   /** Width of the baked snapshot RT in card-local pixels. */
@@ -14,8 +15,9 @@ export interface WorldObjectOverlayOptions {
 /**
  * Per-card "in-front-objects" overlay: a translucent Sprite that
  * bakes the world-tile content (trees, rocks, etc.) which should
- * visually occlude this card from above. Sourced from
- * `ctx.worldOverlay`.
+ * visually occlude this card from above. Sourced from the owning view's
+ * `WorldViewServices.makeObjectOverlayForTile` (resolved per-card via the
+ * `getServices` getter the host wires to `() => this.worldView`).
  *
  * The host (`LayoutRectCard` / `LayoutHexCard`) parents `sprite` once
  * at construction time at whatever z-position it wants the occluder
@@ -35,8 +37,9 @@ export interface WorldObjectOverlayOptions {
  * The overlay also auto-refreshes on two ambient events:
  *   - `ctx.lodTextures.onLoad` — a card placed before its sprite
  *     pack landed picks up the texture once it arrives.
- *   - `ctx.onTilesChanged` — a card stays in sync as world tiles
- *     change underneath it.
+ *   - the owning view's `onTilesChanged` — a card stays in sync as
+ *     that view's tiles change underneath it. The subscription is
+ *     (re)bound to the current view by `syncTileSub` as the card moves.
  *
  * `onStateChange` fires after every refresh / clear so the host can
  * cascade overlay state to stacked children (the host owns the
@@ -46,7 +49,8 @@ export interface WorldObjectOverlayOptions {
 export class WorldObjectOverlay {
   readonly sprite: Sprite;
   /** Backing RenderTexture for `sprite`. Single RT reused across
-   *  refreshes — `ctx.worldOverlay` renders into it in place. */
+   *  refreshes — the view's `makeObjectOverlayForTile` renders into it
+   *  in place. */
   private readonly texture: RenderTexture;
 
   /** Current tile coords this overlay is baked for, or `null` when
@@ -68,14 +72,25 @@ export class WorldObjectOverlay {
    *  the latest state. `null` until the host wires it. */
   onStateChange: (() => void) | null = null;
 
-  private readonly ctx: GameContext;
   private readonly width: number;
   private readonly height: number;
   private readonly unsubObjectLoad: () => void;
-  private readonly unsubTileChange: (() => void) | null;
 
-  constructor(ctx: GameContext, options: WorldObjectOverlayOptions) {
-    this.ctx = ctx;
+  /** Resolves the owning view's services. Read lazily (not cached at
+   *  construction) because a card's view isn't known until it attaches, and
+   *  can change as it re-parents. The host wires this to `() => this.worldView`. */
+  private readonly getServices: () => WorldViewServices | null;
+  /** The view our tile-change subscription is currently bound to + its
+   *  unsubscribe. Re-bound by `syncTileSub` when the owning view changes. */
+  private boundView: WorldViewServices | null = null;
+  private unsubTileChange: (() => void) | null = null;
+
+  constructor(
+    ctx: GameContext,
+    options: WorldObjectOverlayOptions,
+    getServices: () => WorldViewServices | null,
+  ) {
+    this.getServices = getServices;
     this.width = options.width;
     this.height = options.height;
     this.texture = RenderTexture.create({
@@ -97,10 +112,21 @@ export class WorldObjectOverlay {
         this.refresh(this.q, this.r);
       }
     });
-    // Refresh whenever world tile data updates so the snapshot
-    // tracks new trees / terrain changes. Preserves current offset —
-    // the card hasn't moved, the tiles around it have.
-    this.unsubTileChange = ctx.onTilesChanged?.(() => {
+  }
+
+  /** (Re)bind the tile-change subscription to the currently-owning view, so a
+   *  card re-baked when ITS view's tiles change — not some other viewport's.
+   *  Cheap no-op when the view is unchanged. Driven from `refresh` (called on
+   *  every layout/move and on ambient events), so the binding tracks moves. */
+  private syncTileSub(): void {
+    const services = this.getServices();
+    if (services === this.boundView) return;
+    this.unsubTileChange?.();
+    this.boundView = services;
+    // Refresh whenever world tile data updates so the snapshot tracks new
+    // trees / terrain changes. Preserves current offset — the card hasn't
+    // moved, the tiles around it have.
+    this.unsubTileChange = services?.onTilesChanged(() => {
       if (this.q !== null && this.r !== null) {
         this.refresh(this.q, this.r, this.offsetX, this.offsetY);
       }
@@ -119,13 +145,16 @@ export class WorldObjectOverlay {
    *  chained rect above its parent passes a positive offsetY to slide
    *  the snapshot down. */
   refresh(q: number, r: number, offsetX = 0, offsetY = 0): void {
-    const overlay = this.ctx.worldOverlay;
-    if (!overlay) return;
+    this.syncTileSub();
+    const services = this.getServices();
+    if (!services) return;
     this.q = q;
     this.r = r;
     this.offsetX = offsetX;
     this.offsetY = offsetY;
-    this.sprite.visible = overlay(q, r, this.texture, this.width, this.height, offsetX, offsetY);
+    this.sprite.visible = services.makeObjectOverlayForTile(
+      q, r, this.texture, this.width, this.height, offsetX, offsetY,
+    );
     this.onStateChange?.();
   }
 

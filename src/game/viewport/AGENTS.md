@@ -1,24 +1,53 @@
 # AGENTS.md
 
 ## Purpose
-Hex tile grid view of the world and the viewport pan controller. `LayoutWorld` draws tiles, resolves tile-card overlays, and hosts world-layer cards; `WorldPanManager` translates drag gestures into viewport anchor shifts that propagate to both `LayoutWorld` (tile re-render) and `ZoneManager` (zone subscription boundary changes); `pathfind.ts` runs the client-side A* whose result `move_soul` consumes.
+The generic **grid-viewport** system. One `LayoutWorld` renders any
+`(surface, owner)` zone's tiles + cards onto a pluggable `CellGrid` — the world,
+a mini-zone, and an inventory are all the same viewport, differing only by
+`(owner, surface)` and grid shape. Grid shape (hex vs rect) is a pure render
+toggle: a hex viewport draws hex tiles, a rect viewport draws rect tiles, both
+derived from the zone's tile data.
+
+## Folder layout
+- **root (common, grid-agnostic)**: `ViewportPanel` (THE panel — world and
+  inventory are two configs of it: `{ grid, surface, owner, viewer, pan,
+  occupancy, follow, … }`), `LayoutWorld` (the viewport node), `CellGrid` (the
+  grid-strategy interface), `WorldViewServices` (per-view services cards resolve
+  via `findWorldView`), `PanController` (grid-agnostic drag-pan + recenter
+  tween — pans hex or rect via `LayoutWorld.pixelDeltaToCell`), `worldCoords`
+  (zone/tile coords), `ZoneTileCache` (the `(owner,surface)`-scoped tile data
+  model — `tileViewAt(q,r)` from Zone rows + promoted tile-cards; owns the
+  zone/card subscriptions and fires `onChange`; `LayoutWorld` queries it).
+- **`hex/`** (hex-specific): `HexGrid`, `hexSize`, `pathfind` (hex A*),
+  `HexObjectDecorator` (per-tile decorative object sprites — trees/rocks/centre
+  objects ringed around each hex + the card occlusion overlay; `LayoutWorld`
+  constructs one only for hex viewports, so a rect inventory draws no objects).
+- **`rect/`** (rect-specific): `RectGrid`, `GridInventory` (one-card-per-cell
+  occupancy, wired by `ViewportPanel`'s `occupancy` flag).
+
+A viewport subscribes its zone via an **owner-aware anchor**
+(`ZoneManager.setAnchor(name, q, r, surface, owner)` →
+`recomputeAnchorZones` packs `makeMacroZone(owner, …)`), so world (owner 0) and
+inventory (owner = soul) use the identical path. `ensureInventory` is now only
+the panel-less background subscription (`SoulManager`).
 
 ## Important files
-- `LayoutWorld.ts`: `LayoutNode` that draws a pointy-top hex tile grid and registers a shared `WorldCardSurface` with `LayoutManager` for every active world-layer zone. Maintains a flat `tileData: Map<"${q},${r}", packed>` cache hydrated from `data.zones.current` at construction and updated live via `data.zones.subscribe`. Tile reads consult the cards table first via `tileViewAt(q, r)` / `findFreeTileCardAt(q, r)` (promoted tile-cards win over the packed Zone slot); a separate cards-subscription scoped to `surface == WORLD_LAYER && card_type == 7` invalidates the layout and fires `tileChangeListeners` on every tile-card mutation. Viewport origin comes from `ctx.zones.onAnchorChange("viewport")`. Sprite pool (acquire/release) keeps cost proportional to visible hexes. Exposes `worldToLocal(q, r)` / `localToWorld(localX, localY)` for hex↔pixel conversion, plus `resolveTileCardHex(card)` for the chain-stitch-clobber walk (see "Tile-cards stitched into chains" below).
+- `LayoutWorld.ts`: the viewport *shell* — a `LayoutNode` that renders a `(owner, surface)` zone's tiles + cards onto a `CellGrid` and registers a shared `WorldCardSurface` with `LayoutManager` for every active zone it owns. Owns the **retained tile renderer** (sprite pool + active-rect diff + `buildTile`/`dropTile`), the pan transform (`panLayer` + `worldCardSurface` repositioned to `worldToLocal(0,0)` each pass), and the `WorldViewServices` facade. Queries `this.cache` (`ZoneTileCache`) for tile data and delegates objects to `this.decorator` (`HexObjectDecorator`, hex-only). Viewport origin comes from `ctx.zones.onAnchorChange(viewportAnchorName)`. Exposes `worldToLocal` / `localToWorld` (grid-delegated) and `cellToPixel` / `pixelDeltaToCell`.
+- `ZoneTileCache.ts`: the `(owner, surface)`-scoped tile **data model**. `tileViewAt(q, r)` returns the tile (card-sourced wins over zone-sourced) or `null`. Maintains a flat `tileData` cache (from `Zone` rows) + a `(q,r)`→tile-card index (from `card_type == 7` rows in `cardsLocal`, hex resolved via `resolveTileCardHex`'s chain-walk). Owns the `data.zones` + `data.cards` subscriptions and fires `onChange` on any tile mutation; `LayoutWorld` wires that to re-render the affected active tiles + re-notify cards.
 - `WorldPanManager.ts`: subscribes to `InputManager.left_drag_start` / `left_drag_stop`. Pan activates when a drag starts on empty world space (`data.hit === LayoutWorld`). Each `update()` call reads the current pointer delta, converts it to a hex `(dq, dr)`, and pushes `ctx.zones.setAnchor("viewport", …)`. Also exposes `tweenTo(q, r)` for smooth programmatic recentering (exponential-lerp factor 0.18, snap at 0.01 hex units). Called from `MainScene.update` every frame.
 - `pathfind.ts`: client-side A* over the hex grid. `findPath(start, end, blockers, costFn)` returns a `Vec<TilePoint>` the client submits to `move_soul` for server validation. Mirrors the algorithm the server used to run pre-rewrite; the server now only validates per-step adjacency, traversability, and the `MAX_VALIDATION_STEPS = 256` cap. Reads `cost` / `speed` traits via wasm `traitValue(packed, name)`; mini_zone overlays via `LayoutWorld.tileViewAt`.
 - `hexSize.ts`: display constants — `WORLD_HEX_RADIUS` (96 px), `WORLD_HEX_WIDTH`, `WORLD_HEX_HEIGHT`. Independent of the texture-bake radius and the inventory display radius.
 - `worldCoords.ts`: zone/tile coordinate utilities — `packMacroZone` / `unpackMacroZone`, `decodeZoneTiles` (decode all non-empty tile slots in a `Zone` row into world-absolute hex positions + packed defs), `getZoneTileDef` (single-tile lookup by `macroZone + localQ/R`), `zonesAroundAnchor` (enumerate zone origins within a hex ring radius). Also re-exports `WORLD_LAYER` from `server/data/packing`.
 
 ## Tile cache model
-Each `Zone` row encodes an **8×8 block of 64 per-tile u16 slots** in fields `t0..t15` (16 u64s, 4 slots per u64). The slot layout is `[def_id:u12 | stock0:u2 | stock1:u2]` — see [content/AGENTS.md](../../../content/AGENTS.md) and the shard server's [zones.rs](../../../../../spacetime/server/modules/shard/src/zones.rs). On any zone insert/update/remove, `LayoutWorld` evicts the affected 8×8 block from `tileData` and re-decodes the new row. Missing entries (subscription gap, empty slot with `def_id = 0`) fall back to `EMPTY_TILE_PACKED` on render.
+The whole model lives in `ZoneTileCache` (not `LayoutWorld`). Each `Zone` row encodes an **8×8 block of 64 per-tile u16 slots** in fields `t0..t15` (16 u64s, 4 slots per u64). The slot layout is `[def_id:u12 | stock0:u2 | stock1:u2]` — see [content/AGENTS.md](../../../content/AGENTS.md) and the shard server's [zones.rs](../../../../../spacetime/server/modules/shard/src/zones.rs). On any zone insert/update/remove, `ZoneTileCache` evicts the affected 8×8 block from `tileData` and re-decodes the new row. Missing entries (subscription gap, empty slot with `def_id = 0`) fall back to `EMPTY_TILE_PACKED` on render.
 
-A **promoted tile-card** — a real `Card` row at the same `(surface, macro_zone, micro_zone)` — overrides the packed Zone slot. The cards-subscription on `LayoutWorld` listens for `card_type == 7` (`tile`) rows on `WORLD_LAYER` and invalidates the affected hex on insert/update/remove. Stocks come from `flags_bk.tile_stock_{0,1}` (read via `cardFlagFieldValueIn`); at-rest tiles get demoted back into the Zone slot by the server's `gc_sweep`.
+A **promoted tile-card** — a real `Card` row at the same `(surface, macro_zone, micro_zone)` — overrides the packed Zone slot. `ZoneTileCache`'s cards-subscription listens for `card_type == 7` (`tile`) rows in its `(owner, surface)` bucket and fires `onChange` on the affected hex. Stocks come from `flags_bk.tile_stock_{0,1}` (read via `cardFlagFieldValueIn`); at-rest tiles get demoted back into the Zone slot by the server's `gc_sweep`.
 
 ## Tile-cards stitched into chains
 When a recipe binds a tile-card as its `slot.0.0`, the server's `chain_stitch` rewrites the tile-card's `micro_zone` from the Free `[q:3|r:3|state:2]` layout to the OnRoot `[position:4|direction:2|state:2]` layout — the `(q, r)` bits become `(position, direction)` and no longer identify a hex. **Every site that decodes a tile-card's hex must parent-walk to its Free ancestor** via `micro_location`:
 
-- `LayoutWorld.resolveTileCardHex` — drives the render + click-to-details paths.
+- `ZoneTileCache.resolveTileCardHex` — drives the render + click-to-details paths.
 - `ActionManager.resolveTileCardHex` — drives the matcher's `syntheticTile` resolution.
 - (Server) `gc::resolve_tile_hex` — drives demotion's zone-slot address.
 

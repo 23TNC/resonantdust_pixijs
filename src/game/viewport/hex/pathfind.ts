@@ -12,11 +12,10 @@
  *  Companion: `pixijs/src/server/spacetime/bindings/shard/move_soul_path_reducer.ts`
  *  (generated). Server validator: [movement.rs `move_soul_path`](../../../../spacetime/server/modules/shard/src/movement.rs).
  */
-import type { Zone } from "../../server/spacetime/bindings/types";
-import type { DefinitionManager } from "../definitions/DefinitionManager";
-import { decodeMacroZone, makeMacroZone, type MacroZone, packMicroZone, unpackMicroZone } from "../../server/data/packing";
-import { STACKED_LOOSE } from "../cards/cardData";
-import { ZONE_SIZE, getZoneTileDef } from "./worldCoords";
+import type { Zone } from "../../../server/spacetime/bindings/types";
+import type { DefinitionManager } from "../../definitions/DefinitionManager";
+import { decodeMacroZone, makeMacroZone, type MacroZone, packMicroLoose, microLooseCell } from "../../../server/data/packing";
+import { ZONE_SIZE, getZoneTileDef } from "../worldCoords";
 
 /** Default soul speed when the soul's def carries no `speed` trait.
  *  Mirrors `DEFAULT_SOUL_SPEED` in `movement.rs`. */
@@ -51,7 +50,7 @@ export interface Coord {
 export interface TilePoint {
   surface: number;
   macroZone: bigint;
-  microZone: number;
+  microLocation: number;
 }
 
 /** A* / step-cost helpers, exposed for unit tests. */
@@ -118,11 +117,8 @@ function tileDefAt(
 }
 
 /** Encode a global coord back into a `TilePoint` on the given surface.
- *  `microZone` packs state=Free; the server's `move_soul` validator
- *  checks `state == Free` per step. State 3 is now `STACKED_DEFERRED`
- *  (anchored deferred placement, emitted by recipe outputs); using it
- *  for a pathfind target would mis-signal "resolve at mirror time"
- *  to the placement layer. */
+ *  The step lands loose-on-world (centered on the hex), so
+ *  `microLocation` packs the cell with zero offset. */
 function coordToTilePoint(coord: Coord, surface: number): TilePoint {
   const macroQ = Math.floor(coord.q / ZONE_SIZE);
   const macroR = Math.floor(coord.r / ZONE_SIZE);
@@ -131,20 +127,19 @@ function coordToTilePoint(coord: Coord, surface: number): TilePoint {
   return {
     surface,
     macroZone: makeMacroZone(0, surface, macroQ * ZONE_SIZE, macroR * ZONE_SIZE).packed,
-    microZone: packMicroZone(localQ, localR, STACKED_LOOSE),
+    microLocation: packMicroLoose(localQ, localR, 0, 0),
   };
 }
 
-/** Decode a `Card`-shaped tile address (`surface, macro_zone,
- *  micro_zone`) into a global `Coord`. The caller already trusts
- *  that `micro_zone` carries an `OnHex` state — soul rows always do
- *  in the world layer. */
+/** Decode a `Card`-shaped tile address (`macroZone` + loose `microLocation`)
+ *  into a global `Coord`. The caller trusts the card is loose-on-world (soul
+ *  rows always are), so its cell lives in `microLocation`. */
 export function coordFromTileAddress(
   macroZone: bigint,
-  microZone: number,
+  microLocation: number,
 ): Coord {
   const { zoneQ, zoneR } = decodeMacroZone(macroZone);
-  const { localQ, localR } = unpackMicroZone(microZone);
+  const { localQ, localR } = microLooseCell(microLocation);
   return {
     q: zoneQ + localQ,
     r: zoneR + localR,
@@ -263,13 +258,13 @@ export function findPathForSoul(
   soul: {
     packedDefinition: number;
     macroZone: MacroZone;
-    microZone: number;
+    microLocation: number;
   },
-  target: { surface: number; macroZone: bigint; microZone: number },
+  target: { surface: number; macroZone: bigint; microLocation: number },
 ): PathResult {
   if (soul.macroZone.surface !== target.surface) return null;
-  const start = coordFromTileAddress(soul.macroZone.packed, soul.microZone);
-  const goal = coordFromTileAddress(target.macroZone, target.microZone);
+  const start = coordFromTileAddress(soul.macroZone.packed, soul.microLocation);
+  const goal = coordFromTileAddress(target.macroZone, target.microLocation);
   const speed = soulSpeed(defs, soul.packedDefinition);
   return findPath(zonesLocal, defs, soul.macroZone.surface, start, goal, speed);
 }

@@ -1,9 +1,12 @@
 import type { GameContext } from "../../GameContext";
-import { InventoryPanel } from "../../game/inventory/InventoryPanel";
+import { ViewportPanel, type ViewportOpts } from "../../game/viewport/ViewportPanel";
+import { HexGrid } from "../../game/viewport/hex/HexGrid";
+import { RectGrid } from "../../game/viewport/rect/RectGrid";
+import { WORLD_HEX_RADIUS } from "../../game/viewport/hex/hexSize";
+import { GRID_W, GRID_H } from "../../game/viewport/rect/GridInventory";
 import type { LayoutManager } from "../../game/layout/LayoutManager";
 import { LayoutNode } from "../../game/layout/LayoutNode";
-import { GameViewPanel } from "../../game/world/GameViewPanel";
-import { DetailsPanel } from "../../game/details/DetailsPanel";
+import { DetailsPanel } from "../../game/panels/details/DetailsPanel";
 import {
   BLUEPRINTS_DEFAULT_WIDTH,
   BlueprintsPanel,
@@ -12,7 +15,7 @@ import { getSoulBlueprintCapacity } from "../../game/blueprints/blueprintCapacit
 import { PanelTaskbar } from "../../ui/dom/PanelTaskbar";
 import { PixiPanel } from "../../ui/dom/PixiPanel";
 import type { DomZBand } from "../../ui/dom/DomPanel";
-import { PLAYER_INVENTORY_LAYER } from "../../server/data/packing";
+import { INVENTORY_LAYER, PLAYER_INVENTORY_LAYER, WORLD_LAYER } from "../../server/data/packing";
 
 /** Right-edge offset (in px) used for default rects of panels that
  *  want to sit inset from the right edge — a layout baseline. */
@@ -355,117 +358,121 @@ export class MainLayout extends LayoutNode {
 
   // ── PanelManager-routed open helpers ─────────────────────────────
 
-  /** Open (or focus) the per-soul inventory panel for `soulCardId`.
-   *  Routes through PanelManager so multiple souls can have their
-   *  inventories open simultaneously. */
-  openInventoryPanel(soulCardId: number): InventoryPanel {
-    if (!this.gameContext.panels) {
-      throw new Error("[MainLayout] ctx.panels must be set before opening inventory panels");
-    }
-    return this.gameContext.panels.ensure(
-      `inventory:${soulCardId}`,
-      () => new InventoryPanel(this.gameContext, this.inventoryLayer, soulCardId),
-    );
+  /** Title-suffix resolvers shared by every viewport — player name always,
+   *  plus the viewer soul's card name when `soulId` is set. */
+  private titleResolvers(soulId: number | null) {
+    const ctx = this.gameContext;
+    return {
+      player: () => ctx.playerSession.getPlayer()?.name ?? null,
+      ...(soulId !== null
+        ? {
+            soul: () => {
+              const row = ctx.data.cardsLocal.get(soulId);
+              return row ? ctx.definitions.label(row.packedDefinition) : null;
+            },
+          }
+        : {}),
+    };
   }
 
-  /** Open (or focus) a chest-style mini inventory panel for
-   *  `cardId`. Used when a card's `inventory` feature value is in
-   *  `1..=9` — small caps render as a compact popover anchored near
-   *  the click rather than the right-edge soul-style panel. The
-   *  panel keys under `inventory:mini:${cardId}` so it coexists
-   *  with the soul-mode panel for the same id and is still picked
-   *  up by `panels.focused("inventory")` for the KeyE handler.
-   *
-   *  `anchorX` / `anchorY` are the viewport-pixel position to hang
-   *  the panel above (the click coordinates passed in from the
-   *  click handler). `capacity` is the max number of cards the
-   *  inventory accepts — passed through to the panel for UI hints;
-   *  server-side enforcement comes separately. */
-  openMiniInventoryPanel(
-    cardId: number,
-    anchorX: number,
-    anchorY: number,
-    capacity: number,
-  ): InventoryPanel {
-    if (!this.gameContext.panels) {
-      throw new Error("[MainLayout] ctx.panels must be set before opening inventory panels");
-    }
-    return this.gameContext.panels.ensure(
-      `inventory:mini:${cardId}`,
-      () => new InventoryPanel(this.gameContext, this.inventoryLayer, cardId, {
-        mode: "mini",
-        capacity,
-        anchorX,
-        anchorY,
-      }),
+  /** Get-or-create a viewport panel keyed `viewport:<surface>:<owner>`. On
+   *  reuse, retargets the viewer (e.g. playing a different soul in the world
+   *  view) instead of spawning a parallel panel. `PanelManager.ensure` focuses. */
+  private openViewport(layer: LayoutNode, opts: ViewportOpts): ViewportPanel {
+    const panels = this.gameContext.panels;
+    if (!panels) throw new Error("[MainLayout] ctx.panels must be set before opening viewports");
+    const panel = panels.ensure(
+      `viewport:${opts.id}`,
+      () => new ViewportPanel(this.gameContext, layer, opts),
     );
+    if (opts.viewer !== null && panel.currentViewer !== opts.viewer) {
+      panel.assignViewer(opts.viewer);
+    }
+    return panel;
   }
 
-  /** Open (or focus) the player-wide inventory panel — the account-
-   *  scoped bucket shared across all of the player's souls. Mirror
-   *  of `openInventoryPanel(soulCardId)` but keyed on
-   *  `PLAYER_INVENTORY_LAYER (2)` instead of `INVENTORY_LAYER (1)`,
-   *  with `macro_zone = player_id`. Single-instance per player. */
-  openPlayerInventoryPanel(playerId: number): InventoryPanel {
-    if (!this.gameContext.panels) {
-      throw new Error("[MainLayout] ctx.panels must be set before opening player-inventory panel");
-    }
-    return this.gameContext.panels.ensure(
-      `inventory:player:${playerId}`,
-      () =>
-        // Title composes in DomPanel — "Inventory" base + the
-        // resolver registered by `InventoryPanel`'s constructor
-        // (defaults to the "player" suffix in player-inventory
-        // mode, matching the old pre-baked "Inventory - <name>"
-        // shape and tracking name changes live).
-        new InventoryPanel(this.gameContext, this.inventoryLayer, playerId, {
-          surface: PLAYER_INVENTORY_LAYER,
-        }),
-    );
+  /** Open the world viewport (hex, pannable, owner 0). `viewer` is the soul the
+   *  camera follows + activates on focus; `null` = a soulless fixed view. */
+  openWorldView(viewer: number | null = null): ViewportPanel {
+    return this.openViewport(this.gameviewLayer, {
+      id: `${WORLD_LAYER}:0`,
+      grid: new HexGrid(WORLD_HEX_RADIUS),
+      surface: WORLD_LAYER,
+      owner: 0,
+      viewer,
+      pan: true,
+      occupancy: false,
+      forceSnap: true,
+      follow: viewer !== null,
+      origin: "center",
+      singleChunk: false,
+      initialQ: 0,
+      initialR: 0,
+      title: "Game View",
+      titleSuffix: viewer !== null ? "soul" : "player",
+      titleSuffixResolvers: this.titleResolvers(viewer),
+      storageKey: `gameViewPanel:${WORLD_LAYER}:0`,
+      defaultsKey: "gameViewPanel",
+      defaultRect: {
+        left: "0",
+        top: `${PanelTaskbar.HEIGHT}px`,
+        width: "800px",
+        height: `calc(100vh - ${PanelTaskbar.HEIGHT * 2}px)`,
+      },
+      minWidth: 400,
+      minHeight: 400,
+      taskbar: this.gameContext.taskbar,
+    });
   }
 
-  /** Open (or retarget) the game-view panel. Single-instance for
-   *  now: clicking Play on a soul reuses whichever game-view panel
-   *  is currently focused / most-recently-accessed and retargets
-   *  its viewport + soul subscriptions to the new soul, instead of
-   *  spawning a parallel panel. Multi-view ships once cards hold
-   *  per-view visual copies; today cards register a single surface
-   *  per zone with `LayoutManager`, so a second game-view panel
-   *  can't render its own soul. */
-  openGameViewPanel(soulCardId: number): GameViewPanel {
-    if (!this.gameContext.panels) {
-      throw new Error("[MainLayout] ctx.panels must be set before opening game-view panels");
-    }
-    // Reuse the currently-focused game-view (last-accessed = top
-    // of the layer's stack) if one exists. `assignSoul` tears down
-    // the old soul's subscriptions / anchor and installs the new
-    // soul's, then recenters the viewport on the new soul's hex
-    // once its row lands.
-    const focused = this.gameContext.panels.focused("gameview");
-    if (focused instanceof GameViewPanel) {
-      focused.assignSoul(soulCardId);
-      focused.focus();
-      return focused;
-    }
-    return this.gameContext.panels.ensure(
-      "gameview",
-      () => new GameViewPanel(this.gameContext, this.gameviewLayer, "gameview", soulCardId),
-    );
+  /** Backwards-compat alias: open the world view following `soulCardId`. */
+  openGameViewPanel(soulCardId: number): ViewportPanel {
+    return this.openWorldView(soulCardId);
   }
 
-  /** Open a soulless game-view anchored at world origin — surface 64,
-   *  q/r (0, 0). `GameViewPanel`'s soulless mode defaults `surface` to
-   *  `WORLD_LAYER` and the anchor to `(0, 0)`, so no options are
-   *  needed. Used as a fixed testing entry point until soul-follow is
-   *  rewired (see `MainScene.openDefaultSoulView`). */
-  openWorldView(): GameViewPanel {
-    if (!this.gameContext.panels) {
-      throw new Error("[MainLayout] ctx.panels must be set before opening game-view panels");
-    }
-    return this.gameContext.panels.ensure(
-      "gameview",
-      () => new GameViewPanel(this.gameContext, this.gameviewLayer, "gameview", null),
-    );
+  /** Open the inventory viewport for `owner` (rect, pannable, single-chunk
+   *  occupancy). `surface` defaults to per-soul `INVENTORY_LAYER`; pass
+   *  `PLAYER_INVENTORY_LAYER` for the account-wide bucket. The viewer is the
+   *  owner for now (viewing your own bucket); ally-viewing will pass the
+   *  player's active soul instead. */
+  openInventoryPanel(owner: number, surface: number = INVENTORY_LAYER): ViewportPanel {
+    const isSoul = surface === INVENTORY_LAYER;
+    return this.openViewport(this.inventoryLayer, {
+      id: `${surface}:${owner}`,
+      grid: new RectGrid(GRID_W, GRID_H),
+      surface,
+      owner,
+      viewer: isSoul ? owner : null,
+      pan: true,
+      occupancy: true,
+      forceSnap: false,
+      follow: false,
+      origin: "topleft",
+      singleChunk: true,
+      initialQ: 0,
+      initialR: 0,
+      title: "Inventory",
+      titleSuffix: isSoul ? "soul" : "player",
+      titleSuffixResolvers: this.titleResolvers(isSoul ? owner : null),
+      storageKey: `gameInventoryPanel:${surface}:${owner}`,
+      defaultsKey: "gameInventoryPanel",
+      defaultRect: {
+        right: "0",
+        top: `${PanelTaskbar.HEIGHT}px`,
+        width: "440px",
+        height: `calc(100vh - ${PanelTaskbar.HEIGHT * 2}px)`,
+      },
+      minWidth: 320,
+      minHeight: 400,
+      taskbar: this.gameContext.taskbar,
+    });
+  }
+
+  /** Open the player-wide inventory bucket (account-scoped, shared across the
+   *  player's souls). Thin wrapper over `openInventoryPanel` on
+   *  `PLAYER_INVENTORY_LAYER`. */
+  openPlayerInventoryPanel(playerId: number): ViewportPanel {
+    return this.openInventoryPanel(playerId, PLAYER_INVENTORY_LAYER);
   }
 
   // ── Layout pass ──────────────────────────────────────────────────

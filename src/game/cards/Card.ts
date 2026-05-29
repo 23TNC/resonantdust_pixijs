@@ -3,22 +3,18 @@
 import { DefinitionManager } from "../definitions/DefinitionManager";
 import { debug } from "../../debug";
 import type { GameContext } from "../../GameContext";
-import type { LayoutNode } from "../layout/LayoutNode";
 import type { Card as CardRow } from "../../server/spacetime/bindings/types";
 import { WORLD_LAYER, type ZoneId } from "../../server/data/packing";
 import type { TableChange } from "../../server/data/ValidAtTable";
 import {
-  getStackDirection,
-  getStackedState,
-  getStackPosition,
-  STACK_DIRECTION_HEX,
-  STACK_DIRECTION_UP,
-  STACKED_DEFERRED,
-  STACKED_ON_ROOT,
-  STACKED_SLOT,
+  decodeMicro,
+  directionForBranch,
+  microIsCard,
+  STACK_STATE_DEFERRED,
 } from "./cardData";
 import type { LocalCard } from "../../server/data/DataManager";
 import type { CardManager } from "./CardManager";
+import { CardView } from "./CardView";
 import type { GameCard } from "./game/CardGame";
 import { GameHexCard, LayoutHexCard } from "./layout/hexagon/HexCard";
 import type { LayoutCard } from "./layout/CardLayout";
@@ -54,6 +50,10 @@ export type CardPositionState =
        *  `PLAYER_INVENTORY_LAYER (2)` for the player-wide bucket. */
       surface?: number;
     }
+  /** Place loose at rect-grid cell `(q, r)` within the CURRENT container
+   *  (zero within-cell offset). Used by the inventory grid for one-card-per-cell
+   *  occupancy — `q, r` are local cell coords (0-7), not global. */
+  | { kind: "cell"; q: number; r: number }
   | { kind: "stacked"; parentId: number; direction: StackDirection }
   /** World / hex-grid placement. `q, r` are global axial coords.
    *
@@ -67,12 +67,28 @@ export type CardPositionState =
       r: number;
       /** Defaults to `WORLD_LAYER (64)` for back-compat. */
       surface?: number;
+      /** Zone owner band — `0` (world) by default; a soul/anchor `card_id` for
+       *  an inventory / mini-zone bucket. The viewport supplies it. */
+      owner?: number;
+      /** Within-cell pixel offset from cell centre (i12, clamped to ±2047).
+       *  Defaults to `0` ⇒ snap. Set by the drop resolver to the cursor's
+       *  pixel delta from the cell centre when the viewport has
+       *  `forceSnap: false`. Stored in `micro_location.x/y`; the renderer
+       *  applies it iff `looseKind` is `LOOSE_HEX`/`LOOSE_RECT`. */
+      offsetX?: number;
+      offsetY?: number;
     };
 
 export class Card {
   readonly cardId: number;
   readonly gameCard: GameCard;
-  readonly layoutCard: LayoutCard;
+  /** The card's visual(s). Phase C: exactly one view. The `layoutCard` getter
+   *  below is a back-compat shim for the handful of external callers that
+   *  reach for the single layout node. */
+  readonly view: CardView;
+  get layoutCard(): LayoutCard {
+    return this.view.layoutCard;
+  }
   // public currentAction: CachedAction | null = null;  // actions stripped
   private readonly cardManager: CardManager;
   private unsubscribe: (() => void) | null = null;
@@ -82,19 +98,12 @@ export class Card {
   /** card_id we're stacked on, or 0 when loose. Drives layout-side parenting:
    *  loose → zone surface, stacked → parent card's stackHost. */
   private currentParentId = 0;
-  /** Mirror of `getStackedState(microZone)` in semantic form. null when loose. */
+  /** Semantic stack direction. null when loose. */
   private currentStackDirection: StackDirection | null = null;
-  /** Last-seen `microZone` byte. Tracked so changes to the packed
-   *  (q, r, state) bits surface as stack-change events even when the
-   *  semantic parent/direction stay constant — e.g. a Free world card
-   *  moving between hexes only changes microZone's localQ/localR bits
-   *  while `microLocation` (0) and direction are unchanged. The legacy
-   *  state-3 tile-move trigger this used to feed (back when state 3
-   *  was `STACKED_ON_HEX`) is retired — state 3 is now
-   *  `STACKED_DEFERRED` and never lives in `cardsLocal` past
-   *  mirror-time resolution; the field stays as a generic microZone
-   *  change marker. */
-  private currentMicroZone = 0;
+  /** Last-seen `microLocation`. Tracked so a loose world card moving between
+   *  hexes (its cell lives in `microLocation` now) surfaces as a tile-change
+   *  event even when parent/direction are unchanged (both 0/null for loose). */
+  private currentMicroLocation = 0;
 
   /**
    * Card stacked directly on top of us (state 1), or 0 if none. Public so
@@ -136,44 +145,24 @@ export class Card {
    *  - `STACKED_LOOSE`: no parent. */
   private static stackParentOf(
     row: CardRow,
-    cardsLocal: Map<number, LocalCard>,
+    _cardsLocal: Map<number, LocalCard>,
   ): number {
-    const state = getStackedState(row.microZone);
-    if (state === STACKED_DEFERRED) return 0;
-    if (state === STACKED_SLOT) return row.microLocation;
-    if (state !== STACKED_ON_ROOT) return 0;
-    const rootId = row.microLocation;
-    const position = getStackPosition(row.microZone);
-    const direction = getStackDirection(row.microZone);
-    if (position <= 1) return rootId;
-    for (const [id, r] of cardsLocal) {
-      if (r.microLocation !== rootId) continue;
-      if (getStackedState(r.microZone) !== STACKED_ON_ROOT) continue;
-      if (getStackDirection(r.microZone) !== direction) continue;
-      // Skip cards whose death animation has finished (`dead === 2`).
-      // They linger in `cardsLocal` until the server reap and shouldn't
-      // claim chain-sibling status for parent lookups — otherwise a
-      // dying card at position N keeps being identified as the
-      // "position N sibling" of a renumbered survivor at position N+1.
-      if ((r as LocalCard).dead === 2) continue;
-      if (getStackPosition(r.microZone) === position - 1) return id;
-    }
-    return rootId;
+    // Flat-root: a stack member's visual parent is its chain ROOT. Every
+    // member of a branch parents to the root's stack host and offsets by its
+    // `stackIndex` (RectCard layout), so no per-card predecessor lookup is
+    // needed. Loose cards have no parent; a still-deferred member (resolved
+    // by `mirrorCard` before chain walks normally see it) isn't in a chain.
+    const micro = decodeMicro(row.microLocation, row.flagsBk);
+    if (micro.kind !== "stacked") return 0;
+    if (micro.branch === STACK_STATE_DEFERRED) return 0;
+    return micro.root;
   }
 
   private static stackDirectionOf(row: CardRow): StackDirection | null {
-    const state = getStackedState(row.microZone);
-    // STACKED_DEFERRED (3) carries the host_id in `microLocation` and
-    // a fallback (q, r) in `microZone` — it has no chain direction of
-    // its own. The direction is decided at mirror-time resolution by
-    // `CardManager.appendAtChainLeaf` (reads the host's chain growth
-    // direction). If a deferred row reaches this method (subscription
-    // gap), returning null tells chain consumers "skip me."
-    if (state === STACKED_DEFERRED) return null;
-    if (state !== STACKED_ON_ROOT && state !== STACKED_SLOT) return null;
-    const dir = getStackDirection(row.microZone);
-    if (dir === STACK_DIRECTION_HEX) return "hex";
-    return dir === STACK_DIRECTION_UP ? "top" : "bottom";
+    const micro = decodeMicro(row.microLocation, row.flagsBk);
+    if (micro.kind !== "stacked") return null;
+    // Deferred members have no chain direction until mirror-time resolution.
+    return directionForBranch(micro.branch);
   }
 
   static create(
@@ -226,7 +215,7 @@ export class Card {
     this.cardId = cardId;
     this.cardManager = cardManager;
     this.gameCard = gameCard;
-    this.layoutCard = layoutCard;
+    this.view = new CardView(cardManager, layoutCard);
 
     // Source the initial row from `data.cards.current` (the server's
     // promoted canonical row) rather than `cardsLocal`. See the
@@ -249,7 +238,7 @@ export class Card {
       // server's view doesn't.
       this.currentParentId = Card.stackParentOf(initialRow, ctx.data.cardsLocal);
       this.currentStackDirection = Card.stackDirectionOf(initialRow);
-      this.currentMicroZone = initialRow.microZone;
+      this.currentMicroLocation = initialRow.microLocation;
       let row: CardRow = initialRow;
       if (this.currentParentId !== 0 && !cardManager.get(this.currentParentId)) {
         this.fallbackToInventory(initialRow);
@@ -260,11 +249,15 @@ export class Card {
         this.currentZoneId = row.macroZone.packed;
         this.currentParentId = 0;
         this.currentStackDirection = null;
-        this.currentMicroZone = row.microZone;
+        this.currentMicroLocation = row.microLocation;
       }
       this.gameCard.applyData(row);
-      this.layoutCard.applyData(row);
-      this.attachToCurrent();
+      this.view.applyData(row);
+      this.view.attachToCurrent(
+        this.currentParentId,
+        this.currentStackDirection,
+        this.currentZoneId,
+      );
       // Best-effort back-pointer: if our parent already exists, claim our
       // slot on it. If the parent hasn't spawned yet, CardManager's
       // post-init repair pass picks it up.
@@ -355,60 +348,12 @@ export class Card {
     if (!parent) return; // still orphan; nothing we can do here.
     this.currentParentId = trueParentId;
     this.currentStackDirection = trueDirection;
-    this.attachToCurrent();
+    this.view.attachToCurrent(
+      this.currentParentId,
+      this.currentStackDirection,
+      this.currentZoneId,
+    );
     this.setBackPointerOn(trueParentId, trueDirection);
-  }
-
-  /** Attach layoutCard to whichever surface matches our current state. */
-  private attachToCurrent(): void {
-    if (this.currentParentId !== 0) {
-      const parent = this.cardManager.get(this.currentParentId);
-      if (parent) {
-        if (this.currentStackDirection === "hex" && parent.layoutCard.hexMount) {
-          parent.layoutCard.hexMount.addChild(this.layoutCard);
-        } else {
-          this.layoutCard.attachToStack(
-            parent.layoutCard,
-            this.currentStackDirection === "bottom" ? "bottom" : "top",
-          );
-        }
-        return;
-      }
-      // Defensive: parent vanished between routing and attach. Fall through
-      // to the zone surface so the card is at least visible.
-    }
-    this.layoutCard.attach(this.currentZoneId);
-  }
-
-  /**
-   * Re-parent layoutCard preserving on-screen position via global→local
-   * conversion. Used when zone or stack-parent changes after the initial
-   * spawn — keeps the visual transition seamless rather than snapping.
-   *
-   * The display buffer (`delayMs` on the cards store) means an update can
-   * fire after our PIXI container has been detached or destroyed mid-flight
-   * (parent vanished, scope cleared). When the container isn't in a live
-   * scene graph, `getGlobalPosition()` dereferences a null `position` and
-   * throws — fall back to a plain detach + re-attach since there's no
-   * on-screen position worth preserving.
-   */
-  private reparentSmoothly(newParent: LayoutNode | null): void {
-    const myContainer = this.layoutCard.container;
-    // PIXI nulls `position` during `Container.destroy()`. A destroyed
-    // container can't be reparented — bail out before any further calls
-    // throw (`detach`, `addChild`, etc. all access `position` internally).
-    if (!myContainer.position) return;
-    if (!myContainer.parent) {
-      this.layoutCard.detach();
-      if (newParent) newParent.addChild(this.layoutCard);
-      return;
-    }
-    const g = myContainer.getGlobalPosition();
-    this.layoutCard.detach();
-    if (!newParent) return;
-    newParent.addChild(this.layoutCard);
-    const sg = newParent.container.getGlobalPosition();
-    this.layoutCard.setDisplayPosition(g.x - sg.x, g.y - sg.y);
   }
 
   /**
@@ -454,34 +399,20 @@ export class Card {
    */
   setDragging(value: boolean, offsetX = 0, offsetY = 0): void {
     this.gameCard.setDragging(value);
-    if (value) {
-      const overlay = this.layoutCard.ctx.layout?.overlay;
-      if (overlay) {
-        const g = this.layoutCard.container.getGlobalPosition();
-        this.layoutCard.detach();
-        overlay.addChild(this.layoutCard);
-        this.layoutCard.setDisplayPosition(g.x, g.y);
-      }
-      this.layoutCard.setDragging(true, offsetX, offsetY);
-    } else {
-      const g = this.layoutCard.container.getGlobalPosition();
-      this.layoutCard.detach();
-      // Re-attach to whatever the current data implies: stackHost for a
-      // stacked card, zone surface for a loose one. If the drop ends up
-      // changing state (loose → stack, stack → loose, stack → other parent),
-      // onDataChange will reparent again — but landing on the right surface
-      // here means a "drop on same parent" path doesn't strand us on the
-      // zone surface when no data actually changes.
-      this.attachToCurrent();
-      // Use the actual PIXI parent (e.g. worldCardLayer) rather than the
-      // LayoutNode surface's container, which may differ for world cards.
-      const pixiParent = this.layoutCard.container.parent;
-      if (pixiParent) {
-        const sg = pixiParent.getGlobalPosition();
-        this.layoutCard.setDisplayPosition(g.x - sg.x, g.y - sg.y);
-      }
-      this.layoutCard.setDragging(false);
-    }
+    // Visual half (re-parent to / from the drag overlay, preserving on-screen
+    // position). On release the view re-attaches to whatever the current model
+    // state implies — stackHost for a stacked card, zone surface for a loose
+    // one — so a "drop on same parent" path doesn't strand the card when no
+    // data actually changes; onDataChange reparents again if the drop did
+    // change state.
+    this.view.setDragging(
+      value,
+      offsetX,
+      offsetY,
+      this.currentParentId,
+      this.currentStackDirection,
+      this.currentZoneId,
+    );
   }
 
   isDragging(): boolean {
@@ -500,7 +431,7 @@ export class Card {
       this.clearBackPointerOn(this.currentParentId, this.currentStackDirection);
     }
     this.gameCard.destroy();
-    this.layoutCard.destroy();
+    this.view.destroy();
   }
 
   private onDataChange(change: TableChange<CardRow>): void {
@@ -510,59 +441,40 @@ export class Card {
     const newZoneId = row.macroZone.packed;
     const newParentId = Card.stackParentOf(row, this.layoutCard.ctx.data.cardsLocal);
     const newStackDirection = Card.stackDirectionOf(row);
-    const newMicroZone = row.microZone;
+    const newMicroLocation = row.microLocation;
     const zoneChanged = newZoneId !== this.currentZoneId;
     const parentChanged = newParentId !== this.currentParentId;
     const directionChanged = newStackDirection !== this.currentStackDirection;
-    // World-tile move detection: a Free card on the world surface
-    // encodes its (localQ, localR) in microZone bits 2-7 and its
-    // (zoneQ, zoneR) chunk address in macroZone. A move between two
-    // empty tiles inside the same chunk doesn't change parent or
-    // direction (both rows are Free, microLocation = 0) — without
-    // this trigger, `ActionManager.evaluateRoot` never re-runs and a
-    // queued recipe (e.g. corpus on tree) keeps the stale hex def.
-    // Cross-chunk moves are caught by `zoneChanged` (macroZone
-    // changes). State 3 (`STACKED_DEFERRED`) is excluded — deferred
-    // rows resolve to state 1/2 at mirror time before this method
-    // sees them; the tile-change trigger is for loose world cards
-    // only.
-    const newState = getStackedState(newMicroZone);
+    // World-tile move detection: a loose card on the world surface encodes its
+    // cell `(localQ, localR)` in `microLocation`; its `(zoneQ, zoneR)` chunk
+    // address lives in `macroZone`. A move between two empty tiles inside the
+    // same chunk doesn't change parent or direction (both loose) — without this
+    // trigger, `ActionManager.evaluateRoot` never re-runs and a queued recipe
+    // (e.g. corpus on tree) keeps the stale hex def. Cross-chunk moves are
+    // caught by `zoneChanged` (macroZone changes). Stacked members aren't loose,
+    // so they're excluded.
     const tileChanged =
-      newState === 0 /* STACKED_LOOSE */ &&
+      !microIsCard(row.flagsBk) &&
       row.macroZone.surface >= WORLD_LAYER &&
-      newMicroZone !== this.currentMicroZone;
+      newMicroLocation !== this.currentMicroLocation;
 
     if (zoneChanged || parentChanged || directionChanged || tileChanged) {
       debug.log(
         ["splice"],
-        `[splice] onDataChange card=${this.cardId} state=${getStackedState(row.microZone)} microZone=0x${row.microZone.toString(16)} microLocation=${row.microLocation} zone=${this.currentZoneId}->${newZoneId} parent=${this.currentParentId}->${newParentId} dir=${this.currentStackDirection}->${newStackDirection}`,
+        `[splice] onDataChange card=${this.cardId} isCard=${microIsCard(row.flagsBk)} microLocation=${row.microLocation} zone=${this.currentZoneId}->${newZoneId} parent=${this.currentParentId}->${newParentId} dir=${this.currentStackDirection}->${newStackDirection}`,
         2,
       );
-      // Resolve the new attach target before mutating state, so we can early-
-      // out cleanly on orphan without leaving currentZoneId / currentParentId
-      // in a half-updated state. Direction-only changes (same parent, top↔
-      // bottom) don't move us between surfaces — only the layout target
-      // shifts, which applyData handles.
-      let nextParent: LayoutNode | null = null;
+      // Orphan check before mutating state, so we can early-out cleanly
+      // without leaving currentZoneId / currentParentId half-updated.
+      // Direction-only changes (same parent, top↔bottom) don't move us between
+      // surfaces — only the layout target shifts, which applyData handles.
       const reparentNeeded = zoneChanged || parentChanged;
-      if (reparentNeeded) {
-        if (newParentId !== 0) {
-          const parent = this.cardManager.get(newParentId);
-          if (!parent) {
-            // Orphan — write a corrected row. setClient fires this same
-            // subscriber synchronously, and that recursive pass (with
-            // newParentId === 0) does the actual re-parent.
-            this.fallbackToInventory(row);
-            return;
-          }
-          nextParent = (newStackDirection === "hex" && parent.layoutCard.hexMount)
-            ? parent.layoutCard.hexMount
-            : newStackDirection === "bottom"
-              ? parent.layoutCard.stackBottomHost
-              : parent.layoutCard.stackTopHost;
-        } else {
-          nextParent = this.layoutCard.ctx.layout?.surfaceFor(newZoneId) ?? null;
-        }
+      if (reparentNeeded && newParentId !== 0 && !this.cardManager.get(newParentId)) {
+        // Orphan — write a corrected row. setClient fires this same
+        // subscriber synchronously, and that recursive pass (with
+        // newParentId === 0) does the actual re-parent.
+        this.fallbackToInventory(row);
+        return;
       }
 
       if (zoneChanged) {
@@ -590,11 +502,20 @@ export class Card {
         }
       }
 
-      if (reparentNeeded) this.reparentSmoothly(nextParent);
+      // View half: resolve the layout parent for the new model state (now
+      // committed to `current*`) and re-parent there. Per-view; the orphan
+      // case is already handled above.
+      if (reparentNeeded) {
+        this.view.reparentToModel(
+          this.currentParentId,
+          this.currentStackDirection,
+          this.currentZoneId,
+        );
+      }
 
-      // Stash the new microZone before firing so re-entrant subscribers
+      // Stash the new microLocation before firing so re-entrant subscribers
       // see consistent state (mirrors the currentZoneId timing above).
-      this.currentMicroZone = newMicroZone;
+      this.currentMicroLocation = newMicroLocation;
 
       // Fire stack-change events for both affected chains. A chain is
       // "affected" if this card joined or left it; when both old and new

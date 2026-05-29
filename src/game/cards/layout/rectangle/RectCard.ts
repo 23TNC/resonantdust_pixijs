@@ -5,17 +5,14 @@ import type { Card as CardRow } from "../../../../server/spacetime/bindings/type
 import type { LocalCard } from "../../../../server/data/DataManager";
 import {
   decodeLooseXY,
-  getStackDirection,
-  getStackedState,
-  STACK_DIRECTION_UP,
-  STACKED_DEFERRED,
-  STACKED_LOOSE,
-  STACKED_ON_ROOT,
-  STACKED_SLOT,
+  decodeMicro,
+  microIsCard,
+  STACK_DIR_UP,
+  STACK_STATE_DEFERRED,
   type LooseXY,
 } from "../../cardData";
 import { GameHexCard, LayoutHexCard } from "../hexagon/HexCard";
-import { WORLD_HEX_RADIUS } from "../../../world/hexSize";
+import { WORLD_HEX_RADIUS } from "../../../viewport/hex/hexSize";
 import { GameCard } from "../../game/CardGame";
 import { LayoutCard } from "../CardLayout";
 import { isSlotHeld } from "../../../actions/chainState";
@@ -29,22 +26,6 @@ import { RectCardVisual } from "./RectVisual";
 import { SoulResourceMeter } from "./SoulResourceMeter";
 import { StateOverlayLayer } from "./StateOverlayLayer";
 import { WorldObjectOverlay } from "../WorldObjectOverlay";
-import {
-  MINI_ZONE_LAYER,
-  WORLD_LAYER,
-} from "../../../../server/data/packing";
-
-/** True iff `surface` lays cards out on a hex grid (macroZone +
- *  microZone bit fields) rather than bucket-style xy
- *  (microLocation). Mirrors the server's `surface == WORLD_LAYER
- *  || surface == MINI_ZONE_LAYER` conventions in
- *  `place.rs::resolve_loose_target`. */
-function isHexGridSurface(surface: number): boolean {
-  return (
-    surface >= WORLD_LAYER ||
-    surface === MINI_ZONE_LAYER
-  );
-}
 import { debug } from "../../../../debug";
 
 export const CARD_SCALE = 1;
@@ -55,16 +36,16 @@ export const RECT_CARD_TITLE_HEIGHT = 24;
 export type RectCardTitlePosition = "top" | "bottom";
 
 export class GameRectCard extends GameCard {
-  private stackedState = 0;
+  private isMember = false;
   private microLocation = 0;
 
   applyData(row: CardRow): void {
-    this.stackedState = getStackedState(row.microZone);
+    this.isMember = microIsCard(row.flagsBk);
     this.microLocation = row.microLocation;
   }
 
   isLoose(): boolean {
-    return this.stackedState === STACKED_LOOSE;
+    return !this.isMember;
   }
 
   getLoosePosition(): LooseXY | null {
@@ -188,11 +169,15 @@ export class LayoutRectCard extends LayoutCard {
     // overlays added next.
     this.visual.addChild(this.cardArt.sprite);
     this.visual.addChild(this.rectVisual.titleBar);
-    this.overlay = new WorldObjectOverlay(ctx, {
-      width: RECT_CARD_WIDTH,
-      height: RECT_CARD_HEIGHT,
-      alpha: 0.75,
-    });
+    this.overlay = new WorldObjectOverlay(
+      ctx,
+      {
+        width: RECT_CARD_WIDTH,
+        height: RECT_CARD_HEIGHT,
+        alpha: 0.75,
+      },
+      () => this.worldView,
+    );
     // Cascade overlay state to stacked children whenever it
     // mutates (refresh / inheritFrom / clear). The walk over the
     // stack hosts lives on the card because the overlay doesn't
@@ -311,50 +296,63 @@ export class LayoutRectCard extends LayoutCard {
       this.invalidate();
     }
 
-    const stacked = getStackedState(row.microZone);
+    const micro = decodeMicro(row.microLocation, row.flagsBk);
 
-    if (stacked === STACKED_LOOSE) {
+    if (micro.kind === "loose") {
       this.setTitlePosition("top");
-      if (isHexGridSurface(row.macroZone.surface)) {
-        // LOOSE on a hex-grid surface (world / mini-zone) — the hex
-        // address lives in `macroZone` (chunk q/r)
-        // + `microZone` (local q/r bit fields, bits 2..=7 since
-        // state=Free zeros the low 2 bits). `microLocation` is
-        // unused here (it's 0). Position the card's centre on the
-        // hex centre (subtract half-w/h to place the top-left
-        // corner) so the loose card visually sits on its tile
-        // rather than top-left-anchored.
-        const { zoneQ, zoneR } = row.macroZone;
-        const q = zoneQ + ((row.microZone >> 5) & 0x7);
-        const r = zoneR + ((row.microZone >> 2) & 0x7);
-        const x = WORLD_HEX_RADIUS * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r);
-        const y = WORLD_HEX_RADIUS * (3 / 2 * r);
-        this.setTarget(x - RECT_CARD_WIDTH / 2, y - RECT_CARD_HEIGHT / 2);
-        if (q !== this.overlay.q || r !== this.overlay.r) {
-          this.overlay.refresh(q, r);
-        }
+      // Loose position is decided by the OWNING VIEWPORT'S GRID, not the
+      // surface: a hex viewport centres the card on its hex, a rect viewport on
+      // its cell — `worldView.cellToPixel` applies the grid's own math. The
+      // cell address is the chunk origin (`zoneQ/R`, both 0 for a single-chunk
+      // inventory) plus the loose cell. Fall back to the raw within-cell pixel
+      // offset when no grid view owns this card.
+      const q = row.macroZone.zoneQ + micro.localQ;
+      const r = row.macroZone.zoneR + micro.localR;
+      const view = this.worldView;
+      const cell = view?.cellToPixel(q, r);
+      // Apply the within-cell `(x, y)` offset only when this is a LOOSE kind
+      // (`looseKind & 0b10) === 0` ⇒ LOOSE_HEX/LOOSE_RECT) AND the viewport
+      // doesn't force snap. SNAP kinds (2/3) and snap-mode viewports both
+      // render centred on the cell.
+      const applyOffset = view !== null && !view.forceSnap && (micro.looseKind & 0b10) === 0;
+      const ox = applyOffset ? micro.x : 0;
+      const oy = applyOffset ? micro.y : 0;
+      if (cell) {
+        this.setTarget((cell.x + ox) - RECT_CARD_WIDTH / 2, (cell.y + oy) - RECT_CARD_HEIGHT / 2);
       } else {
-        const { x, y } = decodeLooseXY(row.microLocation);
-        this.setTarget(x, y);
-        this.overlay.clear();
+        this.setTarget(micro.x, micro.y);
       }
-    } else if (stacked === STACKED_ON_ROOT || stacked === STACKED_SLOT) {
-      // Both modes draw at the same offset from the parent — Pixi
-      // parent-child does the heavy lifting via `Card.stackParentOf`,
-      // which returns the immediate predecessor for state-1 (Slot,
-      // parent-pointer) and the chain root or position-1 sibling for
-      // state-2 (OnRoot, distance-from-root). The visual hierarchy is
-      // identical: the layout card is parented to the predecessor's
-      // top/bottom stack host, so a single offset places it correctly
-      // for either mode.
-      const parentId = row.microLocation;
+      // Object-occlusion overlay — allowed on any surface/grid. The view
+      // returns nothing for a tile with no object, so this no-ops on a bare
+      // inventory cell.
+      //
+      // `overlay.refresh`'s `(offsetX, offsetY)` is *the tile centre's
+      // displacement from the card centre* — so when this card has an
+      // arbitrary-placement offset `(ox, oy)` (card centre = tileCentre + ox,
+      // oy), the overlay needs the negated value. Gating on the offset too
+      // (not just q/r) covers a pre-existing stale-offset case: the per-frame
+      // mid-drag refresh at the bottom of `layout()` leaves `overlay.offsetX/Y`
+      // non-zero, and dropping back onto the SAME tile would skip the q/r
+      // gate and leave that stale offset baked into the snapshot.
+      const wantOverlayX = -ox;
+      const wantOverlayY = -oy;
+      if (
+        q !== this.overlay.q ||
+        r !== this.overlay.r ||
+        wantOverlayX !== this.overlay.offsetX ||
+        wantOverlayY !== this.overlay.offsetY
+      ) {
+        this.overlay.refresh(q, r, wantOverlayX, wantOverlayY);
+      }
+    } else if (micro.branch !== STACK_STATE_DEFERRED) {
+      // Flat-root member: parented (via `Card.stackParentOf`) to the chain
+      // ROOT's stack host. Every member in a branch parents to the same host
+      // and offsets by its `index` (index 0 sits one title-bar from root), so
+      // Pixi compositing stacks them without a parent-pointer chain.
+      const parentId = micro.root;
       const parentCard = this.ctx.cards?.get(parentId) ?? null;
       if (!this.ctx.data.cardsLocal.get(parentId)) {
-        // Defensive — `mirrorCard` already rewrites orphan state-1 at
-        // the mirror boundary, but if a parent vanishes after the row
-        // landed (mid-tween destroy), fall back to inventory loose.
-        // The card's current `macroZone` is the soul bucket it lives
-        // in; reuse it so the orphan stays in the same inventory.
+        // Root vanished (mid-tween destroy) — fall back to inventory loose.
         this.ctx.cards?.get(this.cardId)?.setPosition({
           kind: "inventory",
           soulCardId: row.macroZone.owner,
@@ -364,22 +362,9 @@ export class LayoutRectCard extends LayoutCard {
         });
         return;
       }
-      // Parent-shape-aware offset. For rect parents the chain peeks
-      // out from behind the parent body by one title-bar height
-      // (above for UP, below for DOWN), and the stack hosts are
-      // behind the parent so only the titlebar is visible. For hex
-      // parents the rect sits ON TOP of the hex centered on it —
-      // mimicking how a rect mounted via `hexMount` (state-3 OnHex)
-      // looks, but reached through the state-2 OnRoot path that
-      // magnetic-pulled cards land at. HexCard re-parents the stack
-      // hosts to render in front of the hex visual; here we just
-      // need the correct centering offset.
       const parentIsHex = parentCard?.gameCard instanceof GameHexCard;
-      // Record this card's chain-delta — the displacement of our
-      // centre from the parent's centre in world pixels. Parent's
-      // push (inheritObjectOverlay) adds this to the parent's offset
-      // to derive our own overlay offset, so our snapshot aligns
-      // with the trees at our actual world position.
+      // Step count from the root for this member (1-indexed visual depth).
+      const step = micro.index + 1;
       if (parentIsHex) {
         this.setTitlePosition("top");
         this.setTarget(
@@ -387,14 +372,16 @@ export class LayoutRectCard extends LayoutCard {
           (LayoutHexCard.HEIGHT - RECT_CARD_HEIGHT) / 2,
         );
         this.overlay.setChainDelta(0, 0);
-      } else if (getStackDirection(row.microZone) === STACK_DIRECTION_UP) {
+      } else if (micro.branch === STACK_DIR_UP) {
+        const off = step * RECT_CARD_TITLE_HEIGHT;
         this.setTitlePosition("top");
-        this.setTarget(0, -RECT_CARD_TITLE_HEIGHT);
-        this.overlay.setChainDelta(0, RECT_CARD_TITLE_HEIGHT);
+        this.setTarget(0, -off);
+        this.overlay.setChainDelta(0, off);
       } else {
+        const off = step * RECT_CARD_TITLE_HEIGHT;
         this.setTitlePosition("bottom");
-        this.setTarget(0, +RECT_CARD_TITLE_HEIGHT);
-        this.overlay.setChainDelta(0, -RECT_CARD_TITLE_HEIGHT);
+        this.setTarget(0, +off);
+        this.overlay.setChainDelta(0, -off);
       }
       // Pull parent's current overlay state so we have something to
       // show before the next time the parent re-bakes.
@@ -409,25 +396,16 @@ export class LayoutRectCard extends LayoutCard {
       } else {
         this.overlay.clear();
       }
-    } else if (stacked === STACKED_DEFERRED) {
-      // Deferred placement gap render. The row should've been
-      // resolved by `mirrorCard` into state 1/2 before reaching the
-      // layout, but if it's still state 3 (subscription gap, host
-      // not loaded yet), render at the fallback (q, r) baked into
-      // `microZone`. `microLocation` is the host_id (resolution
-      // anchor, not a chain parent) and is ignored for layout —
-      // we don't try to render relative to the host because the
-      // host might be a rect, hex, or anything else.
+    } else {
+      // Still-deferred at layout time (`mirrorCard` should have resolved it to
+      // a concrete loose/stacked placement). `micro_location` is the host
+      // card_id, not a cell, and there's no baked fallback cell any more —
+      // render centered on the chunk origin as a last resort.
       const { zoneQ, zoneR } = row.macroZone;
-      const q = zoneQ + ((row.microZone >> 5) & 0x7);
-      const r = zoneR + ((row.microZone >> 2) & 0x7);
-      const x = WORLD_HEX_RADIUS * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r);
-      const y = WORLD_HEX_RADIUS * (3 / 2 * r);
+      const x = WORLD_HEX_RADIUS * (Math.sqrt(3) * zoneQ + Math.sqrt(3) / 2 * zoneR);
+      const y = WORLD_HEX_RADIUS * (3 / 2 * zoneR);
       this.setTitlePosition("top");
       this.setTarget(x - RECT_CARD_WIDTH / 2, y - RECT_CARD_HEIGHT / 2);
-      if (q !== this.overlay.q || r !== this.overlay.r) {
-        this.overlay.refresh(q, r);
-      }
     }
   }
 
@@ -549,13 +527,14 @@ export class LayoutRectCard extends LayoutCard {
     // to the global drag overlay, so its local effX/effY is no
     // longer in the world-card-surface frame — global coords work in
     // both states.
+    const worldView = this.worldView;
     if (
       this.overlay.q !== null &&
-      this.ctx.worldHexAt &&
+      worldView &&
       (this.state.dragging || moving)
     ) {
       const gp = this.container.getGlobalPosition();
-      const hex = this.ctx.worldHexAt(gp.x + RECT_CARD_WIDTH / 2, gp.y + RECT_CARD_HEIGHT / 2);
+      const hex = worldView.worldHexAt(gp.x + RECT_CARD_WIDTH / 2, gp.y + RECT_CARD_HEIGHT / 2);
       // Re-bake every frame while moving so the offset stays
       // up-to-date — the tile snapshot slides with the card's drift
       // relative to the tile centre rather than only snapping on

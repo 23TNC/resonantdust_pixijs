@@ -1,20 +1,23 @@
 import { debug } from "../../debug";
 import type { CardDefinition, DefinitionManager } from "../../game/definitions/DefinitionManager";
-import type { Card, ChatMessage, Player, PlayerProfile, Soul, SoulPrivate, Zone } from "../spacetime/bindings/types";
+import type { Card, ChatMessage, Player, PlayerProfile, Region, Soul, SoulPrivate, Zone } from "../spacetime/bindings/types";
 import { ChatSubscriptionManager } from "../spacetime/ChatSubscriptionManager";
 import type { ConnectionRegistry } from "../spacetime/ConnectionRegistry";
 import type { ReducerManager } from "../spacetime/ReducerManager";
 import { SubscriptionManager } from "../spacetime/SubscriptionManager";
 import {
+  applyMicro,
   decodeMacroZone,
-  isStackLayout,
+  decodeMicro,
   type MacroZone,
   makeMacroZone,
-  packStackMicroZone,
-  unpackStackMicroZone,
+  microIsCard,
+  stackState,
+  stackIndex,
+  LOOSE_RECT,
+  STACK_STATE_DEFERRED,
 } from "./packing";
 import { validAtOf, WORLD_LAYER } from "./packing";
-import { getStackDirection } from "../../game/cards/cardData";
 import { ValidAtTable, type TableChange, type TableListener } from "./ValidAtTable";
 import { AppendTable } from "./AppendTable";
 import type { CardManager } from "../../game/cards/CardManager";
@@ -176,6 +179,16 @@ export class DataManager {
     (row) => row.validAt,
     (row) => row.zoneId,
   );
+  /** Region spawn-gating rows (presence/availability bitfields), keyed by
+   *  `macro_region`. `ValidAtTable` keys `current` by `number`, so we narrow
+   *  `macroRegion` via `Number(...)` — safe for world regions (`card_id 0`,
+   *  surface 64 → `< 2^53`); container regions (high `card_id` bits) would
+   *  overflow, revisit when those exist. No `*Local` overlay: ZoneManager holds
+   *  the bits it needs (fed from `regions.subscribe` in `main.ts`). */
+  readonly regions = new ValidAtTable<Region>(
+    (row) => row.validAt,
+    (row) => Number(row.macroRegion),
+  );
   /** Flat (non-versioned) world-chat feed. Server inserts append-only;
    *  there is no `current` view to promote — `chatMessages.rows` is
    *  the table itself. See `AppendTable` and `chat.rs`. */
@@ -310,6 +323,13 @@ export class DataManager {
       onUpdate: (oldRow, newRow) =>
         this.zones.update(decodeMacro(oldRow), decodeMacro(newRow)),
       onDelete: (row) => this.zones.delete(decodeMacro(row)),
+    });
+    // Regions carry no `macro_zone` (just `macro_region` + bitfields), so they
+    // skip `decodeMacro` and store raw.
+    this.subscriptions.registerTableHandlers("regions", {
+      onInsert: this.regions.insert,
+      onUpdate: this.regions.update,
+      onDelete: this.regions.delete,
     });
     this.chatSubscriptions.registerTableHandlers("chat_messages", {
       onInsert: this.chatMessages.insert,
@@ -497,6 +517,7 @@ export class DataManager {
     this.players.promote(now);
     this.souls.promote(now);
     this.zones.promote(now);
+    this.regions.promote(now);
     this.kickProgressExpiries(now);
   }
 
@@ -551,6 +572,7 @@ export class DataManager {
     this.players.dispose();
     this.souls.dispose();
     this.zones.dispose();
+    this.regions.dispose();
     this.cardsLocal.clear();
     this.playersLocal.clear();
     this.soulsLocal.clear();
@@ -691,7 +713,7 @@ export class DataManager {
     if (change.kind === "removed") {
       debug.log(
         ["spacetime"],
-        `[spacetime] card row removed t=${nowSecs} id=${change.key} prev=${prev ? `flagsState=0x${prev.flagsState.toString(16)} flagsBk=0x${prev.flagsBk.toString(16)} microZone=0x${prev.microZone.toString(16)} microLocation=${prev.microLocation} macroZone=${prev.macroZone.packed} surface=${prev.macroZone.surface}` : "absent"}`,
+        `[spacetime] card row removed t=${nowSecs} id=${change.key} prev=${prev ? `flagsState=0x${prev.flagsState.toString(16)} flagsBk=0x${prev.flagsBk.toString(16)} microLocation=${prev.microLocation} macroZone=${prev.macroZone.packed} surface=${prev.macroZone.surface}` : "absent"}`,
         0,
       );
       if (prev === undefined) return;
@@ -701,10 +723,16 @@ export class DataManager {
     }
 
     const serverRow = change.kind === "added" ? change.row : change.newRow;
-    const serverState = serverRow.microZone & 0x3;
+    // Flat-root placement of the incoming row: loose vs stacked-member vs
+    // deferred (a stacked member in the deferred branch).
+    const serverMicro = decodeMicro(serverRow.microLocation, serverRow.flagsBk);
+    const isStackedMember =
+      serverMicro.kind === "stacked" && serverMicro.branch !== STACK_STATE_DEFERRED;
+    const isDeferred =
+      serverMicro.kind === "stacked" && serverMicro.branch === STACK_STATE_DEFERRED;
     debug.log(
       ["spacetime"],
-      `[spacetime] card row ${change.kind} t=${nowSecs} id=${change.key} validAt=${validAtOf(serverRow.validAt)} state=${serverState} flagsState=0x${serverRow.flagsState.toString(16)} flagsBk=0x${serverRow.flagsBk.toString(16)} microZone=0x${serverRow.microZone.toString(16)} microLocation=${serverRow.microLocation} macroZone=${serverRow.macroZone.packed} surface=${serverRow.macroZone.surface}`,
+      `[spacetime] card row ${change.kind} t=${nowSecs} id=${change.key} validAt=${validAtOf(serverRow.validAt)} isCard=${microIsCard(serverRow.flagsBk)} flagsState=0x${serverRow.flagsState.toString(16)} flagsBk=0x${serverRow.flagsBk.toString(16)} microLocation=${serverRow.microLocation} macroZone=${serverRow.macroZone.packed} surface=${serverRow.macroZone.surface}`,
       0,
     );
 
@@ -734,7 +762,7 @@ export class DataManager {
     // writer and we bail here. Falls back to the preserve path when
     // no CardManager is wired yet (boot window before
     // `setCardManager` runs) so the row at least lands somewhere.
-    if (serverState === 3 /* STACKED_DEFERRED */ && this.cardManager !== null) {
+    if (isDeferred && this.cardManager !== null) {
       this.cardManager.appendAtChainLeaf(serverRow);
       // The cascade writes via `setLocalCard` which fires per-key
       // listeners but not the global add/update listener that
@@ -779,63 +807,30 @@ export class DataManager {
     // card whose first push is an orphan slot).
     const orphanSlot =
       prev === undefined &&
-      serverState === 1 /* STACKED_SLOT */ &&
+      isStackedMember &&
       serverRow.microLocation !== change.key &&
       !this.cardsLocal.has(serverRow.microLocation);
 
     let preservePosition = false;
     let serverForcesStackPosition = false;
     if (!orphanSlot) {
-      if (serverState === 0 /* STACKED_LOOSE */) {
+      if (serverMicro.kind === "loose") {
         // Position-ownership for LOOSE cards splits on surface:
-        //
-        //   - INVENTORY (`surface < WORLD_LAYER`): client owns. Drag-
-        //     drop and splice transplants write the position purely
-        //     locally; the server's view (which only knows the
-        //     inventory bucket, not the pixel xy) shouldn't clobber.
-        //   - WORLD (`surface >= WORLD_LAYER`): server owns. World-
-        //     loose cards (souls, dropped items on tiles) carry their
-        //     hex address in `macroZone + microZone`, and the server
-        //     authoritatively writes those — e.g. `move_soul`'s
-        //     per-step writes update the soul's tile. Preserving the
-        //     local row here would silently drop those moves and
-        //     leave the client's view permanently stuck at the
-        //     pre-move position.
+        //   - container (`surface < WORLD_LAYER`, e.g. inventory): client owns
+        //     the cell + within-cell offset locally; the server's view
+        //     shouldn't clobber a drag/splice transplant.
+        //   - WORLD (`surface >= WORLD_LAYER`): server owns — `move_soul`'s
+        //     per-step writes update the soul's tile; preserving locally would
+        //     silently drop those moves.
         preservePosition = serverRow.macroZone.surface < WORLD_LAYER;
-      } else if (serverState === 1 /* STACKED_SLOT */) {
-        // State-1 chain members carry `microLocation = predecessor`
-        // and `microZone = direction`. The client owns the chain
-        // locally (via `setCardPosition`); the server only writes
-        // these fields when it's asserting chain shape (e.g.
-        // `propose_action`'s slot[1..] writes). `FLAG_POS_NEED` /
-        // `FLAG_POS_WANT` are the two placement-assertion bits:
-        // - Neither set → row is a flag-only update; the local
-        //   chain stays as the player arranged it.
-        // - `pos_need` → server *requires* this slot; mirror
-        //   splices on conflict with the incoming card winning.
-        // - `pos_want` → server *prefers* this slot; mirror
-        //   splices on conflict with the existing occupant winning.
-        // The splice itself (and any chain-overflow eviction it
-        // triggers) is staged after the preserve / baseRow gate
-        // below — we just compute the `forced` boolean here so the
-        // existing baseRow plumbing keeps working in the no-conflict
-        // path.
-        const forced = (serverRow.flagsState & (FLAG_POS_NEED | FLAG_POS_WANT)) !== 0;
-        preservePosition = !forced;
-      } else if (isStackLayout(serverState, serverRow.macroZone.surface)) {
-        // State-2 OnRoot on inventory — same placement-assertion
-        // gate as the state-1 branch above.
+      } else {
+        // Stacked member (deferred already short-circuited above). The client
+        // owns the chain locally unless the server asserts `pos_need` /
+        // `pos_want` (a forced placement, resolved by the splice path below).
         const forced = (serverRow.flagsState & (FLAG_POS_NEED | FLAG_POS_WANT)) !== 0;
         preservePosition = !forced;
         serverForcesStackPosition = forced;
       }
-      // STACKED_DEFERRED (3) — handled by the dedicated state-3
-      // branch added in Phase 5 (below); resolution happens via
-      // `CardManager.appendAtChainLeaf`. We don't fall through to
-      // the preserve / forced-overwrite logic above for state 3
-      // because deferred rows have no concrete position to preserve
-      // or assert — they declare an intent that resolves at read
-      // time.
     }
 
     // Orphan-slot fallback target: walk the orphaned card's `ownerId`
@@ -850,21 +845,33 @@ export class DataManager {
       ? this.findOwningSoulId(serverRow.ownerId) ?? serverRow.ownerId
       : 0;
 
-    let baseRow: Card = orphanSlot
-      ? {
-          ...serverRow,
-          macroZone:     makeMacroZone(orphanInventoryBucket, INVENTORY_LAYER, 0, 0),
-          microLocation: 0, // encodeLooseXY(0, 0) === 0
-          microZone:     serverRow.microZone & ~0x3, // state → STACKED_LOOSE
-        }
-      : preservePosition && prev !== undefined
-      ? {
-          ...serverRow,
-          macroZone:     prev.macroZone,
-          microZone:     prev.microZone,
-          microLocation: prev.microLocation,
-        }
-      : serverRow;
+    let baseRow: Card;
+    if (orphanSlot) {
+      // Orphaned member (root not loaded) → loose-rect at cell (0,0) in the
+      // owning soul's inventory bucket so it's visible + recoverable.
+      const placed = applyMicro(
+        { kind: "loose", localQ: 0, localR: 0, x: 0, y: 0, looseKind: LOOSE_RECT },
+        serverRow.flagsBk,
+      );
+      baseRow = {
+        ...serverRow,
+        macroZone: makeMacroZone(orphanInventoryBucket, INVENTORY_LAYER, 0, 0),
+        microLocation: placed.microLocation,
+        flagsBk: placed.flagsBk,
+      };
+    } else if (preservePosition && prev !== undefined) {
+      // Keep the local placement (cell/offset or root/branch/index) over the
+      // server's, but adopt the server's other flags (holds, dirty markers).
+      const placed = applyMicro(decodeMicro(prev.microLocation, prev.flagsBk), serverRow.flagsBk);
+      baseRow = {
+        ...serverRow,
+        macroZone: prev.macroZone,
+        microLocation: placed.microLocation,
+        flagsBk: placed.flagsBk,
+      };
+    } else {
+      baseRow = serverRow;
+    }
 
     // State-1 SLOT splice for `pos_need` / `pos_want` conflicts.
     // `baseRow` above captures the no-conflict outcome (server
@@ -884,12 +891,19 @@ export class DataManager {
     let spliceOverflow: Card | null = null;
     if (
       !orphanSlot &&
-      serverState === 1 /* STACKED_SLOT */ &&
+      serverMicro.kind === "stacked" &&
+      serverMicro.branch !== STACK_STATE_DEFERRED &&
       (serverRow.flagsState & (FLAG_POS_NEED | FLAG_POS_WANT)) !== 0 &&
       this.cardManager !== null
     ) {
-      const direction = getStackDirection(serverRow.microZone);
-      const occupant = this.cardManager.findSlotOccupant(serverRow.microLocation, direction);
+      // A different local card already occupies the forced (root, branch, index)
+      // slot? Splice to resolve the collision.
+      const occupant = this.cardManager.findMemberAt(
+        serverMicro.root,
+        serverMicro.branch,
+        serverMicro.index,
+        change.key,
+      );
       if (occupant && occupant.cardId !== change.key) {
         // `pos_need` outranks `pos_want` when both bits are set —
         // need's "incoming wins" semantic is the stricter assertion.
@@ -1070,28 +1084,28 @@ export class DataManager {
    *  later cleanup pass can compact). Each bump fires `fireCardLocal`
    *  so downstream listeners (Card.onDataChange) tween. */
   private renumberAfterForcedStackPosition(forcedId: number, forced: LocalCard): void {
-    const forcedState = forced.microZone & 0x3;
-    if (!isStackLayout(forcedState, forced.macroZone.surface)) return;
-    const { position: forcedPos, direction: forcedDir } = unpackStackMicroZone(forced.microZone);
+    if (!microIsCard(forced.flagsBk)) return;
+    const forcedBranch = stackState(forced.flagsBk);
+    const forcedIdx = stackIndex(forced.flagsBk);
     const forcedRoot = forced.microLocation;
-    if (forcedPos === 0) return;
 
     const bumps: { id: number; oldRow: LocalCard; newRow: LocalCard }[] = [];
     for (const [id, row] of this.cardsLocal) {
       if (id === forcedId) continue;
-      if ((row.microZone & 0x3) !== forcedState) continue;
-      if (!isStackLayout(forcedState, row.macroZone.surface)) continue;
+      if (!microIsCard(row.flagsBk)) continue;
       if (row.microLocation !== forcedRoot) continue;
-      const { position, direction } = unpackStackMicroZone(row.microZone);
-      // Only bump cards in the SAME direction — top and bottom chains
-      // have independent position spaces under the same root.
-      if (direction !== forcedDir) continue;
-      if (position < forcedPos) continue;
-      const newPos = Math.min(position + 1, 31);
-      if (newPos === position) continue;
-      const newMz = packStackMicroZone(newPos, direction, forcedState);
-      const newRow: LocalCard = { ...row, microZone: newMz };
-      bumps.push({ id, oldRow: row, newRow });
+      // Only bump the same branch — top / bottom / hex have independent
+      // index spaces under the same root.
+      if (stackState(row.flagsBk) !== forcedBranch) continue;
+      const idx = stackIndex(row.flagsBk);
+      if (idx < forcedIdx) continue;
+      const newIdx = Math.min(idx + 1, 15);
+      if (newIdx === idx) continue;
+      const placed = applyMicro(
+        { kind: "stacked", root: forcedRoot, branch: forcedBranch, index: newIdx },
+        row.flagsBk,
+      );
+      bumps.push({ id, oldRow: row, newRow: { ...row, microLocation: placed.microLocation, flagsBk: placed.flagsBk } });
     }
     for (const { id, oldRow, newRow } of bumps) {
       this.cardsLocal.set(id, newRow);

@@ -1,7 +1,7 @@
-import { debug } from "../../debug";
-import { DomPanel } from "../../ui/dom/DomPanel";
-import type { PanelTaskbar } from "../../ui/dom/PanelTaskbar";
-import type { UiEditMode } from "../../ui/dom/UiEditMode";
+import { debug } from "../../../debug";
+import { DomPanel } from "../../../ui/dom/DomPanel";
+import type { PanelTaskbar } from "../../../ui/dom/PanelTaskbar";
+import type { UiEditMode } from "../../../ui/dom/UiEditMode";
 
 const ITEM_CSS: Partial<CSSStyleDeclaration> = {
   padding: "10px 16px",

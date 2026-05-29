@@ -12,6 +12,7 @@ import {
 
 export default __t.row({
   validAt: __t.u64().primaryKey().name("valid_at"),
+  dataShard: __t.u16().name("data_shard"),
   zoneId: __t.u32().name("zone_id"),
   macroZone: __t.u64().name("macro_zone"),
   packedDefinition: __t.u8().name("packed_definition"),

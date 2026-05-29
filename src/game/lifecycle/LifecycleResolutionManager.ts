@@ -378,7 +378,7 @@ export class LifecycleResolutionManager {
         recipeId,
         surface: card.macroZone.surface,
         macroZone: card.macroZone.packed,
-        microZone: card.microZone,
+        microLocation: card.microLocation,
         root: card.cardId,
         bindings,
       });

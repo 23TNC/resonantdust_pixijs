@@ -1,7 +1,7 @@
-import type { GameContext } from "../../GameContext";
-import type { ChatMessage } from "../../server/spacetime/bindings/types";
-import { debug } from "../../debug";
-import { DomPanel } from "../../ui/dom/DomPanel";
+import type { GameContext } from "../../../GameContext";
+import type { ChatMessage } from "../../../server/spacetime/bindings/types";
+import { debug } from "../../../debug";
+import { DomPanel } from "../../../ui/dom/DomPanel";
 
 const PLACEHOLDER_TEXT = "Type a message…";
 

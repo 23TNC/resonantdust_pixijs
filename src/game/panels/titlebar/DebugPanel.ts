@@ -1,7 +1,8 @@
-import type { ReducerManager } from "../../server/spacetime/ReducerManager";
-import { DomPanel } from "../../ui/dom/DomPanel";
-import type { PanelTaskbar } from "../../ui/dom/PanelTaskbar";
-import type { UiEditMode } from "../../ui/dom/UiEditMode";
+import { debug } from "../../../debug";
+import type { ReducerManager } from "../../../server/spacetime/ReducerManager";
+import { DomPanel } from "../../../ui/dom/DomPanel";
+import type { PanelTaskbar } from "../../../ui/dom/PanelTaskbar";
+import type { UiEditMode } from "../../../ui/dom/UiEditMode";
 
 /** Frames between history samples. At ~60fps that's roughly 2Hz —
  *  combined with `ReducerManager.HISTORY_LIMIT = 600`, the sparkline
@@ -49,6 +50,18 @@ const LABEL_CSS: Partial<CSSStyleDeclaration> = {
 
 const VALUE_CSS: Partial<CSSStyleDeclaration> = {
   color: "#ecd6aa",
+};
+
+/** Glyph button for a toggle row — transparent so only the ▣ / ▢
+ *  reads, matching the value-column colour. Mirrors the toggle look
+ *  of `PanelSettingsPopup`. */
+const TOGGLE_BTN_CSS: Partial<CSSStyleDeclaration> = {
+  background: "none",
+  border: "none",
+  color: "#ecd6aa",
+  cursor: "pointer",
+  font: "inherit",
+  padding: "0",
 };
 
 /** Right-side cluster wrapping a sparkline canvas + the live value
@@ -264,6 +277,14 @@ export class DebugPanel {
     const syncContent     = document.createElement("div");
 
     // ── Main tab — at-a-glance ────────────────────────────────────
+    // Global on-screen-debug toggle. Flips `debug.showInfo`, which
+    // feature code reads to decide whether to render debug overlays.
+    this.addToggleRow(
+      mainContent,
+      "Debug info",
+      () => debug.showInfo,
+      () => debug.toggleInfo(),
+    );
     this.mainServerNow = this.addRow(mainContent, "Server now");
     this.mainOffset    = this.addRow(mainContent, "Offset");
     this.mainFps       = this.addRow(mainContent, "FPS");
@@ -420,6 +441,34 @@ export class DebugPanel {
             : "—";
       }
     }
+  }
+
+  /** Build a toggle row: a label plus a ▣ / ▢ glyph button reflecting
+   *  `getState()`. Clicking runs `onToggle()` then re-reads the state
+   *  so the glyph stays accurate. Same row chrome as `addRow`. */
+  private addToggleRow(
+    parent: HTMLDivElement,
+    label: string,
+    getState: () => boolean,
+    onToggle: () => void,
+  ): void {
+    const row = document.createElement("div");
+    Object.assign(row.style, ROW_CSS);
+    const labelEl = document.createElement("span");
+    Object.assign(labelEl.style, LABEL_CSS);
+    labelEl.textContent = label;
+    const btn = document.createElement("button");
+    Object.assign(btn.style, TOGGLE_BTN_CSS);
+    const sync = (): void => { btn.textContent = getState() ? "▣" : "▢"; };
+    sync();
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      onToggle();
+      sync();
+    });
+    row.appendChild(labelEl);
+    row.appendChild(btn);
+    parent.appendChild(row);
   }
 
   private addRow(parent: HTMLDivElement, label: string): HTMLSpanElement {

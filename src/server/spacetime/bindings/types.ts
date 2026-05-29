@@ -24,7 +24,9 @@ import type { MacroZone } from "../../data/packing";
 // together at the `DataManager` ingestion boundary and kept in lockstep by
 // `makeMacroZone()` at write sites (the only place encoding happens). Reads
 // (`row.macroZone.surface`, `.owner`, `.zoneQ/.zoneR`) never pack or unpack.
-// `micro_zone` / `micro_location` are decoded in Phase 2. See `server/data/packing.ts`.
+// `micro_zone` was removed; `microLocation` (u32) + the `flagsBk` stacking bits
+// stay as raw numbers on the row, decoded via the `Micro` accessors in
+// `server/data/packing.ts`.
 export type Card = Omit<GenCard, "macroZone"> & { macroZone: MacroZone };
 export type Soul = Omit<GenSoul, "macroZone"> & { macroZone: MacroZone };
 export type Zone = Omit<GenZone, "macroZone"> & { macroZone: MacroZone };
@@ -32,6 +34,7 @@ export type Zone = Omit<GenZone, "macroZone"> & { macroZone: MacroZone };
 export type {
   Player,
   PlayerProfile,
+  Region,
   SoulPrivate,
   TilePoint,
 } from "./shard/types";

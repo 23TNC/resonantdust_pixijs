@@ -415,6 +415,15 @@ export class PanelSettingsPopup {
     this.panel.close();
   }
 
+  /** Subscribe to the popup's open / close state. Proxies the
+   *  underlying `DomPanel.onOpenChange` so external code (notably
+   *  `main.ts`, which exits UI edit mode when the popup closes) can
+   *  react without reaching through `this.panel`. Returns an
+   *  unsubscribe fn. */
+  onOpenChange(cb: (open: boolean) => void): () => void {
+    return this.panel.onOpenChange(cb);
+  }
+
   destroy(): void {
     this.unbind();
     this.panel.destroy();

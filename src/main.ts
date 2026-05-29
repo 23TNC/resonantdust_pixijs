@@ -31,8 +31,8 @@ import { decodeMacroZone, WORLD_LAYER, type ZoneId } from "./server/data/packing
 import { PanelTaskbar } from "./ui/dom/PanelTaskbar";
 import { UiEditMode } from "./ui/dom/UiEditMode";
 import { PanelSettingsPopup } from "./ui/dom/PanelSettingsPopup";
-import { DebugPanel } from "./game/titlebar/DebugPanel";
-import { SettingsMenu } from "./game/titlebar/SettingsMenu";
+import { DebugPanel } from "./game/panels/titlebar/DebugPanel";
+import { SettingsMenu } from "./game/panels/titlebar/SettingsMenu";
 
 interface Runtime {
   app: Application;
@@ -120,6 +120,30 @@ async function main(): Promise<Runtime> {
   // restacks it above whatever else moved during editing.
   uiEditMode.on((enabled) => {
     if (enabled) settingsMenu.close();
+  });
+
+  // Entering edit mode auto-opens the panel-settings popup so the
+  // user can configure layout immediately without hunting for a
+  // panel's ⛯ button. Target = most-recently-focused panel from the
+  // bottom taskbar (where the user-facing panels live), falling back
+  // to the top taskbar (debug / settings / etc.). If no panel has
+  // ever been focused — degenerate fresh-session case — silently
+  // skip; the user can still open the popup via any panel's ⛯.
+  uiEditMode.on((enabled) => {
+    if (!enabled) return;
+    const target = taskbar.getFocusedPanel() ?? topTaskbar.getFocusedPanel();
+    if (target) panelSettingsPopup.show(target);
+  });
+
+  // Closing the panel-settings popup also exits edit mode — symmetric
+  // with the exit-mode → close-popup direction above. The round-trip
+  // self-terminates because both `setEnabled` and `close` are
+  // idempotent: close → setEnabled(false) → close (no-op, already
+  // closed). The `uiEditMode.enabled` guard skips the case where the
+  // popup closed because edit mode was exited (the user clicked Exit
+  // first; we don't want to fire a redundant setEnabled).
+  panelSettingsPopup.onOpenChange((open) => {
+    if (!open && uiEditMode.enabled) uiEditMode.setEnabled(false);
   });
 
   // Bootstrap the wasm-built content crate before any code calls into the
@@ -257,6 +281,27 @@ async function main(): Promise<Runtime> {
   }
   zones.onSubscriptionChange(applySubscriptionClass);
 
+  // Region gate: ZoneManager subscribes the `regions` table for any region
+  // holding a wanted world zone, and only realizes a zone's subscription once
+  // its region marks it present — requesting a server spawn for present-but-
+  // unavailable zones first. Feed region bits in from the region mirror, and
+  // map the gate's region-subscribe / zone-request intents to the SDK.
+  const feedRegion = (row: {
+    macroRegion: bigint;
+    zonePresence: bigint;
+    zoneAvailable: bigint;
+  }) => zones.noteRegion(row.macroRegion, row.zonePresence, row.zoneAvailable);
+  zones.onRegionSubscriptionChange((macroRegion, subscribed) => {
+    if (subscribed) void data.subscriptions.subscribeRegion(macroRegion);
+    else data.subscriptions.unsubscribeRegion(macroRegion);
+  });
+  zones.onZoneRequest((zoneId) => void reducers.requestZone(zoneId));
+  for (const row of data.regions.current.values()) feedRegion(row);
+  data.regions.subscribe((c) => {
+    if (c.kind === "removed") zones.noteRegionRemoved(c.oldRow.macroRegion);
+    else feedRegion(c.kind === "added" ? c.row : c.newRow);
+  });
+
   const playerSession = new PlayerManager(reducers, data);
   const souls = new SoulManager(playerSession, data, zones);
 
@@ -346,9 +391,6 @@ async function main(): Promise<Runtime> {
     input: null,
     actions: null,
     logs: null,
-    worldOverlay: null,
-    worldHexAt: null,
-    onTilesChanged: null,
   };
   scenes.setContext(ctx);
 

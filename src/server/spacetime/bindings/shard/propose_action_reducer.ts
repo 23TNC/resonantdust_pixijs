@@ -15,7 +15,7 @@ export default {
   recipeId: __t.u16(),
   surface: __t.u8(),
   macroZone: __t.u64(),
-  microZone: __t.u8(),
+  microLocation: __t.u32(),
   root: __t.u32(),
   bindings: __t.array(__t.array(__t.u32())),
 };

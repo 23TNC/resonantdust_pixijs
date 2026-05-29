@@ -16,6 +16,7 @@ import PickupMiniZoneReducer from "../pickup_mini_zone_reducer";
 import PlaceCardReducer from "../place_card_reducer";
 import ProposeActionReducer from "../propose_action_reducer";
 import RequestBlueprintReducer from "../request_blueprint_reducer";
+import RequestZoneReducer from "../request_zone_reducer";
 import SetLastLoginReducer from "../set_last_login_reducer";
 
 export type AddCardParams = __Infer<typeof AddCardReducer>;
@@ -28,5 +29,6 @@ export type PickupMiniZoneParams = __Infer<typeof PickupMiniZoneReducer>;
 export type PlaceCardParams = __Infer<typeof PlaceCardReducer>;
 export type ProposeActionParams = __Infer<typeof ProposeActionReducer>;
 export type RequestBlueprintParams = __Infer<typeof RequestBlueprintReducer>;
+export type RequestZoneParams = __Infer<typeof RequestZoneReducer>;
 export type SetLastLoginParams = __Infer<typeof SetLastLoginReducer>;
 

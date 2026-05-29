@@ -35,7 +35,49 @@ function shouldPrint(tags: string[], level: number): boolean {
   return false;
 }
 
+/** localStorage key backing `debug.showInfo` so the toggle survives
+ *  reloads / HMR — flip it on, reload to reproduce, it stays on. */
+const SHOW_INFO_KEY = "debug.showInfo";
+
+function loadShowInfo(): boolean {
+  try {
+    return localStorage.getItem(SHOW_INFO_KEY) === "1";
+  } catch {
+    return false; // storage unavailable (private mode, etc.) — default off
+  }
+}
+
+/** Listeners fired whenever `showInfo` flips — so overlays gated on it (e.g.
+ *  `LayoutWorld`'s debug rings) can repaint immediately rather than waiting for
+ *  the next relayout. */
+const showInfoListeners = new Set<() => void>();
+
 export const debug = {
+  /** Global on-screen-debug switch. Flipped from the Debug panel's
+   *  "Debug info" toggle; read by feature code (`if (debug.showInfo)
+   *  …`) to gate rendering of debug overlays / readouts. Persisted to
+   *  localStorage. Plain mutable field — readers see the live value
+   *  through the shared `debug` object reference. */
+  showInfo: loadShowInfo(),
+
+  /** Flip `showInfo`, persist, notify listeners, and return the new value. */
+  toggleInfo(): boolean {
+    this.showInfo = !this.showInfo;
+    try {
+      localStorage.setItem(SHOW_INFO_KEY, this.showInfo ? "1" : "0");
+    } catch {
+      // storage unavailable — keep the in-memory toggle working anyway
+    }
+    for (const cb of showInfoListeners) cb();
+    return this.showInfo;
+  },
+
+  /** Subscribe to `showInfo` flips. Returns an unsubscribe fn. */
+  onShowInfoChange(cb: () => void): () => void {
+    showInfoListeners.add(cb);
+    return () => showInfoListeners.delete(cb);
+  },
+
   log(tags: string[], message: string, level = 0): void {
     if (shouldPrint(tags, level)) console.debug(`[L${level}] ${message}`);
   },

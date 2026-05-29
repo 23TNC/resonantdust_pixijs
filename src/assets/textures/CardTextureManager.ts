@@ -7,7 +7,7 @@ import {
   RECT_CARD_WIDTH,
   type RectCardTitlePosition,
 } from "../../game/cards/layout/rectangle/RectCard";
-import { WORLD_HEX_RADIUS } from "../../game/world/hexSize";
+import { WORLD_HEX_RADIUS } from "../../game/viewport/hex/hexSize";
 import type { CardDefinition } from "../../game/definitions/DefinitionManager";
 
 /**
@@ -57,6 +57,9 @@ export class CardTextureManager {
    *  faction folder. Defs without `def.texture` use uid `0` and
    *  bake once like before. */
   private readonly hexCache  = new Map<string, Texture>();
+  /** Cache for rect-shaped tile bodies (`getRectTile`), keyed by packed def +
+   *  body-texture uid — the rect analogue of `hexCache`. */
+  private readonly rectTileCache = new Map<string, Texture>();
   /** Single-entry cache for the blank-rect texture — a rect card body
    *  with outline but no title bar and no label. Used by callers
    *  (today: `WrenchPanel`) that want the rect-card silhouette as a
@@ -161,11 +164,40 @@ export class CardTextureManager {
     return this.blankRectCache;
   }
 
+  /** Rect-shaped tile body — the rectangle analogue of `getHex`. Body fill +
+   *  outline, no title bar / label, sized `RECT_CARD_WIDTH × RECT_CARD_HEIGHT`
+   *  so it scales into a rect-grid cell the same way `getHex` fills a hex cell.
+   *  Used by `LayoutWorld.buildTile` when the viewport's grid is rectangular
+   *  (e.g. an inventory's "empty" tiles). `bodyTexture` cover-fills the rect
+   *  when present (textured tiles); otherwise `style[0]` (or a fallback) fills
+   *  it. A `null` def bakes the fallback, matching `getHex`'s empty-tile path. */
+  getRectTile(definition: CardDefinition | null, bodyTexture?: Texture | null): Texture {
+    const key = `tile:${definition ? packedKey(definition) : -1}:${bodyTexture?.uid ?? 0}`;
+    let tex = this.rectTileCache.get(key);
+    if (!tex) {
+      const g = new Graphics();
+      g.rect(0, 0, RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
+      if (bodyTexture) {
+        g.fill({ texture: bodyTexture });
+      } else {
+        g.fill({ color: definition?.style[0] ?? 0x2a3340 });
+      }
+      // Visible cell outline — the "empty" tile fill (#0b1426) matches the
+      // viewport backdrop, so the outline is what reads as the grid.
+      g.rect(0, 0, RECT_CARD_WIDTH, RECT_CARD_HEIGHT).stroke({ color: 0x2a3a4a, width: 2 });
+      tex = this.renderAndPack(g, RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
+      g.destroy();
+      this.rectTileCache.set(key, tex);
+    }
+    return tex;
+  }
+
   destroy(): void {
     this.rectVisual.destroy();
     this.hexVisual.destroy();
     this.rectCache.clear();
     this.hexCache.clear();
+    this.rectTileCache.clear();
     this.blankRectCache = null;
   }
 

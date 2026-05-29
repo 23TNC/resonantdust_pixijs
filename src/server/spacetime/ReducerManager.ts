@@ -599,7 +599,7 @@ export class ReducerManager {
    *  [docs/MOVEMENT_REWRITE.md](../../../../docs/MOVEMENT_REWRITE.md). */
   async moveSoul(args: {
     soulId: number;
-    path: Array<{ surface: number; macroZone: bigint; microZone: number }>;
+    path: Array<{ surface: number; macroZone: bigint; microLocation: number }>;
   }): Promise<void> {
     const clientTimeMs = BigInt(Math.round(this.serverNowMs()));
     debug.log(
@@ -674,14 +674,13 @@ export class ReducerManager {
     blueprintId: number;
     surface: number;
     macroZone: bigint;
-    microZone: number;
     microLocation: number;
   }): Promise<void> {
     const clientTimeMs = BigInt(Math.round(this.serverNowMs()));
     debug.log(
       ["spacetime"],
       `[spacetime] requestBlueprint blueprint=${args.blueprintId} soul=${args.soulCardId} ` +
-        `surface=${args.surface} macroZone=${args.macroZone} microZone=${args.microZone} ` +
+        `surface=${args.surface} macroZone=${args.macroZone} ` +
         `microLocation=${args.microLocation} clientTimeMs=${clientTimeMs}`,
       0,
     );
@@ -735,14 +734,14 @@ export class ReducerManager {
     recipeId: number;
     surface: number;
     macroZone: bigint;
-    microZone: number;
+    microLocation: number;
     root: number;
     bindings: number[][];
   }): Promise<void> {
     const clientTimeMs = BigInt(Math.round(this.serverNowMs()));
     debug.log(
       ["spacetime"],
-      `[spacetime] proposeAction recipe=${args.recipeId} root=${args.root} surface=${args.surface} macroZone=${args.macroZone} microZone=0x${args.microZone.toString(16)} bindings=${JSON.stringify(args.bindings)} clientTimeMs=${clientTimeMs}`,
+      `[spacetime] proposeAction recipe=${args.recipeId} root=${args.root} surface=${args.surface} macroZone=${args.macroZone} microLocation=0x${args.microLocation.toString(16)} bindings=${JSON.stringify(args.bindings)} clientTimeMs=${clientTimeMs}`,
       0,
     );
     const conn = await this.registry.shard.connect();
@@ -768,6 +767,32 @@ export class ReducerManager {
     const start = performance.now();
     try {
       await conn.reducers.setLastLogin({ clientTimeMs });
+    } catch (err) {
+      this.correctFromDrift(err, Number(clientTimeMs), start);
+      throw err;
+    } finally {
+      this.recordRtt(performance.now() - start);
+    }
+  }
+
+  /** Ask the server to spawn the zone at `macroZone` (region-gated, idempotent
+   *  server-side). Driven by `ZoneManager`'s region gate when a wanted world
+   *  zone is present-but-not-yet-available. Passes the buffered `clientTimeMs`
+   *  so the server stamps the new zone's `valid_at` on the client's timeline
+   *  (via `effective_now_ms`) — otherwise a server-now stamp lands
+   *  ~`clientDelay` in the client's buffered future and the zone takes seconds
+   *  to surface through `ValidAtTable.promote`. */
+  async requestZone(macroZone: bigint): Promise<void> {
+    const clientTimeMs = BigInt(Math.round(this.serverNowMs()));
+    debug.log(
+      ["spacetime"],
+      `[spacetime] requestZone macroZone=${macroZone} clientTimeMs=${clientTimeMs}`,
+      2,
+    );
+    const conn = await this.registry.shard.connect();
+    const start = performance.now();
+    try {
+      await conn.reducers.requestZone({ macroZone, clientTimeMs });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;

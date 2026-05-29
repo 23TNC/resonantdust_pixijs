@@ -63,7 +63,7 @@ Construction order: `ConnectionRegistry` → `ReducerManager` → listeners → 
 
 These build SQL only; SDK row events fan out via `registerTableHandlers`. World/actions methods are present but world is currently stripped and actions tables don't have row handlers wired — they no-op until reintroduced.
 
-**Chat-sender resolution.** `ChatMessage.sender_name` is denormalised server-side at send time, so [ChatPanel.formatMessage](../game/chat/ChatPanel.ts) reads `row.senderName` directly. No `players` lookup needed; rename isn't a feature today and old messages stay attributed to whatever the sender was called at send time (see the table doc on `chat::ChatMessage`).
+**Chat-sender resolution.** `ChatMessage.sender_name` is denormalised server-side at send time, so [ChatPanel.formatMessage](../game/panels/chat/ChatPanel.ts) reads `row.senderName` directly. No `players` lookup needed; rename isn't a feature today and old messages stay attributed to whatever the sender was called at send time (see the table doc on `chat::ChatMessage`).
 
 ## Two-tier read/write model
 - **Server tier read**: `data.cards.current.get(id)` / `data.cards.current.values()`. Strictly server-derived state — pure mirror of what the server believes is currently valid. **Reserved for plumbing** (`mirrorCard`, `promote`, the SDK fan-out). Game code does NOT read this — see "Tier-rule pitfall" below.

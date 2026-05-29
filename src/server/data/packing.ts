@@ -42,40 +42,26 @@
  *     24-31, `chunkQ` bits 12-23, `chunkR` bits 0-11; the two coords are signed
  *     12-bit (±2047), the unpack restores the sign.
  *
- *  4. **`microZone` u8 — TWO INTERPRETATIONS, gated on (state, surface):**
+ *  4. **`microLocation` u32 — TWO INTERPRETATIONS, gated by the
+ *     `micro_is_card` flag (in `flagsBk`):**
  *
- *     - **Stack layout** — `state == STACKED_ON_ROOT` AND `surface < 64`:
+ *     - **`micro_is_card` set** → `microLocation` is a **root card_id**. The
+ *       card is a flat stack member; its branch is the `stackState` flag
+ *       (`STACK_DIR_HEX/UP/DOWN` or `STACK_STATE_DEFERRED`) and its slot is the
+ *       `stackIndex` flag (0..15). No parent pointers — every member points
+ *       straight at the root.
+ *
+ *     - **`micro_is_card` clear** → `microLocation` is **loose coords + offset**
  *       ```
- *       [position: u5 | direction: u1 | stackedState: u2]
+ *       [localQ: u3 (29-31) | localR: u3 (26-28) | x: i12 (14-25) | y: i12 (2-13) | rsvd: u2]
  *       ```
- *       `position` is the card's 1-indexed place in its chain from the
- *       root (`1..31`; `0` reserved). `direction` is `0 = up / top` or
- *       `1 = down / bottom`. The "server is forcing this position"
- *       signal moved out of `microZone` and lives in `flags`
- *       (`pos_need` / `pos_want` — see `content/cards/flags.json`).
+ *       `localQ`/`localR` address a cell in the zone; `x`/`y` is the signed
+ *       within-cell offset. The `stackState` flag is the loose kind
+ *       (`LOOSE_HEX/RECT`, `SNAP_HEX/RECT`).
  *
- *     - **Legacy layout** — everything else (`Free`, state-1 reserved,
- *       `OnHex`, world surfaces ≥ 64):
- *       ```
- *       [localQ: u3 | localR: u3 | stackedState: u2]
- *       ```
- *       The legacy `localQ === 0` rule on inventory-loose cards still
- *       gates the client-owns-position preserve; see `mirrorCard`.
- *
- *  5. **`microLocation` u32 — interpretation depends on stackedState:**
- *
- *     - `STACKED_LOOSE`     → encoded `(x: i16, y: i16)` loose XY
- *     - `STACKED_SLOT`      → IMMEDIATE parent's card_id
- *                              (server-written parent-pointer chain)
- *     - `STACKED_ON_ROOT`   → ROOT card_id of the rect chain
- *     - `STACKED_DEFERRED`  → HOST card_id (or 0 if no host) — anchor
- *                              for mirror-time resolution. Fallback
- *                              (q, r) lives in `microZone`. Used by
- *                              recipe outputs like `stack.N.create`.
- *
- *  Rect chains use the `(root_id, position, direction)` model; hex
- *  chains keep parent-pointer walking. Rect-on-hex must be a leaf — no
- *  rect chain hangs off it. See `docs/STACK_LAYOUT_MIGRATION.md`. */
+ *     (`microZone` u8 was removed — everything it held now lives in
+ *     `microLocation` + flags. Stacking is one flat root+index mechanism; see
+ *     `docs/micro_location_rewrite/`.) */
 
 const SEQ_SHIFT = 16n;
 const SEQ_MASK = 0xffffn;
@@ -133,6 +119,10 @@ export const PLAYER_INVENTORY_LAYER = 2;
 /** Each macroZone covers an 8×8 block of hex positions. */
 export const ZONE_SIZE = 8;
 
+/** Each region covers an 8×8 block of zones (chunks) — 64 zones per region.
+ *  Mirrors `REGION_SIZE` in `content/src/packed.rs`. */
+export const REGION_SIZE = 8;
+
 /** The decoded `macro_zone` a client row carries — the full packed `bigint`
  *  key together with its unpacked parts, derived together so reads never
  *  pack/unpack and it's clear when `packed` must be rebuilt (only via
@@ -186,92 +176,189 @@ export function makeMacroZone(
   return { packed, owner: owner >>> 0, surface: surface & 0xff, zoneQ, zoneR };
 }
 
-/** Pack `(localQ, localR, stackedState)` into a u8 microZone under the
- *  **legacy** layout. `localQ` / `localR` are 0..7 (in-chunk hex coord),
- *  `stackedState` is 0..3. Use this for `Free` / `OnHex` cards or any
- *  card on a world surface (`surface >= WORLD_LAYER`); rect-stacked
- *  cards in inventory use [`packStackMicroZone`] instead. */
-export function packMicroZone(
+/** Map a `macro_zone` to its containing `(macroRegion, bit)`, where `bit`
+ *  (`0..63`) indexes the zone's slot in the region's 64-bit
+ *  presence/availability bitfields. Row-major over the region's 8×8 zones:
+ *  `bit = localR * REGION_SIZE + localQ`. `owner` / `surface` carry through, so
+ *  a non-world zone maps to its own owner's / surface's region. Mirror of
+ *  `content/src/packed.rs::region_of_zone`. */
+export function regionOfZone(macroZone: bigint): { macroRegion: bigint; bit: number } {
+  const m = decodeMacroZone(macroZone);
+  // `m.zoneQ/zoneR` are tile origins (chunk × ZONE_SIZE); recover chunk indices.
+  const chunkQ = Math.floor(m.zoneQ / ZONE_SIZE);
+  const chunkR = Math.floor(m.zoneR / ZONE_SIZE);
+  // floor-div → matches Rust `div_euclid` for negative coords; locals stay 0..7.
+  const regionQ = Math.floor(chunkQ / REGION_SIZE);
+  const regionR = Math.floor(chunkR / REGION_SIZE);
+  const localQ = chunkQ - regionQ * REGION_SIZE;
+  const localR = chunkR - regionR * REGION_SIZE;
+  const bit = localR * REGION_SIZE + localQ;
+  // Pack region coords into the q/r field: makeMacroZone divides its zoneQ/zoneR
+  // by ZONE_SIZE internally, so feed `regionQ * ZONE_SIZE` to land regionQ there.
+  const macroRegion = makeMacroZone(m.owner, m.surface, regionQ * ZONE_SIZE, regionR * ZONE_SIZE).packed;
+  return { macroRegion, bit };
+}
+
+// ---- micro placement (mirror of content/src/packed.rs) ------------------
+//
+// A card's micro placement lives in `microLocation` (u32) + three flag fields
+// in `flagsBk`, plus the `zoneBorn` flag in `flagsState`. Gated by
+// `micro_is_card`:
+//   set   → microLocation is a root card_id; branch = stackState, slot =
+//           stackIndex (the card is a flat stack member).
+//   clear → microLocation is loose coords + offset
+//           `[localQ:3 (29-31) | localR:3 (26-28) | x:i12 (14-25) | y:i12 (2-13) | rsvd:2]`.
+//
+// Bit positions MUST match `content/cards/flags.json` (the client mirrors them
+// by hand — "same file, same PR" with `flags.json`).
+
+/** `flagsBk` bit: microLocation is a root card_id (card is a stack member). */
+export const MICRO_IS_CARD = 1 << 24;
+const STACK_STATE_SHIFT = 25; // flagsBk bits 25-26
+const STACK_STATE_MASK = 0b11 << STACK_STATE_SHIFT;
+const STACK_INDEX_SHIFT = 27; // flagsBk bits 27-30
+const STACK_INDEX_MASK = 0b1111 << STACK_INDEX_SHIFT;
+/** `flagsState` bit: card was generated from zone tile data. */
+export const ZONE_BORN = 1 << 13;
+
+/** `stackState` values for the **stacked** branch (micro_is_card set). */
+export const STACK_DIR_HEX = 0;
+export const STACK_DIR_UP = 1;
+export const STACK_DIR_DOWN = 2;
+export const STACK_STATE_DEFERRED = 3;
+/** `stackState` values for the **loose** branch (micro_is_card clear). */
+export const LOOSE_HEX = 0;
+export const LOOSE_RECT = 1;
+export const SNAP_HEX = 2;
+export const SNAP_RECT = 3;
+
+/** Max stack index (u4). Chains saturate here; placement fails over to loose. */
+export const MAX_STACK_INDEX = 15;
+
+const MICRO_LOOSE_LQ_SHIFT = 29;
+const MICRO_LOOSE_LR_SHIFT = 26;
+const MICRO_LOOSE_X_SHIFT = 14;
+const MICRO_LOOSE_Y_SHIFT = 2;
+
+function sx12(v: number): number {
+  const m = v & 0xfff;
+  return m & 0x800 ? m - 0x1000 : m;
+}
+
+/** Pack loose coords + within-cell offset into a `microLocation` (u32). */
+export function packMicroLoose(
   localQ: number,
   localR: number,
-  stackedState: number,
+  x: number,
+  y: number,
 ): number {
-  return ((localQ & 0x7) << 5) | ((localR & 0x7) << 2) | (stackedState & 0x3);
+  return (
+    (((localQ & 0x7) << MICRO_LOOSE_LQ_SHIFT) |
+      ((localR & 0x7) << MICRO_LOOSE_LR_SHIFT) |
+      ((x & 0xfff) << MICRO_LOOSE_X_SHIFT) |
+      ((y & 0xfff) << MICRO_LOOSE_Y_SHIFT)) >>>
+    0
+  );
 }
 
-/** Inverse of [`packMicroZone`]; legacy layout. */
-export function unpackMicroZone(microZone: number): {
+/** Inverse of [`packMicroLoose`]. Uses unsigned shifts so a high `localQ`
+ *  (bit 31 set) decodes correctly. */
+export function unpackMicroLoose(microLocation: number): {
   localQ: number;
   localR: number;
-  stackedState: number;
+  x: number;
+  y: number;
 } {
   return {
-    localQ: (microZone >> 5) & 0x7,
-    localR: (microZone >> 2) & 0x7,
-    stackedState: microZone & 0x3,
+    localQ: (microLocation >>> MICRO_LOOSE_LQ_SHIFT) & 0x7,
+    localR: (microLocation >>> MICRO_LOOSE_LR_SHIFT) & 0x7,
+    x: sx12(microLocation >>> MICRO_LOOSE_X_SHIFT),
+    y: sx12(microLocation >>> MICRO_LOOSE_Y_SHIFT),
   };
 }
 
-/** Pack `(position, direction, stackedState)` into a u8 microZone under
- *  the **stack** layout (`[position: u4 | direction: u2 | state: u2]`).
- *
- *  `position` is the card's 1-indexed place in its chain from the root
- *  (saturates at 15). `direction` is the branch number — `0 = hex /
- *  tile`, `1 = up / top`, `2 = down / bottom`. Value 3 is reserved.
- *  The "server is forcing this position" signal moved out of
- *  microZone and now lives in `flags` (`pos_need` / `pos_want`) —
- *  set / clear those bits on `Card.flags` instead.
- *
- *  Only valid for `stackedState == STACKED_ON_ROOT` (= 2) and
- *  `surface < WORLD_LAYER`. Use [`packMicroZone`] for everything else. */
-export function packStackMicroZone(
-  position: number,
-  direction: number,
-  stackedState: number,
-): number {
-  const pos = position & 0xf;
-  const dir = direction & 0x3;
-  return (pos << 4) | (dir << 2) | (stackedState & 0x3);
-}
-
-/** Inverse of [`packStackMicroZone`]. The caller is responsible for
- *  knowing the byte was packed under the stack layout — reading a
- *  legacy-layout byte through here gives nonsense for `position` and
- *  `direction`. Use [`isStackLayout`] to dispatch. */
-export function unpackStackMicroZone(microZone: number): {
-  position: number;
-  direction: number;
-  stackedState: number;
+/** Read just the loose cell `(localQ, localR)` from a `microLocation`. */
+export function microLooseCell(microLocation: number): {
+  localQ: number;
+  localR: number;
 } {
   return {
-    position: (microZone >> 4) & 0xf,
-    direction: (microZone >> 2) & 0x3,
-    stackedState: microZone & 0x3,
+    localQ: (microLocation >>> MICRO_LOOSE_LQ_SHIFT) & 0x7,
+    localR: (microLocation >>> MICRO_LOOSE_LR_SHIFT) & 0x7,
   };
 }
 
-/** Whether the **stack layout** applies to this `(state, surface)` pair.
- *  True iff the card is rect-stacked on inventory (state is
- *  `STACKED_ON_ROOT` AND `surface < WORLD_LAYER`). False for loose /
- *  on-hex / world-surface cards — those keep the legacy `(localQ,
- *  localR)` layout. `STACKED_SLOT` (state 1) has its own preserve
- *  branch in `mirrorCard` (same `pos_need` / `pos_want` gate as
- *  stack layout); it doesn't go through this discriminator. */
-export function isStackLayout(stackedState: number, surface: number): boolean {
-  return surface < WORLD_LAYER && stackedState === 2;
+/** `micro_is_card` flag test (on `flagsBk`). */
+export function microIsCard(flagsBk: number): boolean {
+  return (flagsBk & MICRO_IS_CARD) !== 0;
+}
+/** `stack_state` branch/kind value (on `flagsBk`). */
+export function stackState(flagsBk: number): number {
+  return (flagsBk & STACK_STATE_MASK) >>> STACK_STATE_SHIFT;
+}
+/** `stack_index` slot value (on `flagsBk`). */
+export function stackIndex(flagsBk: number): number {
+  return (flagsBk & STACK_INDEX_MASK) >>> STACK_INDEX_SHIFT;
+}
+/** `zone_born` flag test (on `flagsState`). */
+export function zoneBorn(flagsState: number): boolean {
+  return (flagsState & ZONE_BORN) !== 0;
 }
 
-/** Pack a `microZone` byte for a `STACKED_SLOT` row (parent-pointer
- *  mode). Layout matches the stack layout
- *  (`[position: u4 | direction: u2 | state: u2]`) but with `position
- *  = 0` since position from root is implicit (walk parent pointers
- *  via `microLocation`). Direction is the 2-bit branch number — same
- *  semantics as `packStackMicroZone`.
- *
- *  Server-only — the client never writes Slot rows. Provided here
- *  for symmetry with `packStackMicroZone` and so the bit layout has
- *  one canonical implementation. */
-export function packSlotMicroZone(direction: number): number {
-  const dir = direction & 0x3;
-  return (dir << 2) | 0x1; // state value 1 = STACKED_SLOT
+/** Default loose `kind` for a card on `surface` (mirror of `packed.rs`). */
+export function looseKindForSurface(surface: number): number {
+  return surface >= WORLD_LAYER || surface === MINI_ZONE_LAYER
+    ? LOOSE_HEX
+    : LOOSE_RECT;
+}
+
+/** A card's decoded micro placement — the client mirror of the server's
+ *  `Micro` enum. `stacked` = a flat stack member of `root`; `loose` = coords +
+ *  offset. Decode with [`decodeMicro`]; rebuild `(microLocation, flagsBk)` with
+ *  [`applyMicro`]. */
+export type Micro =
+  | { kind: "stacked"; root: number; branch: number; index: number }
+  | {
+      kind: "loose";
+      localQ: number;
+      localR: number;
+      x: number;
+      y: number;
+      looseKind: number;
+    };
+
+/** Decode a row's `(microLocation, flagsBk)` into a [`Micro`]. */
+export function decodeMicro(microLocation: number, flagsBk: number): Micro {
+  if (microIsCard(flagsBk)) {
+    return {
+      kind: "stacked",
+      root: microLocation >>> 0,
+      branch: stackState(flagsBk),
+      index: stackIndex(flagsBk),
+    };
+  }
+  const { localQ, localR, x, y } = unpackMicroLoose(microLocation);
+  return { kind: "loose", localQ, localR, x, y, looseKind: stackState(flagsBk) };
+}
+
+/** Rebuild `(microLocation, flagsBk)` for a [`Micro`], preserving the non-stack
+ *  bits of `baseFlagsBk` (hold counts, dirty/preserve markers). The single
+ *  write helper — mirror of the server's `Micro::apply`. */
+export function applyMicro(
+  micro: Micro,
+  baseFlagsBk: number,
+): { microLocation: number; flagsBk: number } {
+  let flagsBk = baseFlagsBk & ~(MICRO_IS_CARD | STACK_STATE_MASK | STACK_INDEX_MASK);
+  if (micro.kind === "stacked") {
+    flagsBk |=
+      MICRO_IS_CARD |
+      ((micro.branch & 0b11) << STACK_STATE_SHIFT) |
+      ((micro.index & 0xf) << STACK_INDEX_SHIFT);
+    return { microLocation: micro.root >>> 0, flagsBk: flagsBk >>> 0 };
+  }
+  flagsBk |= (micro.looseKind & 0b11) << STACK_STATE_SHIFT;
+  return {
+    microLocation: packMicroLoose(micro.localQ, micro.localR, micro.x, micro.y),
+    flagsBk: flagsBk >>> 0,
+  };
 }

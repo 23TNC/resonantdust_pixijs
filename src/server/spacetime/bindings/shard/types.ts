@@ -12,9 +12,9 @@ import {
 
 export const Card = __t.object("Card", {
   validAt: __t.u64(),
+  dataShard: __t.u16(),
   cardId: __t.u32(),
   macroZone: __t.u64(),
-  microZone: __t.u8(),
   microLocation: __t.u32(),
   ownerId: __t.u32(),
   packedDefinition: __t.u16(),
@@ -62,6 +62,7 @@ export type Placement = __Infer<typeof Placement>;
 
 export const Player = __t.object("Player", {
   validAt: __t.u64(),
+  dataShard: __t.u16(),
   playerId: __t.u32(),
   name: __t.string(),
   lastLoginSecs: __t.u32(),
@@ -77,6 +78,7 @@ export type PlayerIdCounter = __Infer<typeof PlayerIdCounter>;
 
 export const PlayerProfile = __t.object("PlayerProfile", {
   playerId: __t.u32(),
+  dataShard: __t.u16(),
   lifecycleCount: __t.u32(),
   earliestLifecycleExpiresMs: __t.u64(),
 });
@@ -88,6 +90,15 @@ export const PlayerSession = __t.object("PlayerSession", {
 });
 export type PlayerSession = __Infer<typeof PlayerSession>;
 
+export const Region = __t.object("Region", {
+  validAt: __t.u64(),
+  dataShard: __t.u16(),
+  macroRegion: __t.u64(),
+  zonePresence: __t.u64(),
+  zoneAvailable: __t.u64(),
+});
+export type Region = __Infer<typeof Region>;
+
 export const SequenceCounter = __t.object("SequenceCounter", {
   id: __t.u8(),
   next: __t.u16(),
@@ -96,10 +107,10 @@ export type SequenceCounter = __Infer<typeof SequenceCounter>;
 
 export const Soul = __t.object("Soul", {
   validAt: __t.u64(),
+  dataShard: __t.u16(),
   cardId: __t.u32(),
   ownerId: __t.u32(),
   macroZone: __t.u64(),
-  microZone: __t.u8(),
   microLocation: __t.u32(),
   stats: __t.u32(),
   fatigued: __t.u32(),
@@ -109,6 +120,7 @@ export type Soul = __Infer<typeof Soul>;
 
 export const SoulPrivate = __t.object("SoulPrivate", {
   cardId: __t.u32(),
+  dataShard: __t.u16(),
   blueprints0: __t.u64(),
   activeBlueprints: __t.u8(),
 });
@@ -117,12 +129,13 @@ export type SoulPrivate = __Infer<typeof SoulPrivate>;
 export const TilePoint = __t.object("TilePoint", {
   surface: __t.u8(),
   macroZone: __t.u64(),
-  microZone: __t.u8(),
+  microLocation: __t.u32(),
 });
 export type TilePoint = __Infer<typeof TilePoint>;
 
 export const Zone = __t.object("Zone", {
   validAt: __t.u64(),
+  dataShard: __t.u16(),
   zoneId: __t.u32(),
   macroZone: __t.u64(),
   packedDefinition: __t.u8(),

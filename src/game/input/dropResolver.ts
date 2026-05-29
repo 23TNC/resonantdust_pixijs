@@ -8,14 +8,13 @@ import {
 import { GameHexCard } from "../cards/layout/hexagon/HexCard";
 import { GameRectCard } from "../cards/layout/rectangle/RectCard";
 import { LayoutCard } from "../cards/layout/CardLayout";
-import { LayoutInventory } from "../inventory/InventoryLayout";
-import { LayoutWorld } from "../world/LayoutWorld";
+import { LayoutWorld } from "../viewport/LayoutWorld";
 import type { GameContext } from "../../GameContext";
 import type { LayoutNode } from "../layout/LayoutNode";
 import {
   INVENTORY_LAYER,
-  decodeMacroZone,
   makeMacroZone,
+  microLooseCell,
   WORLD_LAYER,
   ZONE_SIZE,
 } from "../../server/data/packing";
@@ -61,10 +60,12 @@ const I16_MAX = 0x7fff;
  */
 export type DropIntent =
   | { kind: "stack";     target: Card;   direction: StackDirection }
-  /** `surface` is the destination hex-grid layer — `WORLD_LAYER`
-   *  for the overworld, `MINI_ZONE_LAYER` for a deployed mini-zone.
-   *  The LayoutWorld the cursor landed on supplies it. */
-  | { kind: "world";     q: number;      r: number; surface: number }
+  /** Place at cell `(q, r)` in the viewport under the cursor. `(owner,
+   *  surface)` come from that viewport (`LayoutWorld`): world is `(0,
+   *  WORLD_LAYER)`, an inventory `(soulCardId, INVENTORY_LAYER)`, a mini-zone
+   *  `(anchorId, MINI_ZONE_LAYER)`. Grid shape is irrelevant — any viewport
+   *  resolves the same way. */
+  | { kind: "world";     q: number;      r: number; surface: number; owner: number; offsetX?: number; offsetY?: number }
   | { kind: "loose";     x: number;      y: number }
   /** `soulCardId` is the inventory bucket's macro_zone — the soul's
    *  `card_id` for soul inventory, or the `player_id` for player
@@ -125,15 +126,17 @@ export function resolveRectDrop(c: DropContext): DropIntent {
     if (direct !== null) return direct;
   }
 
-  // 2. Hex-grid view drop (world or mini-zone — picked from the
-  // LayoutWorld actually under the cursor).
-  const worldCoord = resolveWorldDropCoords(c);
-  if (worldCoord) {
+  // 2. Viewport drop — the cell under the cursor in whichever viewport the
+  // cursor is over (world, mini-zone, OR inventory; they're all `LayoutWorld`s
+  // distinguished by `(owner, surface)`, not grid shape).
+  const coord = resolveWorldDropCoords(c);
+  if (coord) {
     const occupant = findCardAtTile(
       c.ctx,
-      worldCoord.q,
-      worldCoord.r,
-      worldCoord.surface,
+      coord.q,
+      coord.r,
+      coord.surface,
+      coord.owner,
       c.card.cardId,
     );
     if (occupant) {
@@ -141,19 +144,21 @@ export function resolveRectDrop(c: DropContext): DropIntent {
       if (occupantIntent !== null) return occupantIntent;
       // Occupant exists but can't be stacked on (chain overflow,
       // full hex mount). Fall through to fallback — do NOT place on
-      // the tile, since the tile isn't empty.
+      // the cell, since it isn't empty.
       return resolveFallback(c);
     }
-    return { kind: "world", q: worldCoord.q, r: worldCoord.r, surface: worldCoord.surface };
+    return {
+      kind: "world",
+      q: coord.q,
+      r: coord.r,
+      surface: coord.surface,
+      owner: coord.owner,
+      offsetX: coord.offsetX,
+      offsetY: coord.offsetY,
+    };
   }
 
-  // 2.5. Inventory-panel drop (soul or player inventory) — picked
-  // from the LayoutInventory under the cursor. Lets a card move
-  // from a world view into the player inventory bag, etc.
-  const invIntent = resolveInventoryDropTarget(c);
-  if (invIntent !== null) return invIntent;
-
-  // 3/4. No target, no view → fallback
+  // 3/4. No target, no viewport → fallback
   return resolveFallback(c);
 }
 
@@ -236,6 +241,9 @@ export function executeDrop(c: DropContext, intent: DropIntent): void {
         q: intent.q,
         r: intent.r,
         surface: intent.surface,
+        owner: intent.owner,
+        offsetX: intent.offsetX,
+        offsetY: intent.offsetY,
       });
       break;
     case "loose":
@@ -282,50 +290,6 @@ function intentForCardTarget(c: DropContext, target: Card): DropIntent | null {
     }
     // Hex mount taken — fall through to caller's fallback.
     return null;
-  }
-  return null;
-}
-
-/** Explicit "drop on an inventory panel" detection. If the cursor's
- *  hit chain includes a `LayoutInventory`, recover its
- *  `(macro_zone, surface)` from `zoneId` and emit an inventory
- *  intent targeting that bucket. Returns `null` when:
- *
- *  - The drop didn't land on an inventory panel (caller falls back
- *    to the world-source → inventory-return / loose path).
- *  - The drop landed in the SAME bucket the source already lives
- *    in. Dragging a card around inside its own inventory is a
- *    pure-visual rearrangement; emitting an inventory intent here
- *    would fire `placeCard` for every nudge. Returning null sends
- *    the drop to the loose-fallback, which skips the server call. */
-function resolveInventoryDropTarget(c: DropContext): DropIntent | null {
-  const inv = findLayoutInventoryInChain(c.up.hit);
-  if (!inv) return null;
-  const dest = decodeMacroZone(inv.zoneId);
-  // Same-bucket short-circuit — fall through to the loose path so
-  // in-inventory rearrangement doesn't pay a server round-trip.
-  if (c.sourceRow.macroZone.packed === inv.zoneId) {
-    return null;
-  }
-  const ig = inv.container.getGlobalPosition();
-  return {
-    kind: "inventory",
-    // The bucket id is the zone's owner band; the surface band is the layer.
-    soulCardId: dest.owner,
-    surface: dest.surface,
-    x: c.up.x - ig.x - c.offsetX,
-    y: c.up.y - ig.y - c.offsetY,
-  };
-}
-
-/** Walk a hit node's LayoutNode parent chain looking for a
- *  `LayoutInventory`. Mirrors `findLayoutWorldInChain` for the
- *  inventory side. */
-function findLayoutInventoryInChain(hit: LayoutNode | null): LayoutInventory | null {
-  let n: LayoutNode | null = hit;
-  while (n) {
-    if (n instanceof LayoutInventory) return n;
-    n = n.parent;
   }
   return null;
 }
@@ -382,14 +346,13 @@ function resolveFallback(c: DropContext): DropIntent {
 }
 
 /** Walk `hit`'s LayoutNode parent chain. Returns true if any ancestor
- *  (inclusive) is a `LayoutInventory`, `LayoutWorld`, or `LayoutCard`
- *  — the three node types the drop resolver treats as legitimate
+ *  (inclusive) is a `LayoutWorld` (world OR inventory viewport) or a
+ *  `LayoutCard` — the node types the drop resolver treats as legitimate
  *  drop targets. Used to reject drops that land on chrome panels
  *  (blueprints, details). */
 function isDroppableHit(hit: LayoutNode | null): boolean {
   let n: LayoutNode | null = hit;
   while (n) {
-    if (n instanceof LayoutInventory) return true;
     if (n instanceof LayoutWorld) return true;
     if (n instanceof LayoutCard) return true;
     n = n.parent;
@@ -517,19 +480,52 @@ function wouldExceedChainDepth(
  *    surface + coord frame. */
 function resolveWorldDropCoords(
   c: DropContext,
-): { q: number; r: number; surface: number } | null {
-  const layoutWorld = findLayoutWorldInChain(c.up.hit);
-  if (layoutWorld) {
-    const g = layoutWorld.container.getGlobalPosition();
-    const { q, r } = layoutWorld.localToWorld(c.up.x - g.x, c.up.y - g.y);
-    debug.log(
-      ["drag"],
-      `[drop] hex-grid hit → LayoutWorld surface=${layoutWorld.surface} (q=${q}, r=${r})`,
-      3,
-    );
-    return { q, r, surface: layoutWorld.surface };
+): { q: number; r: number; surface: number; owner: number; offsetX: number; offsetY: number } | null {
+  // A drop into ANY viewport resolves to that viewport's `(owner, surface)` +
+  // the cell under the cursor — grid shape is irrelevant (a hex inventory
+  // owned by a soul behaves like the world owned by 0). The world is the
+  // owner-0, multi-chunk case; an inventory / mini-zone is a single-chunk
+  // bucket, so clamp its cell into chunk (0,0).
+  const view = findLayoutWorldInChain(c.up.hit);
+  if (!view) return null;
+  const g = view.container.getGlobalPosition();
+  const localX = c.up.x - g.x;
+  const localY = c.up.y - g.y;
+  let { q, r } = view.localToWorld(localX, localY);
+  if (view.singleChunk) {
+    q = Math.max(0, Math.min(7, q));
+    r = Math.max(0, Math.min(7, r));
   }
-  return null;
+  // Within-cell offset for arbitrary placement. Preserve the drag's visual
+  // continuity: during drag the card top-left tracks `cursor - grabPoint`
+  // (where `(c.offsetX, c.offsetY)` is the cursor→card-top-left offset at
+  // drag start), so the card's *centre* is at `cursor - grab + halfCard`.
+  // We want the card to land where the user released it — its centre at the
+  // same position — which means the offset from the cell centre is:
+  //     offset = (cursor − grab + halfCard) − cellCentre
+  // Without the grab term, the card snaps so its centre lands under the
+  // cursor regardless of where on the card you grabbed it (visual jump).
+  // Zero when `forceSnap` is on; clamped to i12 (the `micro_location.x/y`
+  // storage width — world hexes are ~96px radius, well within the limit).
+  let offsetX = 0;
+  let offsetY = 0;
+  if (!view.forceSnap) {
+    const cellCenter = view.worldToLocal(q, r);
+    const halfW = c.card.layoutCard.width / 2;
+    const halfH = c.card.layoutCard.height / 2;
+    offsetX = clampI12(Math.round(localX - c.offsetX + halfW - cellCenter.x));
+    offsetY = clampI12(Math.round(localY - c.offsetY + halfH - cellCenter.y));
+  }
+  debug.log(
+    ["drag"],
+    `[drop] viewport hit → owner=${view.owner} surface=${view.surface} (q=${q}, r=${r}) offset=(${offsetX}, ${offsetY})`,
+    3,
+  );
+  return { q, r, surface: view.surface, owner: view.owner, offsetX, offsetY };
+}
+
+function clampI12(v: number): number {
+  return Math.max(-2048, Math.min(2047, v));
 }
 
 /** Walk a hit node's LayoutNode parent chain looking for a
@@ -556,6 +552,7 @@ function findCardAtTile(
   q: number,
   r: number,
   surface: number,
+  owner: number,
   excludeId: number,
 ): Card | null {
   const cards = ctx.cards;
@@ -564,9 +561,10 @@ function findCardAtTile(
   const zoneR = Math.floor(r / ZONE_SIZE) * ZONE_SIZE;
   const localQ = q - zoneQ;
   const localR = r - zoneR;
-  // Full packed world key (owner 0, this surface, chunk origin) — matches the
-  // `macroZone.packed` on world rows exactly.
-  const targetMacroZone = makeMacroZone(0, surface, zoneQ, zoneR).packed;
+  // Full packed zone key for the viewport — owner band from the viewport (0 for
+  // world, the soul/anchor card_id for an inventory / mini-zone). Matches the
+  // `macroZone.packed` on rows in that zone exactly.
+  const targetMacroZone = makeMacroZone(owner, surface, zoneQ, zoneR).packed;
 
   let hexCard: Card | null = null;
   let rectCard: Card | null = null;
@@ -580,11 +578,8 @@ function findCardAtTile(
     // resolver pick it up would let the player stack onto a doomed
     // chain. Same reasoning as `targetBlocksDrop`.
     if (ctx.definitions.hasCardFlag(row.flagsState, row.flagsBk, "dead")) continue;
-    // Both state-0 hex Cards on world and state-3 rect cards on a
-    // hex tile encode local q/r in the legacy q/r bit-fields of
-    // `microZone` (bits 5-7 = localQ, bits 2-4 = localR).
-    const otherLocalQ = (row.microZone >> 5) & 0x7;
-    const otherLocalR = (row.microZone >> 2) & 0x7;
+    // A loose card on a grid surface carries its cell in `microLocation`.
+    const { localQ: otherLocalQ, localR: otherLocalR } = microLooseCell(row.microLocation);
     if (otherLocalQ !== localQ || otherLocalR !== localR) continue;
     const card = cards.get(id);
     if (!card) continue;
@@ -660,7 +655,12 @@ function shouldSyncPlacement(c: DropContext, intent: DropIntent): boolean {
     case "stack":
       return true;
     case "world":
-      return intent.surface !== c.sourceRow.macroZone.surface;
+      // Bucket change = surface OR owner differs from the source. Same-bucket
+      // (e.g. in-inventory or in-world-tile nudge) stays local.
+      return (
+        intent.surface !== c.sourceRow.macroZone.surface ||
+        intent.owner !== c.sourceRow.macroZone.owner
+      );
     case "inventory":
       return (
         intent.surface !== c.sourceRow.macroZone.surface ||
@@ -707,22 +707,30 @@ function buildPlacement(
       };
     }
     case "world": {
-      // Convert global (q, r) → (macroZone, localQ, localR). Same
-      // chunk math for any 8×8-chunk hex-grid surface (world, etc.).
+      // Convert (q, r) → (macroZone, localQ, localR). Same 8×8-chunk math for
+      // any viewport; the owner band comes from the viewport (0 = world, a
+      // soul/anchor card_id for an inventory / mini-zone bucket).
       const zoneQ = Math.floor(intent.q / ZONE_SIZE) * ZONE_SIZE;
       const zoneR = Math.floor(intent.r / ZONE_SIZE) * ZONE_SIZE;
       const localQ = intent.q - zoneQ;
       const localR = intent.r - zoneR;
+      // Pack the within-cell offset into the wire `xy` u32 (same shape the
+      // inventory arm uses): high u16 = x, low u16 = y. Zero when the source
+      // viewport's `forceSnap` was on (resolver left offsets undefined).
+      const ox = intent.offsetX ?? 0;
+      const oy = intent.offsetY ?? 0;
+      const clampedX = Math.max(I16_MIN, Math.min(I16_MAX, ox));
+      const clampedY = Math.max(I16_MIN, Math.min(I16_MAX, oy));
+      const xy = ((clampedX & 0xffff) << 16) | (clampedY & 0xffff);
       return {
         kind: PLACEMENT_LOOSE,
         parentId: 0,
         direction: 0,
         surface: intent.surface,
-        // Owner 0 (WORLD); server stamps the surface band via `with_surface`.
-        macroZone: makeMacroZone(0, intent.surface, zoneQ, zoneR).packed,
+        macroZone: makeMacroZone(intent.owner, intent.surface, zoneQ, zoneR).packed,
         q: localQ,
         r: localR,
-        xy: 0,
+        xy,
       };
     }
     case "inventory": {

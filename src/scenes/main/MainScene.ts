@@ -1,19 +1,17 @@
 import { ActionManager } from "../../game/actions/ActionManager";
 import { ParticleManager } from "../../assets/ParticleManager";
 import { CardManager } from "../../game/cards/CardManager";
-import { ChatPanel } from "../../game/chat/ChatPanel";
-import { LogManager } from "../../game/chat/LogManager";
+import { ChatPanel } from "../../game/panels/chat/ChatPanel";
+import { LogManager } from "../../game/panels/chat/LogManager";
 import { debug } from "../../debug";
 import { MainManager } from "./MainManager";
 import type { GameContext } from "../../GameContext";
 import { DragManager } from "../../game/input/DragManager";
 import { InputManager } from "../../game/input/InputManager";
-import { InventoryPanel } from "../../game/inventory/InventoryPanel";
 import { LayoutManager } from "../../game/layout/LayoutManager";
-import { LayoutWorld } from "../../game/world/LayoutWorld";
-import { GameViewPanel } from "../../game/world/GameViewPanel";
+import { LayoutWorld } from "../../game/viewport/LayoutWorld";
+import { ViewportPanel } from "../../game/viewport/ViewportPanel";
 import { PanelManager } from "../../ui/panels/PanelManager";
-import { unpackMicroZone } from "../../server/data/packing";
 import { LayoutCard } from "../../game/cards/layout/CardLayout";
 import type { LayoutNode } from "../../game/layout/LayoutNode";
 import { owningSoul, tryActivateSoul } from "../../game/permissions";
@@ -172,13 +170,11 @@ export class MainScene extends Scene {
    *  the focused game-view, left-click handles details + soul-card
    *  open-inventory globally. */
   private installInputHandlers(ctx: GameContext): void {
-    const focusedInventory = (): InventoryPanel | null => {
-      const p = ctx.panels?.focused("inventory");
-      return p instanceof InventoryPanel ? p : null;
-    };
-    const focusedGameView = (): GameViewPanel | null => {
-      const p = ctx.panels?.focused("gameview");
-      return p instanceof GameViewPanel ? p : null;
+    // One panel type now — the most-recently-focused viewport handles both
+    // keys (recenter is a no-op without follow; showGrid is a no-op now).
+    const focusedViewport = (): ViewportPanel | null => {
+      const p = ctx.panels?.focused("viewport");
+      return p instanceof ViewportPanel ? p : null;
     };
 
     // Pixi-side panel focus: clicks / drag-starts on a panel's
@@ -214,15 +210,13 @@ export class MainScene extends Scene {
 
     const releaseKeyDown = this.inputManager.onKey("key_down", ({ code }) => {
       if (code === "KeyE") {
-        const inv = focusedInventory();
-        inv?.snapToGrid();
-        inv?.showGrid(true);
+        focusedViewport()?.showGrid(true);
       } else if (code === "Space") {
-        focusedGameView()?.recenter();
+        focusedViewport()?.recenter();
       }
     });
     const releaseKeyUp = this.inputManager.onKey("key_up", ({ code }) => {
-      if (code === "KeyE") focusedInventory()?.showGrid(false);
+      if (code === "KeyE") focusedViewport()?.showGrid(false);
     });
     const releaseClick = this.inputManager.on("left_click", (data) => {
       const hit = data.up.hit;
@@ -239,27 +233,23 @@ export class MainScene extends Scene {
         //                above / near the clicked card.
         //   - `> 9`    → finite cap but still large panel.
         tryActivateSoul(ctx, hit.cardId);
-        // Inventory spawning is disabled — inventory is being replaced
-        // soon. Kept intact for re-enable (see the login-time spawn in
-        // `onEnter`). When restored, this opens a mini popover for
-        // small caps (`1..=9`) or the large panel otherwise.
-        // const row = ctx.data.cardsLocal.get(hit.cardId);
-        // if (row) {
-        //   const invValue = ctx.definitions.aspectValue(row.packedDefinition, "inventory");
-        //   if (invValue !== null) {
-        //     const cap = invValue === 0 ? Infinity : invValue;
-        //     if (cap !== Infinity && cap <= 9) {
-        //       this.mainLayout.openMiniInventoryPanel(hit.cardId, data.up.x, data.up.y, cap);
-        //     } else {
-        //       this.mainLayout.openInventoryPanel(hit.cardId);
-        //     }
-        //   }
-        // }
+        // Open the clicked card's inventory as a second view, if its def
+        // carries the `inventory` feature at all (value gates capacity, not
+        // the open trigger). Clicking the seeded "human" soul at world (0,0)
+        // opens its surface-1 inventory — the dust seeded there renders. Full
+        // right-edge panel for now (the mini-popover cap branch is parked).
+        const row = ctx.data.cardsLocal.get(hit.cardId);
+        if (row) {
+          const invValue = ctx.definitions.aspectValue(row.packedDefinition, "inventory");
+          if (invValue !== null) {
+            this.mainLayout.openInventoryPanel(hit.cardId);
+          }
+        }
         this.mainLayout.detailsPanel.show(hit.cardId, ctx);
         return;
       }
       if (hit instanceof LayoutWorld) {
-        const hex = ctx.worldHexAt?.(data.up.x, data.up.y);
+        const hex = hit.worldHexAt(data.up.x, data.up.y);
         if (hex) {
           const tile = hit.tileAt(hex.q, hex.r);
           if (tile) {
@@ -337,18 +327,14 @@ export class MainScene extends Scene {
   update(deltaMS: number): void {
     this.mainManager.tick(deltaMS);
     this.particleManager.tick(deltaMS);
-    // Drive every open `GameViewPanel`'s per-frame tick (drag-pan
-    // anchor updates, recenter tweens). The id prefix changed when
-    // we collapsed game-views to a singleton (`"gameview"` instead
-    // of `"gameview:<soulId>"`); test by instance instead of id so
-    // a future per-soul renaming doesn't silently break the tick
-    // again. Each panel's pan controller self-gates on
-    // `data.hit !== this.worldView`, so iterating all of them is
-    // safe.
+    // Drive every open viewport's per-frame tick (drag-pan anchor updates,
+    // recenter tweens). Each panel's `PanController` self-gates on
+    // `data.hit !== this.worldView`, so iterating all of them is safe; a
+    // non-pannable viewport's `update()` is a no-op.
     if (this.ctxRef?.panels) {
       for (const id of this.ctxRef.panels.panelIds()) {
         const p = this.ctxRef.panels.get(id);
-        if (p instanceof GameViewPanel) p.update();
+        if (p instanceof ViewportPanel) p.update();
       }
     }
     if (this.ctxRef) {
@@ -373,7 +359,7 @@ export class MainScene extends Scene {
    *  (so it never stomps a soul the user explicitly picked). */
   private openDefaultSoulView(ctx: GameContext): void {
     const tryOpen = (): boolean => {
-      if (ctx.panels?.focused("gameview") instanceof GameViewPanel) return true;
+      if (ctx.panels?.focused("viewport") instanceof ViewportPanel) return true;
       const soulId = this.firstOwnedSoul(ctx);
       if (soulId === null) return false;
       this.mainLayout.openGameViewPanel(soulId);

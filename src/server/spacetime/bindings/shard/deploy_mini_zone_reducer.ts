@@ -14,5 +14,6 @@ export default {
   clientTimeMs: __t.u64(),
   anchorCardId: __t.u32(),
   targetMacroZone: __t.u64(),
-  targetMicroZone: __t.u8(),
+  targetLocalQ: __t.u8(),
+  targetLocalR: __t.u8(),
 };

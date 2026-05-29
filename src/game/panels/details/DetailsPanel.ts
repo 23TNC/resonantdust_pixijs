@@ -1,10 +1,10 @@
 import { Graphics, Text } from "pixi.js";
-import { LayoutNode } from "../layout/LayoutNode";
-import type { GameContext } from "../../GameContext";
-import type { CardDefinition } from "../definitions/DefinitionManager";
-import { NOTO_EMOJI_FAMILY } from "../../assets/fonts";
-import { unpackMicroZone } from "../../server/data/packing";
-import localeRaw from "../../content/locales/cards/en.json";
+import { LayoutNode } from "../../layout/LayoutNode";
+import type { GameContext } from "../../../GameContext";
+import type { CardDefinition } from "../../definitions/DefinitionManager";
+import { NOTO_EMOJI_FAMILY } from "../../../assets/fonts";
+import { microLooseCell } from "../../../server/data/packing";
+import localeRaw from "../../../content/locales/cards/en.json";
 
 /** Surface threshold above which a card's `(macro_zone, micro_zone)`
  *  resolves to a world hex worth showing. Inventory (`1`) and
@@ -362,7 +362,7 @@ export class DetailsPanel extends LayoutNode {
     // so the threshold gate keeps the panel quiet for those.
     let worldHex: { q: number; r: number } | null = null;
     if (row.macroZone.surface > WORLD_SURFACE_THRESHOLD) {
-      const { localQ, localR } = unpackMicroZone(row.microZone);
+      const { localQ, localR } = microLooseCell(row.microLocation);
       worldHex = { q: row.macroZone.zoneQ + localQ, r: row.macroZone.zoneR + localR };
     }
     this.showByPackedDefinition(row.packedDefinition, ctx, stockValues, worldHex);

@@ -44,6 +44,7 @@ import PickupMiniZoneReducer from "./pickup_mini_zone_reducer";
 import PlaceCardReducer from "./place_card_reducer";
 import ProposeActionReducer from "./propose_action_reducer";
 import RequestBlueprintReducer from "./request_blueprint_reducer";
+import RequestZoneReducer from "./request_zone_reducer";
 import SetLastLoginReducer from "./set_last_login_reducer";
 
 // Import all procedure arg schemas
@@ -52,6 +53,7 @@ import SetLastLoginReducer from "./set_last_login_reducer";
 import CardsRow from "./cards_table";
 import PlayerProfilesRow from "./player_profiles_table";
 import PlayersRow from "./players_table";
+import RegionsRow from "./regions_table";
 import SoulPrivatesRow from "./soul_privates_table";
 import SoulsRow from "./souls_table";
 import ZonesRow from "./zones_table";
@@ -111,6 +113,20 @@ const tablesSchema = __schema({
       { name: 'players_valid_at_key', constraint: 'unique', columns: ['validAt'] },
     ],
   }, PlayersRow),
+  regions: __table({
+    name: 'regions',
+    indexes: [
+      { accessor: 'macro_region', name: 'regions_macro_region_idx_btree', algorithm: 'btree', columns: [
+        'macroRegion',
+      ] },
+      { accessor: 'valid_at', name: 'regions_valid_at_idx_btree', algorithm: 'btree', columns: [
+        'validAt',
+      ] },
+    ],
+    constraints: [
+      { name: 'regions_valid_at_key', constraint: 'unique', columns: ['validAt'] },
+    ],
+  }, RegionsRow),
   soul_privates: __table({
     name: 'soul_privates',
     indexes: [
@@ -173,6 +189,7 @@ const reducersSchema = __reducers(
   __reducerSchema("place_card", PlaceCardReducer),
   __reducerSchema("propose_action", ProposeActionReducer),
   __reducerSchema("request_blueprint", RequestBlueprintReducer),
+  __reducerSchema("request_zone", RequestZoneReducer),
   __reducerSchema("set_last_login", SetLastLoginReducer),
 );
 

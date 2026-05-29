@@ -405,6 +405,16 @@ export class PanelTaskbar {
     this.applyEntryState(entry);
   }
 
+  /** The most-recently-focused panel registered with this taskbar, or
+   *  `null` if no registered panel has been focused yet. Useful as a
+   *  default target for actions that want "the panel the user was
+   *  last working with" — e.g. the panel-settings popup that opens
+   *  on entering UI edit mode. Stays pointed at the last-focused
+   *  panel even after that panel closes; only cleared by `unregister`. */
+  getFocusedPanel(): DomPanel | null {
+    return this.focusedPanel;
+  }
+
   private handleClick(panel: DomPanel): void {
     if (!panel.isOpen) {
       // Closed → open (which also focuses).

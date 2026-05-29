@@ -1,7 +1,5 @@
 import type { LayoutNode } from "./LayoutNode";
-import type { LayoutWorld } from "../world/LayoutWorld";
 import type { ZoneId } from "../../server/data/packing";
-import { debug } from "../../debug";
 
 export type SurfaceListener = (zoneId: ZoneId, surface: LayoutNode) => void;
 
@@ -24,28 +22,39 @@ export class LayoutManager {
   overlay: LayoutNode | null = null;
 
   /**
-   * The active scene's world view, when one exists. Mirrors `overlay`'s
-   * "scene-scoped, optional, set by GameScene on enter" pattern.
-   * Consumers like `DragManager.handleRectDrop` use it to:
-   *   - detect that a drop point landed inside the world (vs inventory),
-   *   - convert canvas-local drop coords to world hex (q, r) via
-   *     `worldView.localToWorld`.
+   * Multiple surfaces can host a zone's cards at once — one per viewing panel.
+   * Two `LayoutWorld`s showing the same region both register their
+   * `worldCardSurface` here; a card row then renders a `CardView` per surface.
+   * Single-panel is just a set of size one.
    */
-  worldView: LayoutWorld | null = null;
-
-  private readonly surfaces = new Map<ZoneId, LayoutNode>();
+  private readonly surfaces = new Map<ZoneId, Set<LayoutNode>>();
   private readonly registerListeners = new Set<SurfaceListener>();
+  private readonly unregisterListeners = new Set<SurfaceListener>();
 
-  /** Returns the surface for `zoneId`, or `null` if none registered yet. */
+  /** First surface registered for `zoneId`, or `null`. Temporary shim for
+   *  callers that still assume a single surface (the single-panel case);
+   *  multi-view consumers use `surfacesFor`. */
   surfaceFor(zoneId: ZoneId): LayoutNode | null {
-    return this.surfaces.get(zoneId) ?? null;
+    const set = this.surfaces.get(zoneId);
+    if (!set) return null;
+    for (const s of set) return s; // first (insertion order)
+    return null;
+  }
+
+  /** Every surface registered for `zoneId` — one per viewing panel. */
+  surfacesFor(zoneId: ZoneId): LayoutNode[] {
+    const set = this.surfaces.get(zoneId);
+    return set ? [...set] : [];
   }
 
   register(zoneId: ZoneId, surface: LayoutNode): void {
-    if (this.surfaces.has(zoneId)) {
-      debug.warn(["layout"], `[LayoutManager] surface for zone ${zoneId} already registered; overwriting`);
+    let set = this.surfaces.get(zoneId);
+    if (!set) {
+      set = new Set();
+      this.surfaces.set(zoneId, set);
     }
-    this.surfaces.set(zoneId, surface);
+    if (set.has(surface)) return; // already registered for this view
+    set.add(surface);
     for (const listener of this.registerListeners) {
       try {
         listener(zoneId, surface);
@@ -55,8 +64,17 @@ export class LayoutManager {
     }
   }
 
-  unregister(zoneId: ZoneId): void {
-    this.surfaces.delete(zoneId);
+  unregister(zoneId: ZoneId, surface: LayoutNode): void {
+    const set = this.surfaces.get(zoneId);
+    if (!set || !set.delete(surface)) return;
+    if (set.size === 0) this.surfaces.delete(zoneId);
+    for (const listener of this.unregisterListeners) {
+      try {
+        listener(zoneId, surface);
+      } catch (err) {
+        console.error("[LayoutManager] unregister listener threw", err);
+      }
+    }
   }
 
   /**
@@ -71,10 +89,20 @@ export class LayoutManager {
     };
   }
 
+  /** Symmetric to `onRegister`: fires when a surface unregisters for a zone
+   *  (e.g. the zone left a panel's active rect, or the panel closed). The card
+   *  layer uses this to drop that view's `CardView` for the zone's cards. */
+  onUnregister(listener: SurfaceListener): () => void {
+    this.unregisterListeners.add(listener);
+    return () => {
+      this.unregisterListeners.delete(listener);
+    };
+  }
+
   dispose(): void {
     this.surfaces.clear();
     this.registerListeners.clear();
+    this.unregisterListeners.clear();
     this.overlay = null;
-    this.worldView = null;
   }
 }

@@ -12,6 +12,7 @@ import type {
   Card,
   Player,
   PlayerProfile,
+  Region,
   Soul,
   SoulPrivate,
   Zone,
@@ -29,6 +30,7 @@ type ShardTableRowMap = {
   soul_privates: SoulPrivate;
   player_profiles: PlayerProfile;
   zones: Zone;
+  regions: Region;
 } & Record<string, unknown>;
 
 /**
@@ -132,6 +134,19 @@ export class SubscriptionManager extends SubscriptionBase<
       this.fanOut("zones", "onDelete", (h) => h.onDelete?.(row));
     });
 
+    conn.db.regions.onInsert((ctx, row) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("regions", "onInsert", (h) => h.onInsert?.(row));
+    });
+    conn.db.regions.onUpdate((ctx, oldRow, newRow) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("regions", "onUpdate", (h) => h.onUpdate?.(oldRow, newRow));
+    });
+    conn.db.regions.onDelete((ctx, row) => {
+      this.captureReducerTimestamp(ctx);
+      this.fanOut("regions", "onDelete", (h) => h.onDelete?.(row));
+    });
+
   }
 
   async subscribeCards(zoneId: ZoneId): Promise<void> {
@@ -200,6 +215,21 @@ export class SubscriptionManager extends SubscriptionBase<
 
   unsubscribeWorldZone(key: ZoneId): void {
     this.removeSubscription(`zones:${key}`);
+  }
+
+  /** Subscribe to the spawn-gating `Region` row for `macroRegion` (its
+   *  presence/availability bitfields). `macro_region` is already the complete
+   *  packed key (owner+surface+region coords folded), so a single equality is
+   *  exact — no surface filter. */
+  async subscribeRegion(macroRegion: bigint): Promise<void> {
+    return this.installSubscription(`region:${macroRegion}`, {
+      queries: [`SELECT * FROM regions WHERE macro_region = ${macroRegion}`],
+      scopeKey: `region:${macroRegion}`,
+    });
+  }
+
+  unsubscribeRegion(macroRegion: bigint): void {
+    this.removeSubscription(`region:${macroRegion}`);
   }
 
   async subscribeMiniZone(anchorCardId: number): Promise<void> {

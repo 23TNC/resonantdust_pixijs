@@ -1,18 +1,17 @@
 import type { GameContext } from "../../GameContext";
 import { WORLD_LAYER } from "../../server/data/packing";
-import { WORLD_HEX_RADIUS } from "./hexSize";
 import { LayoutWorld } from "./LayoutWorld";
 
 /**
- * Drag-to-pan controller for the world view.
+ * Drag-to-pan controller for any viewport (hex world or rect inventory).
  *
  * Subscribes to `InputManager.left_drag_start` / `left_drag_stop`. When a
- * drag begins with the hit-test landing on `LayoutWorld` itself — i.e.
- * empty world space, not a card mounted on the world — pan mode
- * activates: every subsequent `update()` tick reads the current
- * pointer position, computes the pixel delta from the gesture start,
- * converts that to a hex (q, r) delta, and pushes a fresh viewport
- * anchor into `ZoneManager.setAnchor("viewport", ...)`.
+ * drag begins with the hit-test landing on the `LayoutWorld` itself — i.e.
+ * empty grid space, not a card — pan mode activates: every subsequent
+ * `update()` tick reads the current pointer position, computes the pixel
+ * delta from the gesture start, converts it to a cell `(q, r)` delta via the
+ * view's grid (`LayoutWorld.pixelDeltaToCell` — hex or rect), and pushes a
+ * fresh viewport anchor into `ZoneManager.setAnchor`.
  *
  * The anchor change fans out through `ZoneManager.onAnchorChange`:
  * - `LayoutWorld` updates its `(viewQ, viewR)` and re-renders tiles.
@@ -22,14 +21,10 @@ import { LayoutWorld } from "./LayoutWorld";
  *   `subscribeWorldZone` / `subscribeWorldZoneSkeleton` /
  *   `unsubscribeWorldZone` SDK calls.
  *
- * Pan math: pointy-top hex to pixel is `(sqrt(3) * q + sqrt(3)/2 * r,
- * 3/2 * r) * WORLD_HEX_RADIUS`. Inverting:
- *
- *   dr = (2/3) * dy / WORLD_HEX_RADIUS
- *   dq = dx / (WORLD_HEX_RADIUS * sqrt(3)) - dr / 2
- *
- * The pan moves the viewport in the opposite direction of the cursor
- * drag (grab-and-drag feel) — so `newAnchor = startAnchor - hexDelta`.
+ * Pan math is delegated to the grid (`pixelDeltaToCell`), so the same
+ * controller pans a hex world and a rect inventory. The pan moves the
+ * viewport opposite the cursor drag (grab-and-drag feel) — so
+ * `newAnchor = startAnchor - cellDelta`.
  *
  * The `LayoutWorld`-as-hit check naturally excludes card drags: cards
  * are children of `worldCardSurface` whose `hitTestLayout` returns
@@ -48,7 +43,7 @@ const TWEEN_LERP = 0.18;
  *  exponential approach from infinite-asymptoting near the goal. */
 const TWEEN_SNAP_HEX = 0.01;
 
-export class WorldPanManager {
+export class PanController {
   private active = false;
   private startPointerX = 0;
   private startPointerY = 0;
@@ -81,16 +76,23 @@ export class WorldPanManager {
    *  the next pan frame doesn't reset the just-changed surface). */
   surface: number;
 
+  /** Zone owner band this controller's anchor pins to — `0` for the world, a
+   *  soul/anchor `card_id` for an inventory / mini-zone bucket. Threaded into
+   *  every `setAnchor` so the panned viewport subscribes ITS owner's chunks. */
+  private readonly owner: number;
+
   constructor(
     private readonly ctx: GameContext,
     private readonly worldView: LayoutWorld,
     viewportAnchorName: string = "viewport",
     surface: number = WORLD_LAYER,
+    owner: number = 0,
   ) {
     this.viewportAnchorName = viewportAnchorName;
     this.surface = surface;
+    this.owner = owner;
     if (!ctx.input) {
-      throw new Error("[WorldPanManager] ctx.input is null — InputManager must exist");
+      throw new Error("[PanController] ctx.input is null — InputManager must exist");
     }
     const input = ctx.input;
 
@@ -140,7 +142,7 @@ export class WorldPanManager {
    *  or pressed Space again) will have an anchor and tween smoothly. */
   tweenTo(q: number, r: number): void {
     if (!this.ctx.zones.getAnchor(this.viewportAnchorName)) {
-      this.ctx.zones.setAnchor(this.viewportAnchorName, q, r, this.surface);
+      this.ctx.zones.setAnchor(this.viewportAnchorName, q, r, this.surface, this.owner);
       return;
     }
     this.tween = { targetQ: q, targetR: r };
@@ -170,9 +172,9 @@ export class WorldPanManager {
       if (!input) return;
       const dx = input.lastPointer.x - this.startPointerX;
       const dy = input.lastPointer.y - this.startPointerY;
-      const dr = (2 / 3) * dy / WORLD_HEX_RADIUS;
-      const dq = dx / (WORLD_HEX_RADIUS * Math.sqrt(3)) - dr / 2;
-      // Subtract: the world moves with the cursor, so the viewport
+      // Grid converts the pixel delta to a cell delta (hex or rect).
+      const { q: dq, r: dr } = this.worldView.pixelDeltaToCell(dx, dy);
+      // Subtract: the grid moves with the cursor, so the viewport
       // anchor (which stays fixed under the cursor's start point)
       // shifts opposite to the cursor's pixel drag.
       this.ctx.zones.setAnchor(
@@ -180,6 +182,7 @@ export class WorldPanManager {
         this.startViewQ - dq,
         this.startViewR - dr,
         this.surface,
+        this.owner,
       );
       return;
     }
@@ -204,6 +207,7 @@ export class WorldPanManager {
           this.tween.targetQ,
           this.tween.targetR,
           this.surface,
+          this.owner,
         );
         this.tween = null;
         return;
@@ -213,6 +217,7 @@ export class WorldPanManager {
         anchor.q + dq * TWEEN_LERP,
         anchor.r + dr * TWEEN_LERP,
         this.surface,
+        this.owner,
       );
     }
   }

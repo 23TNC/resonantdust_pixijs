@@ -1,5 +1,5 @@
 import type { GameContext } from "../../GameContext";
-import type { GameInventory } from "../../game/inventory/InventoryGame";
+import type { GridInventory } from "../../game/viewport/rect/GridInventory";
 
 const TICK_HZ = 30;
 const TICK_INTERVAL_MS = 1000 / TICK_HZ;
@@ -16,16 +16,16 @@ const MAX_CATCHUP_TICKS = 5;
  * registers it, `tick` runs the loop and exits cheaply.
  */
 export class MainManager {
-  private readonly inventories = new Set<GameInventory>();
+  private readonly inventories = new Set<GridInventory>();
   private accumulator = 0;
 
   constructor(private readonly _ctx: GameContext) {}
 
-  add(inventory: GameInventory): void {
+  add(inventory: GridInventory): void {
     this.inventories.add(inventory);
   }
 
-  remove(inventory: GameInventory): void {
+  remove(inventory: GridInventory): void {
     this.inventories.delete(inventory);
   }
 

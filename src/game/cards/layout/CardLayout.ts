@@ -2,6 +2,7 @@ import type { GameContext } from "../../../GameContext";
 import { LayoutNode } from "../../layout/LayoutNode";
 import type { Card as CardRow } from "../../../server/spacetime/bindings/types";
 import type { ZoneId } from "../../../server/data/packing";
+import { findWorldView, type WorldViewServices } from "../../viewport/WorldViewServices";
 
 /**
  * Hit-passthrough host for stacked-child cards. Always recurses into children
@@ -104,6 +105,21 @@ export abstract class LayoutCard extends LayoutNode {
    */
   protected dragOffsetX = 0;
   protected dragOffsetY = 0;
+
+  /** Last resolved owning view, kept so the value survives a drag (when the
+   *  card is re-parented into the drag overlay and the parent-chain walk finds
+   *  no view). Read via the `worldView` getter. */
+  private cachedWorldView: WorldViewServices | null = null;
+
+  /** The `LayoutWorld` this card currently lives in, resolved by walking the
+   *  parent chain. While dragging (re-parented to the overlay) the walk finds
+   *  nothing, so we return the last-resolved value — a world card keeps using
+   *  its home view's hex/overlay services through the drag. */
+  get worldView(): WorldViewServices | null {
+    const found = findWorldView(this);
+    if (found) this.cachedWorldView = found;
+    return this.cachedWorldView;
+  }
 
   constructor(cardId: number, ctx: GameContext) {
     super();

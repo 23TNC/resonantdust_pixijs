@@ -6,8 +6,8 @@ import type { Card as CardRow } from "../../../../server/spacetime/bindings/type
 import type { LocalCard } from "../../../../server/data/DataManager";
 import {
   decodeLooseXY,
-  getStackedState,
-  STACKED_LOOSE,
+  decodeMicro,
+  microIsCard,
   type LooseXY,
 } from "../../cardData";
 // Magnetic-action progress rendering used to live here against a
@@ -18,7 +18,6 @@ import {
 // `progress_style` handling in the card-data layer.
 import { GameCard } from "../../game/CardGame";
 import { hexPoints } from "./HexVisual";
-import { WORLD_HEX_RADIUS } from "../../../world/hexSize";
 import { isSlotHeld } from "../../../actions/chainState";
 import { LayoutCard } from "../CardLayout";
 import { CardArt } from "../../CardArt";
@@ -26,10 +25,6 @@ import { getTextureRegistry } from "../../../definitions/TextureRegistry";
 import { DeathAnimation } from "../DeathAnimation";
 import { WorldObjectOverlay } from "../WorldObjectOverlay";
 import { ownerFactionFolder } from "../../../../server/player/playerFlags";
-import {
-  unpackMicroZone,
-  WORLD_LAYER,
-} from "../../../../server/data/packing";
 
 /** Size of the hex card's *physical* footprint — the rectangle used by
  *  inventory push-collision (`GameInventory.tryPush`). Owned by
@@ -68,16 +63,16 @@ export class GameHexCard extends GameCard {
   static readonly WIDTH  = HEX_GAME_WIDTH;
   static readonly HEIGHT = HEX_GAME_HEIGHT;
 
-  private stackedState = 0;
+  private isMember = false;
   private microLocation = 0;
 
   applyData(row: CardRow): void {
-    this.stackedState = getStackedState(row.microZone);
+    this.isMember = microIsCard(row.flagsBk);
     this.microLocation = row.microLocation;
   }
 
   isLoose(): boolean {
-    return this.stackedState === STACKED_LOOSE;
+    return !this.isMember;
   }
 
   getLoosePosition(): LooseXY | null {
@@ -178,11 +173,15 @@ export class LayoutHexCard extends LayoutCard {
     // tints body + art + state + magnetic + progress at 0.5 alpha.
     // `WorldObjectOverlay` owns the RT, sprite, q/r state, and the
     // object-load / tile-change auto-refresh subscriptions.
-    this.overlay = new WorldObjectOverlay(ctx, {
-      width: HEX_CARD_WIDTH,
-      height: HEX_CARD_HEIGHT,
-      alpha: 0.5,
-    });
+    this.overlay = new WorldObjectOverlay(
+      ctx,
+      {
+        width: HEX_CARD_WIDTH,
+        height: HEX_CARD_HEIGHT,
+        alpha: 0.5,
+      },
+      () => this.worldView,
+    );
     // Cascade overlay state to mounted rects (hexMount + stack hosts)
     // whenever it mutates. The walk lives on the card because the
     // overlay doesn't know about chain topology.
@@ -280,39 +279,54 @@ export class LayoutHexCard extends LayoutCard {
       this.invalidate();
     }
 
-    // World-surface positioning: hex cards on `surface >= WORLD_LAYER`
-    // sit at world hex `(zoneQ + localQ, zoneR + localR)`. The `macro_zone`
-    // u32 packs the chunk coordinates; `micro_zone` carries local q/r
-    // in its legacy u3 fields. Convert to the pixel offset from the
-    // world origin (which is where `LayoutWorld.worldCardSurface` is
-    // positioned), then center the card on its hex by subtracting
-    // half-width / half-height.
-    if (row.macroZone.surface >= WORLD_LAYER) {
-      const { zoneQ, zoneR } = row.macroZone;
-      const { localQ, localR } = unpackMicroZone(row.microZone);
-      const q = zoneQ + localQ;
-      const r = zoneR + localR;
-      const px = WORLD_HEX_RADIUS * (Math.sqrt(3) * q + (Math.sqrt(3) / 2) * r);
-      const py = WORLD_HEX_RADIUS * ((3 / 2) * r);
-      // Centre the card (graphical size, `HEX_CARD_*`) on the world
-      // hex's pixel centre. When the card's own size diverges from
-      // the world tile size, this still yields card-center == hex-center.
-      this.setTarget(px - HEX_CARD_WIDTH / 2, py - HEX_CARD_HEIGHT / 2);
-      if (q !== this.overlay.q || r !== this.overlay.r) {
-        this.overlay.refresh(q, r);
+    // Loose position is decided by the OWNING VIEWPORT'S GRID, not the
+    // surface: a hex viewport centres the soul on its hex, a rect viewport on
+    // its cell — `worldView.cellToPixel` applies the grid's own math. The cell
+    // address is the chunk origin (`zoneQ/R`, 0 for a single-chunk inventory)
+    // plus the loose cell.
+    const micro = decodeMicro(row.microLocation, row.flagsBk);
+    if (micro.kind === "loose") {
+      const q = row.macroZone.zoneQ + micro.localQ;
+      const r = row.macroZone.zoneR + micro.localR;
+      const view = this.worldView;
+      const cell = view?.cellToPixel(q, r);
+      // Apply the within-cell `(x, y)` offset only when this is a LOOSE kind
+      // (`looseKind & 0b10) === 0` ⇒ LOOSE_HEX/LOOSE_RECT) AND the viewport
+      // doesn't force snap. SNAP kinds (2/3) and snap-mode viewports both
+      // render centred on the cell.
+      const applyOffset = view !== null && !view.forceSnap && (micro.looseKind & 0b10) === 0;
+      const ox = applyOffset ? micro.x : 0;
+      const oy = applyOffset ? micro.y : 0;
+      if (cell) {
+        this.setTarget((cell.x + ox) - HEX_CARD_WIDTH / 2, (cell.y + oy) - HEX_CARD_HEIGHT / 2);
+        // Object-occlusion overlay — allowed on any surface/grid; the view
+        // returns nothing for a tile with no object.
+        //
+        // `(offsetX, offsetY)` is *the tile centre's displacement from the
+        // card centre*, so negate the card's within-cell offset `(ox, oy)`.
+        // Gating on the offset (not just q/r) covers a stale-offset case:
+        // the per-frame mid-drag refresh at the bottom of `layout()` leaves
+        // `overlay.offsetX/Y` non-zero, and dropping back onto the SAME tile
+        // would skip the q/r gate, leaving the stale offset baked in.
+        const wantOverlayX = -ox;
+        const wantOverlayY = -oy;
+        if (
+          q !== this.overlay.q ||
+          r !== this.overlay.r ||
+          wantOverlayX !== this.overlay.offsetX ||
+          wantOverlayY !== this.overlay.offsetY
+        ) {
+          this.overlay.refresh(q, r, wantOverlayX, wantOverlayY);
+        }
+      } else {
+        // No grid view owns this card — hide any leftover overlay and fall
+        // back to the raw within-cell pixel offset.
+        this.overlay.clear();
+        this.setTarget(micro.x, micro.y);
       }
       return;
     }
-    // Non-world surfaces: ensure any leftover overlay from a previous
-    // world placement is hidden so an inventoried card doesn't drag
-    // its world-tile snapshot along with it.
     this.overlay.clear();
-
-    const stacked = getStackedState(row.microZone);
-    if (stacked === STACKED_LOOSE) {
-      const { x, y } = decodeLooseXY(row.microLocation);
-      this.setTarget(x, y);
-    }
     // Hex stacking — rect-on-hex via `STACKED_ON_ROOT` + `direction = HEX`
     // is wired through `RectCard.layout`; pure hex-on-hex chains are
     // not yet implemented.
@@ -424,13 +438,14 @@ export class LayoutHexCard extends LayoutCard {
     // drag the card is re-parented to the global drag overlay, so
     // its local effX/effY is no longer in the world-card-surface
     // frame — global coords work in both states.
+    const worldView = this.worldView;
     if (
       this.overlay.q !== null &&
-      this.ctx.worldHexAt &&
+      worldView &&
       (this.state.dragging || moving)
     ) {
       const gp = this.container.getGlobalPosition();
-      const hex = this.ctx.worldHexAt(gp.x + HEX_CARD_WIDTH / 2, gp.y + HEX_CARD_HEIGHT / 2);
+      const hex = worldView.worldHexAt(gp.x + HEX_CARD_WIDTH / 2, gp.y + HEX_CARD_HEIGHT / 2);
       // Re-bake every frame while moving so the offset stays
       // up-to-date — the tile snapshot needs to slide with the
       // card's drift relative to the tile centre, not just snap on

@@ -1,5 +1,5 @@
-import { type ZoneId, INVENTORY_LAYER, makeMacroZone, PLAYER_INVENTORY_LAYER } from "../../server/data/packing";
-import { chunksAroundAnchor, WORLD_LAYER } from "../world/worldCoords";
+import { type ZoneId, INVENTORY_LAYER, makeMacroZone, PLAYER_INVENTORY_LAYER, regionOfZone } from "../../server/data/packing";
+import { chunksAroundAnchor, WORLD_LAYER } from "../viewport/worldCoords";
 
 /**
  * Subscription/render tier for a tracked zone, in a demotion-only distance
@@ -36,6 +36,18 @@ export type SubscriptionChangeListener = (
   queryClass: QueryClass,
 ) => void;
 
+/** Fires when a region needs subscribing (`true`) or releasing (`false`) — a
+ *  region is subscribed while any world zone inside it is wanted. `main.ts`
+ *  maps this to `subscribeRegion` / `unsubscribeRegion`. */
+export type RegionSubscriptionListener = (
+  macroRegion: bigint,
+  subscribed: boolean,
+) => void;
+
+/** Fires when a wanted world zone is present-but-not-yet-available and needs the
+ *  server to spawn it. `main.ts` maps this to `reducers.requestZone`. */
+export type ZoneRequestListener = (zoneId: ZoneId) => void;
+
 export type AnchorName = string;
 /** Named viewport anchor. Carries the surface it's pinned to so
  *  `recomputeAnchorZones` can pack zone_ids on the right layer (e.g.
@@ -47,6 +59,11 @@ export interface WorldAnchor {
   readonly q: number;
   readonly r: number;
   readonly surface: number;
+  /** Zone owner band the anchor's chunks belong to — `0` for the world
+   *  (default), a soul/anchor `card_id` for an inventory / mini-zone bucket.
+   *  `recomputeAnchorZones` packs this into the subscribed zone ids so a
+   *  non-world viewport subscribes ITS owner's chunks, not owner 0's. */
+  readonly owner: number;
 }
 export type AnchorListener = (
   name: AnchorName,
@@ -88,6 +105,30 @@ export class ZoneManager {
   // `onRemoved` listeners drive render registration (which toggles on
   // active↔hot).
   private readonly subscriptionChangeListeners = new Set<SubscriptionChangeListener>();
+  private readonly regionSubscriptionListeners = new Set<RegionSubscriptionListener>();
+  private readonly zoneRequestListeners = new Set<ZoneRequestListener>();
+
+  // ── Region gate ──────────────────────────────────────────────────────────
+  // Gated zones (world + soul inventory) only exist where a `Region` permits
+  // them; the waterfall decides what we *want*, and the gate decides what we
+  // actually subscribe based on the region's presence/availability bits.
+  // Non-gated surfaces (player inventory / mini_zone / pocket) are
+  // server-provisioned and bypass the gate entirely. See `isGated`.
+
+  /** Latest presence/availability bitfields per subscribed `macro_region`,
+   *  fed by `noteRegion` from the client's region table mirror. */
+  private readonly regionBits = new Map<bigint, { presence: bigint; available: bigint }>();
+  /** Wanted world zones grouped by their `macro_region`. Drives region
+   *  subscription (a region is subscribed while its set is non-empty) and tells
+   *  `noteRegion` which zones to re-evaluate when a region's bits change. */
+  private readonly regionWanted = new Map<bigint, Set<ZoneId>>();
+  /** World zones we've already fired `request_zone` for, so a present-but-
+   *  unavailable zone isn't re-requested on every region update. Cleared when
+   *  the zone stops being wanted. */
+  private readonly requested = new Set<ZoneId>();
+  /** The query class last emitted to the SDK per zone (the *gated* result, vs
+   *  the *desired* class derived from the tier). Absent = `none`. */
+  private readonly emitted = new Map<ZoneId, QueryClass>();
 
   // Recency order of `hot` zones (Map preserves insertion order). A zone is
   // (re-)inserted at the back when it ENTERS hot (i.e. just left active on a
@@ -181,7 +222,7 @@ export class ZoneManager {
     }
 
     const newClass = subClassOf(tier);
-    if (prevClass !== newClass) this.fireSubscriptionChange(zoneId, newClass);
+    if (prevClass !== newClass) this.onDesireChanged(zoneId, prevClass, newClass);
   }
 
   remove(zoneId: ZoneId): void {
@@ -254,13 +295,13 @@ export class ZoneManager {
     }
   }
 
-  /** Every zone currently holding a live subscription, with its query class
-   *  (`full` or `skeleton`). Used by `main.ts` for the initial catch-up before
-   *  its `onSubscriptionChange` listener is registered. */
+  /** Every zone whose (gated) subscription is currently live, with its query
+   *  class. Reflects the region gate's *emitted* decisions, not raw desire —
+   *  used by `main.ts` for the initial catch-up. (Empty at boot, before any
+   *  anchor is set.) */
   *subscribedZones(): Generator<{ zoneId: ZoneId; queryClass: QueryClass }> {
-    for (const [zoneId, t] of this.entries) {
-      const queryClass = subClassOf(t);
-      if (queryClass !== "none") yield { zoneId, queryClass };
+    for (const [zoneId, queryClass] of this.emitted) {
+      yield { zoneId, queryClass };
     }
   }
 
@@ -278,15 +319,129 @@ export class ZoneManager {
     };
   }
 
-  /** Fires when a zone's subscription query class changes (full / skeleton /
-   *  none) — i.e. on null→sub, sub→null, and hot↔cold, but NOT on active↔hot
-   *  (both `full`). The listener installs/swaps/drops the SpacetimeDB
-   *  subscription accordingly. */
+  /** Fires when a zone's *effective* (region-gated) subscription class changes
+   *  (full / skeleton / none). The listener installs/swaps/drops the
+   *  SpacetimeDB subscription accordingly. */
   onSubscriptionChange(listener: SubscriptionChangeListener): () => void {
     this.subscriptionChangeListeners.add(listener);
     return () => {
       this.subscriptionChangeListeners.delete(listener);
     };
+  }
+
+  /** Fires when a region must be subscribed (`true`) / released (`false`). */
+  onRegionSubscriptionChange(listener: RegionSubscriptionListener): () => void {
+    this.regionSubscriptionListeners.add(listener);
+    return () => {
+      this.regionSubscriptionListeners.delete(listener);
+    };
+  }
+
+  /** Fires when a wanted world zone needs the server to spawn it. */
+  onZoneRequest(listener: ZoneRequestListener): () => void {
+    this.zoneRequestListeners.add(listener);
+    return () => {
+      this.zoneRequestListeners.delete(listener);
+    };
+  }
+
+  /** Feed the latest presence/availability bits for a subscribed region (from
+   *  the client's region mirror). Re-evaluates every wanted zone in that
+   *  region — promoting newly-present/available zones into a live subscription
+   *  and firing `request_zone` for present-but-unavailable ones. */
+  noteRegion(macroRegion: bigint, presence: bigint, available: bigint): void {
+    this.regionBits.set(macroRegion, { presence, available });
+    const set = this.regionWanted.get(macroRegion);
+    if (!set) return;
+    for (const zoneId of [...set]) this.reconcileSubscription(zoneId);
+  }
+
+  /** Forget a region's bits (its row was removed). Wanted zones in it fall back
+   *  to ungated `none` until/unless the region reappears. */
+  noteRegionRemoved(macroRegion: bigint): void {
+    if (!this.regionBits.delete(macroRegion)) return;
+    const set = this.regionWanted.get(macroRegion);
+    if (!set) return;
+    for (const zoneId of [...set]) this.reconcileSubscription(zoneId);
+  }
+
+  // ── Region gate internals ────────────────────────────────────────────────
+
+  /** True iff `zoneId`'s surface is region-gated: the world layer or a soul's
+   *  inventory layer (souls get an inventory `Region` on spawn). Other
+   *  surfaces (player inventory, mini-zone, pocket) are server-provisioned and
+   *  bypass the gate, subscribing directly. */
+  private isGated(zoneId: ZoneId): boolean {
+    const surface = Number((zoneId >> 24n) & 0xffn);
+    return surface === WORLD_LAYER || surface === INVENTORY_LAYER;
+  }
+
+  /** Called from `set()` when a zone's desired query class crosses a boundary.
+   *  Maintains per-region "wanted" ref-counts (world only) and reconciles the
+   *  zone's actual subscription through the gate. */
+  private onDesireChanged(zoneId: ZoneId, prevDesire: QueryClass, newDesire: QueryClass): void {
+    if (this.isGated(zoneId)) {
+      if (prevDesire === "none" && newDesire !== "none") this.addWanted(zoneId);
+      else if (prevDesire !== "none" && newDesire === "none") this.removeWanted(zoneId);
+    }
+    this.reconcileSubscription(zoneId);
+  }
+
+  private addWanted(zoneId: ZoneId): void {
+    const { macroRegion } = regionOfZone(zoneId);
+    let set = this.regionWanted.get(macroRegion);
+    if (!set) {
+      set = new Set();
+      this.regionWanted.set(macroRegion, set);
+    }
+    const fresh = set.size === 0;
+    set.add(zoneId);
+    if (fresh) this.fireRegionSubscription(macroRegion, true);
+  }
+
+  private removeWanted(zoneId: ZoneId): void {
+    const { macroRegion } = regionOfZone(zoneId);
+    const set = this.regionWanted.get(macroRegion);
+    this.requested.delete(zoneId);
+    if (!set) return;
+    set.delete(zoneId);
+    if (set.size === 0) {
+      this.regionWanted.delete(macroRegion);
+      this.regionBits.delete(macroRegion);
+      this.fireRegionSubscription(macroRegion, false);
+    }
+  }
+
+  /** Recompute a zone's gated subscription class and emit a change only when it
+   *  differs from what's currently live. */
+  private reconcileSubscription(zoneId: ZoneId): void {
+    const effective = this.effectiveClassFor(zoneId);
+    const prev = this.emitted.get(zoneId) ?? "none";
+    if (effective === prev) return;
+    if (effective === "none") this.emitted.delete(zoneId);
+    else this.emitted.set(zoneId, effective);
+    this.fireSubscriptionChange(zoneId, effective);
+  }
+
+  /** The query class a zone should actually subscribe at, after region gating.
+   *  Non-gated zones bypass (return their desire). Gated zones return `none`
+   *  until their region is known and marks the zone present; a present-but-
+   *  unavailable zone fires `request_zone` once and subscribes optimistically. */
+  private effectiveClassFor(zoneId: ZoneId): QueryClass {
+    const desire = subClassOf(this.entries.get(zoneId));
+    if (desire === "none") return "none";
+    if (!this.isGated(zoneId)) return desire;
+
+    const { macroRegion, bit } = regionOfZone(zoneId);
+    const bits = this.regionBits.get(macroRegion);
+    if (!bits) return "none"; // region not loaded (or no row) → defer / doesn't exist
+    const mask = 1n << BigInt(bit);
+    if ((bits.presence & mask) === 0n) return "none"; // not present → can't exist
+    if ((bits.available & mask) === 0n && !this.requested.has(zoneId)) {
+      this.requested.add(zoneId);
+      this.fireZoneRequest(zoneId);
+    }
+    return desire; // optimistic: subscribe now; rows arrive when the spawn lands
   }
 
   // ── World coordinate anchor API ──────────────────────────────────────────
@@ -305,10 +460,16 @@ export class ZoneManager {
    * to center its hex grid. Other anchors keep their surrounding
    * zones warm even when off-screen.
    */
-  setAnchor(name: AnchorName, q: number, r: number, surface: number = WORLD_LAYER): void {
+  setAnchor(
+    name: AnchorName,
+    q: number,
+    r: number,
+    surface: number = WORLD_LAYER,
+    owner: number = 0,
+  ): void {
     const prev = this.anchors.get(name);
-    if (prev?.q === q && prev.r === r && prev.surface === surface) return;
-    this.anchors.set(name, { q, r, surface });
+    if (prev?.q === q && prev.r === r && prev.surface === surface && prev.owner === owner) return;
+    this.anchors.set(name, { q, r, surface, owner });
     for (const l of this.anchorListeners) l(name, q, r, surface);
     this.recomputeAnchorZones();
   }
@@ -352,12 +513,12 @@ export class ZoneManager {
   private recomputeAnchorZones(): void {
     const activeSet = new Set<ZoneId>();
     const hotEligible = new Set<ZoneId>();
-    for (const { q, r, surface } of this.anchors.values()) {
+    for (const { q, r, surface, owner } of this.anchors.values()) {
       for (const { zoneQ, zoneR } of chunksAroundAnchor(q, r, this.activeDistance)) {
-        activeSet.add(makeMacroZone(0, surface, zoneQ, zoneR).packed);
+        activeSet.add(makeMacroZone(owner, surface, zoneQ, zoneR).packed);
       }
       for (const { zoneQ, zoneR } of chunksAroundAnchor(q, r, this.hotDistance)) {
-        hotEligible.add(makeMacroZone(0, surface, zoneQ, zoneR).packed);
+        hotEligible.add(makeMacroZone(owner, surface, zoneQ, zoneR).packed);
       }
     }
 
@@ -407,6 +568,12 @@ export class ZoneManager {
       this.removedListeners[tier].clear();
     }
     this.subscriptionChangeListeners.clear();
+    this.regionSubscriptionListeners.clear();
+    this.zoneRequestListeners.clear();
+    this.regionBits.clear();
+    this.regionWanted.clear();
+    this.requested.clear();
+    this.emitted.clear();
     this.anchors.clear();
     this.anchorListeners.clear();
   }
@@ -437,6 +604,26 @@ export class ZoneManager {
         listener(zoneId, queryClass);
       } catch (err) {
         console.error(`[ZoneManager] subscriptionChange listener threw`, err);
+      }
+    }
+  }
+
+  private fireRegionSubscription(macroRegion: bigint, subscribed: boolean): void {
+    for (const listener of this.regionSubscriptionListeners) {
+      try {
+        listener(macroRegion, subscribed);
+      } catch (err) {
+        console.error(`[ZoneManager] regionSubscription listener threw`, err);
+      }
+    }
+  }
+
+  private fireZoneRequest(zoneId: ZoneId): void {
+    for (const listener of this.zoneRequestListeners) {
+      try {
+        listener(zoneId);
+      } catch (err) {
+        console.error(`[ZoneManager] zoneRequest listener threw`, err);
       }
     }
   }

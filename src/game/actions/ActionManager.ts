@@ -1,6 +1,6 @@
 import { debug } from "../../debug";
 import type { GameContext } from "../../GameContext";
-import { getStackedState, STACKED_LOOSE } from "../cards/cardData";
+import { microIsCard, microLooseCell } from "../cards/cardData";
 import {
   STACK_DIRECTION_DOWN,
   STACK_DIRECTION_HEX,
@@ -8,7 +8,7 @@ import {
 } from "../cards/cardData";
 import { MINI_ZONE_LAYER, type MacroZone } from "../../server/data/packing";
 import type { LocalCard } from "../../server/data/DataManager";
-import { getZoneTileSlot } from "../world/worldCoords";
+import { getZoneTileSlot } from "../viewport/worldCoords";
 import type { MatchResult } from "./recipeMatcher";
 import { isSlotHeld } from "./chainState";
 
@@ -71,7 +71,7 @@ export interface QueuedAction {
    *  doesn't agree). */
   surface: number;
   macroZone: bigint;
-  microZone: number;
+  microLocation: number;
   /** True between `proposeAction` dispatch and its round-trip
    *  resolution. While submitted, `evaluateRoot` and the
    *  cluster-pruning paths leave the entry alone — the user has
@@ -183,13 +183,9 @@ export class ActionManager {
       // `corpus_b.1` doesn't start its self-destruct lifecycle;
       // freshly-magnetic cards don't begin their inner recipe pull.
       if (change.kind === "added") {
-        const state = getStackedState(change.row.microZone);
-        // `STACKED_LOOSE` is the only true root state in the unified
-        // model. Value 3 (formerly `STACKED_ON_HEX`, now repurposed
-        // as `STACKED_DEFERRED`) is transient — mirror resolution
-        // converts it to state 1/2 before any chain logic sees it,
-        // so we don't treat it as a root here.
-        const isRoot = state === STACKED_LOOSE;
+        // A loose card (`!micro_is_card`) is a chain root. Stacked members
+        // and still-deferred rows (resolved by `mirrorCard` first) aren't.
+        const isRoot = !microIsCard(change.row.flagsBk);
         if (isRoot && change.row.dead !== 2) {
           this.evaluateRoot(change.key);
         }
@@ -228,8 +224,7 @@ export class ActionManager {
     // root state in the unified model — state 3 (`STACKED_DEFERRED`)
     // is transient and resolved by `mirrorCard` before reaching here.
     for (const row of ctx.data.cardsLocal.values()) {
-      const state = getStackedState(row.microZone);
-      if (state === STACKED_LOOSE) {
+      if (!microIsCard(row.flagsBk)) {
         this.evaluateRoot(row.cardId);
       }
     }
@@ -332,8 +327,7 @@ export class ActionManager {
     // because `applyPredictedHolds` just stamped `predict_position_hold`
     // on it), `evaluateRoot(axe)` lands here — and pre-fix would
     // nuke every cut_tree queue that depends on the axe.
-    const rootState = getStackedState(rootRow.microZone);
-    if (rootState !== STACKED_LOOSE) {
+    if (microIsCard(rootRow.flagsBk)) {
       this.dropForRoot(looseRootId, "no longer a loose root");
       return;
     }
@@ -402,8 +396,7 @@ export class ActionManager {
     // `WORLD_LAYER` (64+), the tile-bearing surfaces today.
     let syntheticTile: { packedDef: number; stock0: number; stock1: number } | null = null;
     if (rootRow.macroZone.surface >= MINI_ZONE_LAYER && branchHex.length === 0) {
-      const localQ = (rootRow.microZone >> 5) & 0x7;
-      const localR = (rootRow.microZone >> 2) & 0x7;
+      const { localQ, localR } = microLooseCell(rootRow.microLocation);
       const tileCardRow = findFreeTileCardAt(
         this.ctx.data.cardsLocal,
         rootRow.macroZone.surface,
@@ -511,7 +504,7 @@ export class ActionManager {
     rootRow: {
       cardId: number;
       macroZone: MacroZone;
-      microZone: number;
+      microLocation: number;
     },
     match: MatchResult,
   ): void {
@@ -520,30 +513,21 @@ export class ActionManager {
       // Submitted entry is committed — leave it alone.
       return;
     }
-    // Strip the state bits from `microZone` before capturing it in
-    // the queue. The server's `chain_stitch` reads q/r from bits 2..=7
-    // and writes state=Free for the root; we don't need the local
-    // state bits on the wire. (Pre-rename this stripped "the legacy
-    // state-3 OnHex bits"; with state 3 now actively used as
-    // `Deferred`, the strip is just generic state-bit hygiene.)
-    const microZoneForWire = rootRow.microZone & ~0x3;
+    // The root's loose `microLocation` (cell + within-cell offset) is the
+    // wire position; the server's `chain_stitch` decodes the cell from it.
+    const microLocationForWire = rootRow.microLocation;
     if (
       existing !== undefined &&
       existing.recipeId === match.recipeId &&
       bindingsEqual(existing.bindings, match.bindings)
     ) {
-      // Recipe + bindings unchanged. Keep the existing timer running
-      // — debouncing the chain build itself is the whole point. BUT
-      // the root card may have moved between queue and now (player
-      // dragged it off the hex it was on, slid it on the inventory
-      // grid, etc.) and the wire format's `surface / macroZone /
-      // microZone` must match the root's CURRENT position so the
-      // server's `chain_stitch` writes it where the player sees it.
-      // Without this re-snapshot the action fires with stale coords
-      // and the root snaps back to where it was at queue time.
+      // Recipe + bindings unchanged. Keep the existing timer running — but
+      // the root may have moved between queue and now, so re-snapshot its
+      // CURRENT `surface / macroZone / microLocation` so `chain_stitch`
+      // writes it where the player sees it (else it snaps back).
       existing.surface = rootRow.macroZone.surface;
       existing.macroZone = rootRow.macroZone.packed;
-      existing.microZone = microZoneForWire;
+      existing.microLocation = microLocationForWire;
       return;
     }
 
@@ -570,7 +554,7 @@ export class ActionManager {
       bindings: match.bindings,
       surface: rootRow.macroZone.surface,
       macroZone: rootRow.macroZone.packed,
-      microZone: microZoneForWire,
+      microLocation: microLocationForWire,
       submitted: false,
       scheduledAt: 0,
       progressAnchor,
@@ -743,7 +727,7 @@ export class ActionManager {
         recipeId: action.recipeId,
         surface: action.surface,
         macroZone: action.macroZone,
-        microZone: action.microZone,
+        microLocation: action.microLocation,
         root: action.looseRootId,
         bindings: action.bindings,
       })
@@ -930,11 +914,11 @@ function resolveTileCardHex(
 ): { q: number; r: number } | null {
   let cur: LocalCard | undefined = row;
   for (let depth = 0; depth < 32 && cur !== undefined; depth++) {
-    if (getStackedState(cur.microZone) === STACKED_LOOSE) {
-      return {
-        q: (cur.microZone >> 5) & 0x7,
-        r: (cur.microZone >> 2) & 0x7,
-      };
+    // A loose card carries its cell in `microLocation`; a member hops to its
+    // root (one step in the flat model). Return the loose root's cell.
+    if (!microIsCard(cur.flagsBk)) {
+      const { localQ, localR } = microLooseCell(cur.microLocation);
+      return { q: localQ, r: localR };
     }
     cur = cardsLocal.get(cur.microLocation);
   }
