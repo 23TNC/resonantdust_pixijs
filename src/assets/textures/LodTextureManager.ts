@@ -9,6 +9,7 @@ import {
   MIN_LOD,
 } from "../lodUrls";
 import type { TextureManager } from "./TextureManager";
+import { debug } from "../../debug";
 
 /** Pixels trimmed off each side of a packed texture's frame.
  *  Source PNGs ship with a transparent margin already baked in;
@@ -270,6 +271,16 @@ export class LodTextureManager {
       if (!src) return;
       const atlas = this.textures.pack(src);
       this.byUrl.set(url, insetFrame(atlas, FRAME_INSET));
+    } catch (err) {
+      // Callers `void this.load(...)` (fire-and-forget). The `void` discards
+      // the return value but does NOT handle a rejection — without this catch
+      // a transient `fetch` failure (network blip, dev-server stall, etc.)
+      // surfaces as an "Uncaught (in promise)". The texture system is already
+      // resilient to a missed load: `get` resolved a substitute or white
+      // fallback for this frame, and on the next reference `loading.delete`
+      // below means we'll retry the load. So just log it and let the retry
+      // path do the work.
+      debug.warn(["lod"], `[lod] failed to load ${url}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       this.loading.delete(url);
       for (const cb of this.listeners) cb();

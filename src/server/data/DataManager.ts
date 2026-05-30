@@ -1,7 +1,11 @@
 import { debug } from "../../debug";
 import type { CardDefinition, DefinitionManager } from "../../game/definitions/DefinitionManager";
-import type { Card, ChatMessage, Player, PlayerProfile, Region, Soul, SoulPrivate, Zone } from "../spacetime/bindings/types";
+import type { Card, ChatMessage, Player, Region, Soul, SoulPrivate, Zone } from "../spacetime/bindings/types";
+// PlayerProfile is canonically the `players` (auth DB) shape now — keyed by
+// player_id, no lifecycle fields. The client only reads `playerId` off it.
+import type { PlayerProfile } from "../spacetime/bindings/players/types";
 import { ChatSubscriptionManager } from "../spacetime/ChatSubscriptionManager";
+import { PlayersSubscriptionManager } from "../spacetime/PlayersSubscriptionManager";
 import type { ConnectionRegistry } from "../spacetime/ConnectionRegistry";
 import type { ReducerManager } from "../spacetime/ReducerManager";
 import { SubscriptionManager } from "../spacetime/SubscriptionManager";
@@ -195,6 +199,9 @@ export class DataManager {
   readonly chatMessages = new AppendTable<ChatMessage>((row) => row.sentAt);
   readonly subscriptions: SubscriptionManager;
   readonly chatSubscriptions: ChatSubscriptionManager;
+  /** Canonical auth-DB subscriptions — the player record + profile rows,
+   *  fed from the `players` module connection (not `shard`). */
+  readonly playerSubscriptions: PlayersSubscriptionManager;
 
   /** Local overlays — what game code reads/writes for displayed state.
    *  Mirrors `<table>.current` via subscription. */
@@ -270,6 +277,12 @@ export class DataManager {
       onReducerEvent: (micros) => this.reducers.noteServerTime(micros),
     });
     this.chatSubscriptions = new ChatSubscriptionManager(registry.chat);
+    // The login row write now arrives on the `players` connection, so it
+    // must feed the clock-sync re-baseline just like the shard subscription
+    // above (mirrors the `onReducerEvent` wiring on `this.subscriptions`).
+    this.playerSubscriptions = new PlayersSubscriptionManager(registry.players, {
+      onReducerEvent: (micros) => this.reducers.noteServerTime(micros),
+    });
 
     this.subscriptions.registerTableHandlers("cards", {
       onInsert: (row) => this.cards.insert(decodeMacro(row)),
@@ -277,7 +290,7 @@ export class DataManager {
         this.cards.update(decodeMacro(oldRow), decodeMacro(newRow)),
       onDelete: (row) => this.cards.delete(decodeMacro(row)),
     });
-    this.subscriptions.registerTableHandlers("players", {
+    this.playerSubscriptions.registerTableHandlers("players", {
       onInsert: this.players.insert,
       onUpdate: this.players.update,
       onDelete: this.players.delete,
@@ -307,7 +320,7 @@ export class DataManager {
     // Same flat-row pattern as `soul_privates` above — the server
     // table is keyed by `player_id` and updated in place via
     // delete + insert; we mirror straight into `playerProfilesLocal`.
-    this.subscriptions.registerTableHandlers("player_profiles", {
+    this.playerSubscriptions.registerTableHandlers("player_profiles", {
       onInsert: (row) => {
         this.playerProfilesLocal.set(row.playerId, row);
       },

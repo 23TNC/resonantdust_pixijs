@@ -646,7 +646,7 @@ export class ReducerManager {
     const clientTimeMs = BigInt(Math.round(this.serverNowMs()));
     debug.log(
       ["spacetime"],
-      `[spacetime] placeCard card=${args.cardId} placement=${JSON.stringify(args.placement)} clientTimeMs=${clientTimeMs}`,
+      `[spacetime] placeCard card=${args.cardId} placement=${JSON.stringify(args.placement, (_k, v) => typeof v === "bigint" ? v.toString() : v)} clientTimeMs=${clientTimeMs}`,
       0,
     );
     const conn = await this.registry.shard.connect();
@@ -707,10 +707,44 @@ export class ReducerManager {
       `[spacetime] claimOrLogin name=${args.name} clientTimeMs=${clientTimeMs}`,
       4,
     );
+    // Canonical login → `players` (auth DB). This row write is the one
+    // PlayerManager waits on and the session's clock-sync primitive, so
+    // it's the call we bookend for drift/RTT.
+    const playersConn = await this.registry.players.connect();
+    const start = performance.now();
+    try {
+      await playersConn.reducers.claimOrLogin({ ...args, clientTimeMs });
+    } catch (err) {
+      this.correctFromDrift(err, Number(clientTimeMs), start);
+      throw err;
+    } finally {
+      this.recordRtt(performance.now() - start);
+    }
+    // Transitional dual-login: also bind shard's `player_sessions` so the
+    // world's gameplay reducers (`resolve_caller`) authenticate. Removed
+    // once the gateway fronts shard. Soul spawn is no longer a side-effect
+    // of this call — the client drives it via `spawnSoul`.
+    const shardConn = await this.registry.shard.connect();
+    await shardConn.reducers.claimOrLogin({ ...args, clientTimeMs });
+  }
+
+  /** Spawn the local player's `player_soul` on the world (`shard`) DB.
+   *  Driven client-side: after login the client subscribes its owned
+   *  cards and, seeing none, calls this. `soulIndex` is `1 + owned-soul
+   *  count`; the reducer rejects if the player already owns >= that many
+   *  souls, so a stale-low client count can't double-spawn. Trusts
+   *  `playerId` (auth is the gateway's job — see the shard reducer doc). */
+  async spawnSoul(playerId: number, soulIndex: number): Promise<void> {
+    const clientTimeMs = BigInt(Math.round(this.serverNowMs()));
+    debug.log(
+      ["spacetime"],
+      `[spacetime] spawnSoul playerId=${playerId} index=${soulIndex} clientTimeMs=${clientTimeMs}`,
+      4,
+    );
     const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.claimOrLogin({ ...args, clientTimeMs });
+      await conn.reducers.spawnSoul({ playerId, soulIndex, clientTimeMs });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
@@ -763,16 +797,23 @@ export class ReducerManager {
       `[spacetime] setLastLogin clientTimeMs=${clientTimeMs}`,
       4,
     );
-    const conn = await this.registry.shard.connect();
+    // Canonical → `players`. Its player-row update is the `Reducer`-tagged
+    // write that re-seeds the clock window on a mid-session reconnect, so
+    // it's the bookended call.
+    const playersConn = await this.registry.players.connect();
     const start = performance.now();
     try {
-      await conn.reducers.setLastLogin({ clientTimeMs });
+      await playersConn.reducers.setLastLogin({ clientTimeMs });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
     } finally {
       this.recordRtt(performance.now() - start);
     }
+    // Transitional: keep shard's row in step too (welcome-back stamp +
+    // shard-side reconnect clock repair). Removed with the dual-login.
+    const shardConn = await this.registry.shard.connect();
+    await shardConn.reducers.setLastLogin({ clientTimeMs });
   }
 
   /** Ask the server to spawn the zone at `macroZone` (region-gated, idempotent

@@ -10,25 +10,6 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export const Card = __t.object("Card", {
-  validAt: __t.u64(),
-  dataShard: __t.u16(),
-  cardId: __t.u32(),
-  macroZone: __t.u64(),
-  microLocation: __t.u32(),
-  ownerId: __t.u32(),
-  packedDefinition: __t.u16(),
-  flagsState: __t.u32(),
-  flagsBk: __t.u32(),
-});
-export type Card = __Infer<typeof Card>;
-
-export const CardIdCounter = __t.object("CardIdCounter", {
-  id: __t.u8(),
-  next: __t.u32(),
-});
-export type CardIdCounter = __Infer<typeof CardIdCounter>;
-
 export const GcSchedule = __t.object("GcSchedule", {
   id: __t.u64(),
   scheduledAt: __t.scheduleAt(),
@@ -68,25 +49,4 @@ export const SequenceCounter = __t.object("SequenceCounter", {
   next: __t.u16(),
 });
 export type SequenceCounter = __Infer<typeof SequenceCounter>;
-
-export const Soul = __t.object("Soul", {
-  validAt: __t.u64(),
-  dataShard: __t.u16(),
-  cardId: __t.u32(),
-  ownerId: __t.u32(),
-  macroZone: __t.u64(),
-  microLocation: __t.u32(),
-  stats: __t.u32(),
-  fatigued: __t.u32(),
-  injured: __t.u32(),
-});
-export type Soul = __Infer<typeof Soul>;
-
-export const SoulPrivate = __t.object("SoulPrivate", {
-  cardId: __t.u32(),
-  dataShard: __t.u16(),
-  blueprints0: __t.u64(),
-  activeBlueprints: __t.u8(),
-});
-export type SoulPrivate = __Infer<typeof SoulPrivate>;
 

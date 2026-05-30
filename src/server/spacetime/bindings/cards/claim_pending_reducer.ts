@@ -10,9 +10,9 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default __t.row({
-  cardId: __t.u32().primaryKey().name("card_id"),
-  dataShard: __t.u16().name("data_shard"),
-  blueprints0: __t.u64().name("blueprints_0"),
-  activeBlueprints: __t.u8().name("active_blueprints"),
-});
+export default {
+  recipeId: __t.u16(),
+  root: __t.u32(),
+  bindings: __t.array(__t.array(__t.u32())),
+  completionMs: __t.u64(),
+};

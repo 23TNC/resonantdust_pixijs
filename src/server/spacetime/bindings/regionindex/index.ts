@@ -34,55 +34,33 @@ import {
 } from "spacetimedb";
 
 // Import all reducer arg schemas
-import ClaimOrLoginReducer from "./claim_or_login_reducer";
-import SetLastLoginReducer from "./set_last_login_reducer";
-import SetPlayerFactionReducer from "./set_player_faction_reducer";
+import AssignRegionReducer from "./assign_region_reducer";
 
 // Import all procedure arg schemas
 
 // Import all table schema definitions
-import PlayerProfilesRow from "./player_profiles_table";
-import PlayersRow from "./players_table";
+import RegionShardsRow from "./region_shards_table";
 
 /** Type-only namespace exports for generated type groups. */
 
 /** The schema information for all tables in this module. This is defined the same was as the tables would have been defined in the server. */
 const tablesSchema = __schema({
-  player_profiles: __table({
-    name: 'player_profiles',
+  region_shards: __table({
+    name: 'region_shards',
     indexes: [
-      { accessor: 'player_id', name: 'player_profiles_player_id_idx_btree', algorithm: 'btree', columns: [
-        'playerId',
+      { accessor: 'macro_region', name: 'region_shards_macro_region_idx_btree', algorithm: 'btree', columns: [
+        'macroRegion',
       ] },
     ],
     constraints: [
-      { name: 'player_profiles_player_id_key', constraint: 'unique', columns: ['playerId'] },
+      { name: 'region_shards_macro_region_key', constraint: 'unique', columns: ['macroRegion'] },
     ],
-  }, PlayerProfilesRow),
-  players: __table({
-    name: 'players',
-    indexes: [
-      { accessor: 'name', name: 'players_name_idx_btree', algorithm: 'btree', columns: [
-        'name',
-      ] },
-      { accessor: 'player_id', name: 'players_player_id_idx_btree', algorithm: 'btree', columns: [
-        'playerId',
-      ] },
-      { accessor: 'valid_at', name: 'players_valid_at_idx_btree', algorithm: 'btree', columns: [
-        'validAt',
-      ] },
-    ],
-    constraints: [
-      { name: 'players_valid_at_key', constraint: 'unique', columns: ['validAt'] },
-    ],
-  }, PlayersRow),
+  }, RegionShardsRow),
 });
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
-  __reducerSchema("claim_or_login", ClaimOrLoginReducer),
-  __reducerSchema("set_last_login", SetLastLoginReducer),
-  __reducerSchema("set_player_faction", SetPlayerFactionReducer),
+  __reducerSchema("assign_region", AssignRegionReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

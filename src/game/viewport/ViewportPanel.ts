@@ -8,7 +8,7 @@ import type { ManagedPanel } from "../../ui/panels/PanelManager";
 import { PixiPanel } from "../../ui/dom/PixiPanel";
 import type { DomPanelRect, TitleSuffix, TitleSuffixResolver } from "../../ui/dom/DomPanel";
 import type { PanelTaskbar } from "../../ui/dom/PanelTaskbar";
-import { makeMacroZone, microLooseCell, WORLD_LAYER } from "../../server/data/packing";
+import { decodeMicro, makeMacroZone, microIsCard, microLooseCell, WORLD_LAYER } from "../../server/data/packing";
 import { tryActivateSoul } from "../permissions";
 
 /**
@@ -42,12 +42,6 @@ export interface ViewportOpts {
   pan: boolean;
   /** One-card-per-cell snap placement (inventory) vs loose (world). */
   occupancy: boolean;
-  /** Force `LOOSE_HEX`/`LOOSE_RECT` cards to render + drop at the cell centre,
-   *  ignoring their `(x, y)` within-cell offset. `true` = current Stacklands-
-   *  style snap; `false` = arbitrary in-tile placement (Cultist-Sim-style),
-   *  using the i12 `x`/`y` fields in `micro_location` as offsets from the
-   *  cell centre. Defaults to `true` (preserves current behavior). */
-  forceSnap: boolean;
   /** Recenter the viewport on the viewer's world position (world camera). */
   follow: boolean;
   origin: "center" | "topleft";
@@ -107,7 +101,6 @@ export class ViewportPanel implements ManagedPanel {
         origin: opts.origin,
         owner: opts.owner,
         singleChunk: opts.singleChunk,
-        forceSnap: opts.forceSnap,
         // Terrain renders for any viewport whose zone carries tiles (world
         // hexes, inventory "empty" tiles). No flag needed — a tile-less zone
         // simply has nothing to draw.
@@ -192,9 +185,37 @@ export class ViewportPanel implements ManagedPanel {
     this.panController.tweenTo(soul.macroZone.zoneQ + localQ, soul.macroZone.zoneR + localR);
   }
 
-  /** No-op — the placement grid is the zone's tile cells, always visible.
-   *  Kept for the `MainScene` KeyE handler's call shape. */
-  showGrid(_show: boolean): void {}
+  /** Nudge every free-placed card in this viewport's `(owner, surface)` bucket
+   *  back to its cell centre — resets the within-cell `(x, y)` offset to 0.
+   *  Only loose-kind cards (`LOOSE_HEX`/`LOOSE_RECT`) use the offset in
+   *  rendering; snap-kind cards (`SNAP_HEX`/`SNAP_RECT`) already render
+   *  centred regardless, so the nudge skips them. Local-only: same-bucket
+   *  position changes don't fire `placeCard` (see
+   *  `dropResolver.shouldSyncPlacement`), matching the "visual nudges stay
+   *  client-local" policy. Bound to `KeyE` in `MainScene`. */
+  nudgeToGrid(): void {
+    if (this.destroyed) return;
+    const cards = this.ctx.cards;
+    if (!cards) return;
+    for (const [cardId, row] of this.ctx.data.cardsLocal) {
+      if (row.macroZone.surface !== this.surface || row.macroZone.owner !== this.owner) continue;
+      if (microIsCard(row.flagsBk)) continue;            // stacked — no free offset
+      const micro = decodeMicro(row.microLocation, row.flagsBk);
+      if (micro.kind !== "loose") continue;
+      // Snap kinds (`& 0b10`) already render centred — nothing to nudge.
+      if ((micro.looseKind & 0b10) !== 0) continue;
+      if (micro.x === 0 && micro.y === 0) continue;      // already centred
+      cards.setCardPosition(cardId, {
+        kind: "world",
+        q: row.macroZone.zoneQ + micro.localQ,
+        r: row.macroZone.zoneR + micro.localR,
+        surface: this.surface,
+        owner: this.owner,
+        offsetX: 0,
+        offsetY: 0,
+      });
+    }
+  }
 
   /** Retarget the perspective soul (subscriptions + recenter). */
   assignViewer(newViewer: number): void {

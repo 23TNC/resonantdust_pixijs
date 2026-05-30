@@ -288,13 +288,11 @@ export class LayoutHexCard extends LayoutCard {
     if (micro.kind === "loose") {
       const q = row.macroZone.zoneQ + micro.localQ;
       const r = row.macroZone.zoneR + micro.localR;
-      const view = this.worldView;
-      const cell = view?.cellToPixel(q, r);
-      // Apply the within-cell `(x, y)` offset only when this is a LOOSE kind
-      // (`looseKind & 0b10) === 0` ⇒ LOOSE_HEX/LOOSE_RECT) AND the viewport
-      // doesn't force snap. SNAP kinds (2/3) and snap-mode viewports both
-      // render centred on the cell.
-      const applyOffset = view !== null && !view.forceSnap && (micro.looseKind & 0b10) === 0;
+      const cell = this.worldView?.cellToPixel(q, r);
+      // Whether to apply the within-cell `(x, y)` offset is decided by the
+      // **card's own `stack_state`**, not by the viewport: LOOSE kinds use
+      // the offset; SNAP kinds (`SNAP_HEX` / `SNAP_RECT`) render centred.
+      const applyOffset = (micro.looseKind & 0b10) === 0;
       const ox = applyOffset ? micro.x : 0;
       const oy = applyOffset ? micro.y : 0;
       if (cell) {

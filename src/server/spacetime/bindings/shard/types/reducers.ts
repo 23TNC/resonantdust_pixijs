@@ -18,6 +18,7 @@ import ProposeActionReducer from "../propose_action_reducer";
 import RequestBlueprintReducer from "../request_blueprint_reducer";
 import RequestZoneReducer from "../request_zone_reducer";
 import SetLastLoginReducer from "../set_last_login_reducer";
+import SpawnSoulReducer from "../spawn_soul_reducer";
 
 export type AddCardParams = __Infer<typeof AddCardReducer>;
 export type BootstrapParams = __Infer<typeof BootstrapReducer>;
@@ -31,4 +32,5 @@ export type ProposeActionParams = __Infer<typeof ProposeActionReducer>;
 export type RequestBlueprintParams = __Infer<typeof RequestBlueprintReducer>;
 export type RequestZoneParams = __Infer<typeof RequestZoneReducer>;
 export type SetLastLoginParams = __Infer<typeof SetLastLoginReducer>;
+export type SpawnSoulParams = __Infer<typeof SpawnSoulReducer>;
 

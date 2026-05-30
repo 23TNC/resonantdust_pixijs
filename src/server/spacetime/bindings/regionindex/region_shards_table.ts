@@ -11,13 +11,6 @@ import {
 } from "spacetimedb";
 
 export default __t.row({
-  validAt: __t.u64().primaryKey().name("valid_at"),
+  macroRegion: __t.u64().primaryKey().name("macro_region"),
   dataShard: __t.u16().name("data_shard"),
-  cardId: __t.u32().name("card_id"),
-  macroZone: __t.u64().name("macro_zone"),
-  microLocation: __t.u32().name("micro_location"),
-  ownerId: __t.u32().name("owner_id"),
-  packedDefinition: __t.u16().name("packed_definition"),
-  flagsState: __t.u32().name("flags_state"),
-  flagsBk: __t.u32().name("flags_bk"),
 });

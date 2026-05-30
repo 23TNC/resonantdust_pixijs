@@ -41,7 +41,7 @@ const SOUL_CARD_TYPE = 6;
  *
  * Always-on key handlers (installed once in `onEnter`):
  *
- *   - KeyE down/up → focused inventory panel's snapToGrid / showGrid.
+ *   - KeyE down → focused viewport's `nudgeToGrid()` (snap loose offsets to centres in non-snap viewports).
  *   - Space → focused game-view panel's `recenter()`.
  *   - left_click → details panel + open-inventory-on-soul-card.
  *
@@ -137,10 +137,11 @@ export class MainScene extends Scene {
     this.particleManager = new ParticleManager();
     void this.particleManager.init();
 
-    // Subscribe to the player's owned cards so the player's soul rows
-    // (and any new soul created this session) are available. Stays
-    // subscribed for the entire scene lifetime.
-    void ctx.data.subscriptions.subscribeOwnedCards(player.playerId);
+    // Subscribe to the player's owned cards (their soul rows) and, once
+    // the initial set has synced, spawn a soul if they own none yet.
+    // Client-driven signup: shard's `claim_or_login` no longer spawns the
+    // soul. Stays subscribed for the entire scene lifetime.
+    void this.ensureSoul(ctx);
 
     // Once owned-cards is in flight, ask SoulManager to hold an
     // inventory-zone refcount for every owned soul so recipes keep
@@ -171,7 +172,9 @@ export class MainScene extends Scene {
    *  open-inventory globally. */
   private installInputHandlers(ctx: GameContext): void {
     // One panel type now — the most-recently-focused viewport handles both
-    // keys (recenter is a no-op without follow; showGrid is a no-op now).
+    // keys (recenter is a no-op without `follow`; nudgeToGrid only affects
+    // cards whose `looseKind` is LOOSE — SNAP-kind cards already render
+    // centred so there's nothing to nudge).
     const focusedViewport = (): ViewportPanel | null => {
       const p = ctx.panels?.focused("viewport");
       return p instanceof ViewportPanel ? p : null;
@@ -210,13 +213,14 @@ export class MainScene extends Scene {
 
     const releaseKeyDown = this.inputManager.onKey("key_down", ({ code }) => {
       if (code === "KeyE") {
-        focusedViewport()?.showGrid(true);
+        // Snap every LOOSE-kind card in the focused viewport's bucket back to
+        // its cell centre. SNAP-kind cards already render centred so they're
+        // skipped. Local-only — same-bucket visual nudges don't fire
+        // `placeCard` per `shouldSyncPlacement`.
+        focusedViewport()?.nudgeToGrid();
       } else if (code === "Space") {
         focusedViewport()?.recenter();
       }
-    });
-    const releaseKeyUp = this.inputManager.onKey("key_up", ({ code }) => {
-      if (code === "KeyE") focusedViewport()?.showGrid(false);
     });
     const releaseClick = this.inputManager.on("left_click", (data) => {
       const hit = data.up.hit;
@@ -272,7 +276,6 @@ export class MainScene extends Scene {
       releaseFocusClick();
       releaseFocusDrag();
       releaseKeyDown();
-      releaseKeyUp();
       releaseClick();
     };
   }
@@ -374,6 +377,56 @@ export class MainScene extends Scene {
       this.pendingDefaultViewUnsub = null;
     });
     this.pendingDefaultViewUnsub = unsub;
+  }
+
+  /** Open the owned-cards subscription, then — once its initial state has
+   *  applied (`installSubscription` resolves on the SDK's `onApplied`, so
+   *  the initial rows are in `cardsLocal` here) — spawn the player's soul
+   *  if they own none yet. Client-driven signup: shard's `claim_or_login`
+   *  no longer spawns the soul. The spawned soul streams in via this same
+   *  subscription and is picked up by `firstOwnedSoul` / the default soul
+   *  view. One-shot per scene; awaiting on `onApplied` means no premature
+   *  double-spawn. */
+  private async ensureSoul(ctx: GameContext): Promise<void> {
+    await ctx.data.subscriptions.subscribeOwnedCards(this.playerId);
+    // Count the player-owned soul cards we currently see and request the
+    // NEXT index (`count + 1`). The local view can lag the server — rows
+    // land in the `cards` server tier on the subscription's `onApplied`
+    // but only reach `cardsLocal` on a later promote tick — so this count
+    // may read low. That's safe: the `spawn_soul` reducer is the
+    // authority and rejects when the player already owns >= the requested
+    // index, so a stale-low count can never double-spawn. We still skip
+    // the call when we can already see a soul (fast path — avoids a
+    // sure-to-be-rejected round trip).
+    const owned = this.ownedSoulCount(ctx);
+    if (owned > 0) return;
+    try {
+      await ctx.reducers.spawnSoul(this.playerId, owned + 1);
+    } catch (err) {
+      // Rejected when the request raced an existing soul — benign; the
+      // soul we already own streams in via the same subscription.
+      debug.log(
+        ["spacetime"],
+        `[spacetime] spawnSoul(player=${this.playerId}, index=${owned + 1}) rejected: ${String(err)}`,
+        4,
+      );
+    }
+  }
+
+  /** Count the player-owned soul cards currently visible in `cardsLocal`
+   *  (owned-by-player flag + soul card_type). Same predicate as
+   *  `firstOwnedSoul`. May read low when the owned-cards subscription has
+   *  applied but not yet promoted into the local overlay — the server's
+   *  index guard makes that safe. */
+  private ownedSoulCount(ctx: GameContext): number {
+    let n = 0;
+    for (const row of ctx.data.cardsLocal.values()) {
+      if (row.ownerId !== this.playerId) continue;
+      if ((row.flagsState & FLAG_OWNED_BY_PLAYER) === 0) continue;
+      if (((row.packedDefinition >> 12) & 0xf) !== SOUL_CARD_TYPE) continue;
+      n++;
+    }
+    return n;
   }
 
   /** First card the local player owns that is a soul (owned-by-player

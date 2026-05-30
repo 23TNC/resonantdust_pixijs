@@ -67,7 +67,7 @@ export class PlayerManager {
     // Subscribing to a name that doesn't yet exist is fine — the SDK
     // returns an empty initial set, then the upcoming reducer write
     // matches the filter and gets delivered as a row update.
-    await this.data.subscriptions.subscribePlayerByName(name);
+    await this.data.playerSubscriptions.subscribePlayerByName(name);
     this.subscribedName = name;
 
     // Reducer next. Server has either resolved the existing player
@@ -88,7 +88,7 @@ export class PlayerManager {
 
   dispose(): void {
     if (this.subscribedName !== null) {
-      this.data.subscriptions.unsubscribePlayerByName(this.subscribedName);
+      this.data.playerSubscriptions.unsubscribePlayerByName(this.subscribedName);
       this.subscribedName = null;
     }
     this.player = null;

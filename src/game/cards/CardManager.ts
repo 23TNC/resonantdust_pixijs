@@ -374,9 +374,9 @@ export class CardManager {
     if (rootRow) {
       // Land loose on the chain root's own cell, in the root's zone (owner +
       // surface) — grid-agnostic; the viewport renders it hex or rect. If the
-      // root has a within-cell `(x, y)` offset (`forceSnap: false` placement),
-      // inherit it so the evicted card lands visually next to its old root
-      // instead of snapping to the cell centre.
+      // root has a within-cell `(x, y)` offset (LOOSE-kind placement), inherit
+      // it so the evicted card lands visually next to its old root instead of
+      // snapping to the cell centre.
       const rMicro = decodeMicro(rootRow.microLocation, rootRow.flagsBk);
       const localQ = rMicro.kind === "loose" ? rMicro.localQ : 0;
       const localR = rMicro.kind === "loose" ? rMicro.localR : 0;
@@ -589,10 +589,11 @@ export class CardManager {
     } else {
       // Viewport cell drop at `(q, r)`: cell within the chunk + optional
       // within-cell `(offsetX, offsetY)` offset (in pixels, i12 storage —
-      // ±2047). Zero ⇒ centred on the cell (snap). Owner from the viewport —
-      // `0` for the world, a soul/anchor `card_id` for an inventory / mini-
-      // zone bucket. The renderer only applies the offset when the viewport
-      // has `forceSnap: false` AND the card's `looseKind` is `LOOSE_*` (0/1).
+      // ±2047). Owner from the viewport — `0` for the world, a soul/anchor
+      // `card_id` for an inventory / mini-zone bucket. The renderer applies
+      // the offset iff the card's `looseKind` is `LOOSE_*` (0/1); for SNAP
+      // kinds the renderer ignores it, so storing 0/0 is the norm there.
+      // `looseKind` itself comes from `looseKindForSurface(surface)`.
       const zoneQ = Math.floor(state.q / ZONE_SIZE) * ZONE_SIZE;
       const zoneR = Math.floor(state.r / ZONE_SIZE) * ZONE_SIZE;
       macroZone = makeMacroZone(state.owner ?? 0, state.surface ?? WORLD_LAYER, zoneQ, zoneR);

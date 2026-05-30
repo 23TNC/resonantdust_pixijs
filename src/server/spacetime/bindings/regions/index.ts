@@ -34,86 +34,37 @@ import {
 } from "spacetimedb";
 
 // Import all reducer arg schemas
-import AddCardReducer from "./add_card_reducer";
-import BootstrapReducer from "./bootstrap_reducer";
-import ClaimOrLoginReducer from "./claim_or_login_reducer";
-import DeployMiniZoneReducer from "./deploy_mini_zone_reducer";
+import AcquireCardShardReducer from "./acquire_card_shard_reducer";
 import GenerateForestTerrainReducer from "./generate_forest_terrain_reducer";
-import MoveSoulReducer from "./move_soul_reducer";
-import PickupMiniZoneReducer from "./pickup_mini_zone_reducer";
-import PlaceCardReducer from "./place_card_reducer";
-import ProposeActionReducer from "./propose_action_reducer";
-import RequestBlueprintReducer from "./request_blueprint_reducer";
+import ReleaseCardShardReducer from "./release_card_shard_reducer";
 import RequestZoneReducer from "./request_zone_reducer";
-import SetLastLoginReducer from "./set_last_login_reducer";
-import SpawnSoulReducer from "./spawn_soul_reducer";
+import SetTileReducer from "./set_tile_reducer";
 
 // Import all procedure arg schemas
 
 // Import all table schema definitions
-import CardsRow from "./cards_table";
-import PlayerProfilesRow from "./player_profiles_table";
-import PlayersRow from "./players_table";
+import CardShardsRow from "./card_shards_table";
 import RegionsRow from "./regions_table";
-import SoulPrivatesRow from "./soul_privates_table";
-import SoulsRow from "./souls_table";
 import ZonesRow from "./zones_table";
 
 /** Type-only namespace exports for generated type groups. */
 
 /** The schema information for all tables in this module. This is defined the same was as the tables would have been defined in the server. */
 const tablesSchema = __schema({
-  cards: __table({
-    name: 'cards',
+  card_shards: __table({
+    name: 'card_shards',
     indexes: [
-      { accessor: 'card_id', name: 'cards_card_id_idx_btree', algorithm: 'btree', columns: [
-        'cardId',
+      { accessor: 'data_shard', name: 'card_shards_data_shard_idx_btree', algorithm: 'btree', columns: [
+        'dataShard',
       ] },
-      { accessor: 'macro_zone', name: 'cards_macro_zone_idx_btree', algorithm: 'btree', columns: [
-        'macroZone',
-      ] },
-      { accessor: 'micro_location', name: 'cards_micro_location_idx_btree', algorithm: 'btree', columns: [
-        'microLocation',
-      ] },
-      { accessor: 'owner_id', name: 'cards_owner_id_idx_btree', algorithm: 'btree', columns: [
-        'ownerId',
-      ] },
-      { accessor: 'valid_at', name: 'cards_valid_at_idx_btree', algorithm: 'btree', columns: [
+      { accessor: 'valid_at', name: 'card_shards_valid_at_idx_btree', algorithm: 'btree', columns: [
         'validAt',
       ] },
     ],
     constraints: [
-      { name: 'cards_valid_at_key', constraint: 'unique', columns: ['validAt'] },
+      { name: 'card_shards_valid_at_key', constraint: 'unique', columns: ['validAt'] },
     ],
-  }, CardsRow),
-  player_profiles: __table({
-    name: 'player_profiles',
-    indexes: [
-      { accessor: 'player_id', name: 'player_profiles_player_id_idx_btree', algorithm: 'btree', columns: [
-        'playerId',
-      ] },
-    ],
-    constraints: [
-      { name: 'player_profiles_player_id_key', constraint: 'unique', columns: ['playerId'] },
-    ],
-  }, PlayerProfilesRow),
-  players: __table({
-    name: 'players',
-    indexes: [
-      { accessor: 'name', name: 'players_name_idx_btree', algorithm: 'btree', columns: [
-        'name',
-      ] },
-      { accessor: 'player_id', name: 'players_player_id_idx_btree', algorithm: 'btree', columns: [
-        'playerId',
-      ] },
-      { accessor: 'valid_at', name: 'players_valid_at_idx_btree', algorithm: 'btree', columns: [
-        'validAt',
-      ] },
-    ],
-    constraints: [
-      { name: 'players_valid_at_key', constraint: 'unique', columns: ['validAt'] },
-    ],
-  }, PlayersRow),
+  }, CardShardsRow),
   regions: __table({
     name: 'regions',
     indexes: [
@@ -128,34 +79,6 @@ const tablesSchema = __schema({
       { name: 'regions_valid_at_key', constraint: 'unique', columns: ['validAt'] },
     ],
   }, RegionsRow),
-  soul_privates: __table({
-    name: 'soul_privates',
-    indexes: [
-      { accessor: 'card_id', name: 'soul_privates_card_id_idx_btree', algorithm: 'btree', columns: [
-        'cardId',
-      ] },
-    ],
-    constraints: [
-      { name: 'soul_privates_card_id_key', constraint: 'unique', columns: ['cardId'] },
-    ],
-  }, SoulPrivatesRow),
-  souls: __table({
-    name: 'souls',
-    indexes: [
-      { accessor: 'card_id', name: 'souls_card_id_idx_btree', algorithm: 'btree', columns: [
-        'cardId',
-      ] },
-      { accessor: 'owner_id', name: 'souls_owner_id_idx_btree', algorithm: 'btree', columns: [
-        'ownerId',
-      ] },
-      { accessor: 'valid_at', name: 'souls_valid_at_idx_btree', algorithm: 'btree', columns: [
-        'validAt',
-      ] },
-    ],
-    constraints: [
-      { name: 'souls_valid_at_key', constraint: 'unique', columns: ['validAt'] },
-    ],
-  }, SoulsRow),
   zones: __table({
     name: 'zones',
     indexes: [
@@ -180,19 +103,11 @@ const tablesSchema = __schema({
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
-  __reducerSchema("add_card", AddCardReducer),
-  __reducerSchema("bootstrap", BootstrapReducer),
-  __reducerSchema("claim_or_login", ClaimOrLoginReducer),
-  __reducerSchema("deploy_mini_zone", DeployMiniZoneReducer),
+  __reducerSchema("acquire_card_shard", AcquireCardShardReducer),
   __reducerSchema("generate_forest_terrain", GenerateForestTerrainReducer),
-  __reducerSchema("move_soul", MoveSoulReducer),
-  __reducerSchema("pickup_mini_zone", PickupMiniZoneReducer),
-  __reducerSchema("place_card", PlaceCardReducer),
-  __reducerSchema("propose_action", ProposeActionReducer),
-  __reducerSchema("request_blueprint", RequestBlueprintReducer),
+  __reducerSchema("release_card_shard", ReleaseCardShardReducer),
   __reducerSchema("request_zone", RequestZoneReducer),
-  __reducerSchema("set_last_login", SetLastLoginReducer),
-  __reducerSchema("spawn_soul", SpawnSoulReducer),
+  __reducerSchema("set_tile", SetTileReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

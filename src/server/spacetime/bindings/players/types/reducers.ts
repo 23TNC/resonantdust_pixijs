@@ -6,11 +6,11 @@
 import { type Infer as __Infer } from "spacetimedb";
 
 // Import all reducer arg schemas
-import AddCardReducer from "../add_card_reducer";
 import ClaimOrLoginReducer from "../claim_or_login_reducer";
 import SetLastLoginReducer from "../set_last_login_reducer";
+import SetPlayerFactionReducer from "../set_player_faction_reducer";
 
-export type AddCardParams = __Infer<typeof AddCardReducer>;
 export type ClaimOrLoginParams = __Infer<typeof ClaimOrLoginReducer>;
 export type SetLastLoginParams = __Infer<typeof SetLastLoginReducer>;
+export type SetPlayerFactionParams = __Infer<typeof SetPlayerFactionReducer>;
 

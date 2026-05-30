@@ -36,10 +36,6 @@ export interface WorldViewServices {
    *  a grid surface (e.g. inventory rect cells) position themselves with this
    *  rather than re-deriving the grid math. */
   cellToPixel(q: number, r: number): { x: number; y: number };
-  /** `true` ⇒ render + drop loose cards at the cell centre (ignoring their
-   *  within-cell `(x, y)` offset); `false` ⇒ apply the offset for free in-tile
-   *  placement. The viewport-level toggle. */
-  readonly forceSnap: boolean;
 }
 
 /** A `LayoutNode` that provides `WorldViewServices`. The brand lets the card

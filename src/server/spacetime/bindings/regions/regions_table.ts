@@ -12,12 +12,7 @@ import {
 
 export default __t.row({
   validAt: __t.u64().primaryKey().name("valid_at"),
-  dataShard: __t.u16().name("data_shard"),
-  cardId: __t.u32().name("card_id"),
-  ownerId: __t.u32().name("owner_id"),
-  macroZone: __t.u64().name("macro_zone"),
-  microLocation: __t.u32().name("micro_location"),
-  stats: __t.u32(),
-  fatigued: __t.u32(),
-  injured: __t.u32(),
+  macroRegion: __t.u64().name("macro_region"),
+  zonePresence: __t.u64().name("zone_presence"),
+  zoneAvailable: __t.u64().name("zone_available"),
 });

@@ -305,10 +305,20 @@ export function zoneBorn(flagsState: number): boolean {
   return (flagsState & ZONE_BORN) !== 0;
 }
 
-/** Default loose `kind` for a card on `surface` (mirror of `packed.rs`). */
+/** Default placement `kind` for a card landing on `surface`. The per-card
+ *  `stack_state` (bits in `flags_bk`, mirrored here as `looseKind`) is what the
+ *  renderer reads to decide whether to apply the within-cell `(x, y)` offset:
+ *  - `LOOSE_HEX (0)` / `LOOSE_RECT (1)` → renderer applies the offset.
+ *  - `SNAP_HEX  (2)` / `SNAP_RECT  (3)` → renderer ignores the offset (centred).
+ *
+ *  Hardcoded for now: **world / mini-zone snap to the hex centre** (no free
+ *  placement on tiles); **inventories use rect with the offset** (arbitrary
+ *  in-cell placement). Soft-code via per-bucket config later.
+ *
+ *  Mirror of `packed.rs::loose_kind_for_surface`. */
 export function looseKindForSurface(surface: number): number {
   return surface >= WORLD_LAYER || surface === MINI_ZONE_LAYER
-    ? LOOSE_HEX
+    ? SNAP_HEX
     : LOOSE_RECT;
 }
 

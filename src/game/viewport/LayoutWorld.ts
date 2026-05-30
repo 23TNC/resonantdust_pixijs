@@ -234,12 +234,6 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
    *  to chunk `(0,0)` (0..7 per axis). False for the world, which tiles
    *  infinitely across chunks as the viewport pans. */
   readonly singleChunk: boolean;
-  /** When `true` (default), `LOOSE_HEX`/`LOOSE_RECT` cards render at the cell
-   *  centre and drops snap to it — the i12 `(x, y)` within-cell offset in
-   *  `micro_location` is ignored. When `false`, the offset is applied (free
-   *  in-tile placement). Exposed on `WorldViewServices` so cards + the drop
-   *  resolver can read it without re-walking the parent chain. */
-  readonly forceSnap: boolean;
 
 
   constructor(
@@ -263,9 +257,6 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
       owner?: number;
       /** Clamp drops to a single chunk `(0,0)` (inventory / mini-zone). */
       singleChunk?: boolean;
-      /** Force `LOOSE_*` cards to render + drop at the cell centre (snap),
-       *  ignoring their `(x, y)` offset. Defaults to `true`. */
-      forceSnap?: boolean;
     } = {},
   ) {
     super();
@@ -274,7 +265,6 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
     this.originTopLeft = (opts.origin ?? "center") === "topleft";
     this.owner = opts.owner ?? 0;
     this.singleChunk = opts.singleChunk ?? false;
-    this.forceSnap = opts.forceSnap ?? true;
     // Seed our own context immediately. The constructor builds the
     // `ZoneTileCache` (which reads `ctx.data`) before this node is attached to
     // a parent, so the parent-chain `ctx` getter has nothing to resolve

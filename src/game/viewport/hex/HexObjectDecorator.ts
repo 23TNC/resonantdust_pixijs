@@ -520,9 +520,16 @@ export class HexObjectDecorator {
         sx = centerX + Math.cos(angle) * ringRadius;
       }
 
-      const t = hash(q, r, INSTANCE_SCALE_SEED_BASE + i) / 0x1_0000_0000;
+      // Ring-instance seeds use `BASE + i + 1` — the `+1` reserves `BASE + 0`
+      // for the centre (see `collectTileObjectReqs`'s identical computation).
+      // Without the `+1` here the overlay's first ring instance would collide
+      // with the centre's seed band AND every ring instance would pick a
+      // different LOD variant / scale variance than the world surface drew,
+      // so the overlay sprites visibly wouldn't match the world sprites at
+      // the same (q, r).
+      const t = hash(q, r, INSTANCE_SCALE_SEED_BASE + i + 1) / 0x1_0000_0000;
       const variance = tex.scale.min + t * (tex.scale.max - tex.scale.min);
-      const seed = hash(q, r, INSTANCE_TEX_SEED_BASE + i);
+      const seed = hash(q, r, INSTANCE_TEX_SEED_BASE + i + 1);
       // `LodTextureManager.get` always returns a Texture (substitute
       // / white fallback covers load-pending). Sprite scale =
       // `(desiredSize / objTex.width) × variance` so the rendered

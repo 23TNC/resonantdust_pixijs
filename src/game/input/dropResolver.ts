@@ -13,6 +13,7 @@ import type { GameContext } from "../../GameContext";
 import type { LayoutNode } from "../layout/LayoutNode";
 import {
   INVENTORY_LAYER,
+  looseKindForSurface,
   makeMacroZone,
   microLooseCell,
   WORLD_LAYER,
@@ -158,7 +159,20 @@ export function resolveRectDrop(c: DropContext): DropIntent {
     };
   }
 
-  // 3/4. No target, no viewport → fallback
+  // 3. Cursor IS over a viewport but the resolved cell has no Zone row (i.e.
+  //    `resolveWorldDropCoords` rejected the off-map cell). Reject directly —
+  //    don't fall through to `resolveFallback`'s loose-in-source path, which
+  //    would compute `(x, y) = cursor − sourceSurface − grab`. If the cursor
+  //    is over a DIFFERENT surface than the source (e.g. inventory card
+  //    dragged onto a no-zone world cell), those coordinates put the card
+  //    far outside the source surface's bounds — the card vanishes
+  //    off-screen instead of snapping back. The rejection here makes the
+  //    drag-stop animation tween the card back to its origin.
+  if (findLayoutWorldInChain(c.up.hit) !== null) {
+    return { kind: "rejected", reason: "drop cell has no zone (off the map)" };
+  }
+  // 4. No viewport hit at all (cursor over chrome — chat / details panel). The
+  //    fallback's `isDroppableHit` check handles the rejection cleanly there.
   return resolveFallback(c);
 }
 
@@ -496,20 +510,58 @@ function resolveWorldDropCoords(
     q = Math.max(0, Math.min(7, q));
     r = Math.max(0, Math.min(7, r));
   }
-  // Within-cell offset for arbitrary placement. Preserve the drag's visual
-  // continuity: during drag the card top-left tracks `cursor - grabPoint`
-  // (where `(c.offsetX, c.offsetY)` is the cursor→card-top-left offset at
-  // drag start), so the card's *centre* is at `cursor - grab + halfCard`.
-  // We want the card to land where the user released it — its centre at the
-  // same position — which means the offset from the cell centre is:
-  //     offset = (cursor − grab + halfCard) − cellCentre
-  // Without the grab term, the card snaps so its centre lands under the
-  // cursor regardless of where on the card you grabbed it (visual jump).
-  // Zero when `forceSnap` is on; clamped to i12 (the `micro_location.x/y`
-  // storage width — world hexes are ~96px radius, well within the limit).
+  // Reject drops onto any cell whose containing Zone row hasn't been
+  // provisioned / subscribed — both the multi-chunk "off the map" world
+  // case AND the single-chunk "inventory bucket with no Zone" case. A
+  // `macroZone` address by itself isn't enough; the bucket has to have an
+  // actual Zone row backing it. Returning `null` falls through to the
+  // `findLayoutWorldInChain` reject at the top of `resolveRectDrop`,
+  // which produces the snap-back animation. Linear-scan over
+  // `data.zones.current` (only subscribed zones, few hundred at most).
+  const chunkQ = Math.floor(q / ZONE_SIZE) * ZONE_SIZE;
+  const chunkR = Math.floor(r / ZONE_SIZE) * ZONE_SIZE;
+  const targetMacro = makeMacroZone(view.owner, view.surface, chunkQ, chunkR).packed;
+  let zoneExists = false;
+  for (const z of c.ctx.data.zones.current.values()) {
+    if (z.macroZone.packed === targetMacro) { zoneExists = true; break; }
+  }
+  if (!zoneExists) {
+    // Dump the comparison so a stuck inventory drop is debuggable. Print the
+    // target the resolver wants vs every subscribed zone — if the row IS in
+    // `current` but the packed key doesn't match, the bug is in `makeMacroZone`
+    // vs the server's packing (parity). If the row simply isn't there, the
+    // subscription / region gate isn't delivering it yet.
+    const presentMacros = [...c.ctx.data.zones.current.values()]
+      .map((z) => `${z.macroZone.packed}(o=${z.macroZone.owner},s=${z.macroZone.surface},q=${z.macroZone.zoneQ},r=${z.macroZone.zoneR})`)
+      .join(", ");
+    const presentRegions = [...c.ctx.data.regions.current.values()]
+      .map((rg) => `${rg.macroRegion}(p=${rg.zonePresence},a=${rg.zoneAvailable})`)
+      .join(", ");
+    debug.warn(
+      ["drag"],
+      `[drop] reject — no zone matches target=${targetMacro} ` +
+        `(owner=${view.owner} surface=${view.surface} chunk=${chunkQ},${chunkR} cell=${q},${r}). ` +
+        `zones.current has [${presentMacros}]. ` +
+        `regions.current has [${presentRegions}].`,
+    );
+    return null;
+  }
+  // Within-cell offset for arbitrary placement. Computed only when the
+  // *destination kind* for this surface is LOOSE (`LOOSE_HEX`/`LOOSE_RECT`);
+  // for SNAP destinations (`SNAP_HEX`/`SNAP_RECT`) we leave the offset at 0
+  // because the renderer would ignore it anyway. The card-to-cursor math
+  // preserves drag visual continuity: during drag the card top-left tracks
+  // `cursor − grabPoint` (where `(c.offsetX, c.offsetY)` is the cursor →
+  // card-top-left offset at drag start), so the card's centre sits at
+  // `cursor − grab + halfCard`. We want the card to land where it was
+  // visually — centre at the same screen point — so the offset from the
+  // cell centre is `(cursor − grab + halfCard) − cellCentre`. Clamped to
+  // i12 (the `micro_location.x/y` storage width).
   let offsetX = 0;
   let offsetY = 0;
-  if (!view.forceSnap) {
+  const destKind = looseKindForSurface(view.surface);
+  const destIsLoose = (destKind & 0b10) === 0;
+  if (destIsLoose) {
     const cellCenter = view.worldToLocal(q, r);
     const halfW = c.card.layoutCard.width / 2;
     const halfH = c.card.layoutCard.height / 2;
@@ -715,8 +767,8 @@ function buildPlacement(
       const localQ = intent.q - zoneQ;
       const localR = intent.r - zoneR;
       // Pack the within-cell offset into the wire `xy` u32 (same shape the
-      // inventory arm uses): high u16 = x, low u16 = y. Zero when the source
-      // viewport's `forceSnap` was on (resolver left offsets undefined).
+      // inventory arm uses): high u16 = x, low u16 = y. Zero when the
+      // destination surface's kind is SNAP (the resolver left offsets at 0).
       const ox = intent.offsetX ?? 0;
       const oy = intent.offsetY ?? 0;
       const clampedX = Math.max(I16_MIN, Math.min(I16_MAX, ox));

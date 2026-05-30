@@ -71,10 +71,11 @@ export type CardPositionState =
        *  an inventory / mini-zone bucket. The viewport supplies it. */
       owner?: number;
       /** Within-cell pixel offset from cell centre (i12, clamped to ±2047).
-       *  Defaults to `0` ⇒ snap. Set by the drop resolver to the cursor's
-       *  pixel delta from the cell centre when the viewport has
-       *  `forceSnap: false`. Stored in `micro_location.x/y`; the renderer
-       *  applies it iff `looseKind` is `LOOSE_HEX`/`LOOSE_RECT`. */
+       *  Defaults to `0`. Set by the drop resolver when the destination
+       *  surface's kind is LOOSE (per `looseKindForSurface`); ignored
+       *  (effectively zero) when the kind is SNAP. Stored in
+       *  `micro_location.x/y`; the renderer applies it iff `looseKind` is
+       *  `LOOSE_HEX`/`LOOSE_RECT`. */
       offsetX?: number;
       offsetY?: number;
     };

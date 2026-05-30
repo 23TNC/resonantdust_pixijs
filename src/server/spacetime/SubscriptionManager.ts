@@ -10,8 +10,6 @@ import { DbConnection as ShardDbConnection } from "./bindings/shard";
 // narrowed `number` row types live in `./bindings/types` for game code.
 import type {
   Card,
-  Player,
-  PlayerProfile,
   Region,
   Soul,
   SoulPrivate,
@@ -25,10 +23,8 @@ export type { TableHandlers };
 /** Maps server table names (shard module only) to their row types. */
 type ShardTableRowMap = {
   cards: Card;
-  players: Player;
   souls: Soul;
   soul_privates: SoulPrivate;
-  player_profiles: PlayerProfile;
   zones: Zone;
   regions: Region;
 } & Record<string, unknown>;
@@ -69,19 +65,6 @@ export class SubscriptionManager extends SubscriptionBase<
       this.fanOut("cards", "onDelete", (h) => h.onDelete?.(row));
     });
 
-    conn.db.players.onInsert((ctx, row) => {
-      this.captureReducerTimestamp(ctx);
-      this.fanOut("players", "onInsert", (h) => h.onInsert?.(row));
-    });
-    conn.db.players.onUpdate((ctx, oldRow, newRow) => {
-      this.captureReducerTimestamp(ctx);
-      this.fanOut("players", "onUpdate", (h) => h.onUpdate?.(oldRow, newRow));
-    });
-    conn.db.players.onDelete((ctx, row) => {
-      this.captureReducerTimestamp(ctx);
-      this.fanOut("players", "onDelete", (h) => h.onDelete?.(row));
-    });
-
     conn.db.souls.onInsert((ctx, row) => {
       this.captureReducerTimestamp(ctx);
       this.fanOut("souls", "onInsert", (h) => h.onInsert?.(row));
@@ -106,19 +89,6 @@ export class SubscriptionManager extends SubscriptionBase<
     conn.db.soul_privates.onDelete((ctx, row) => {
       this.captureReducerTimestamp(ctx);
       this.fanOut("soul_privates", "onDelete", (h) => h.onDelete?.(row));
-    });
-
-    conn.db.player_profiles.onInsert((ctx, row) => {
-      this.captureReducerTimestamp(ctx);
-      this.fanOut("player_profiles", "onInsert", (h) => h.onInsert?.(row));
-    });
-    conn.db.player_profiles.onUpdate((ctx, oldRow, newRow) => {
-      this.captureReducerTimestamp(ctx);
-      this.fanOut("player_profiles", "onUpdate", (h) => h.onUpdate?.(oldRow, newRow));
-    });
-    conn.db.player_profiles.onDelete((ctx, row) => {
-      this.captureReducerTimestamp(ctx);
-      this.fanOut("player_profiles", "onDelete", (h) => h.onDelete?.(row));
     });
 
     conn.db.zones.onInsert((ctx, row) => {
@@ -171,18 +141,6 @@ export class SubscriptionManager extends SubscriptionBase<
 
   unsubscribeOwnedCards(ownerId: number): void {
     this.removeSubscription(`cards:owner:${ownerId}`);
-  }
-
-  async subscribePlayerByName(name: string): Promise<void> {
-    const escaped = name.replace(/'/g, "''");
-    return this.installSubscription(`player:name:${name}`, {
-      queries: [`SELECT * FROM players WHERE name = '${escaped}'`],
-      scopeKey: `name:${name}`,
-    });
-  }
-
-  unsubscribePlayerByName(name: string): void {
-    this.removeSubscription(`player:name:${name}`);
   }
 
   async subscribeWorldZone(key: ZoneId): Promise<void> {
@@ -288,19 +246,4 @@ export class SubscriptionManager extends SubscriptionBase<
     this.removeSubscription(`soul_private:${cardId}`);
   }
 
-  /** Subscribe to the per-player profile row for `playerId`. Mirrors
-   *  the `subscribeSoulPrivate` pattern — the table is `public` but
-   *  each client only queries its own row, so per-player
-   *  progression (`blueprints_0`, `blueprint_info`, …) doesn't fan
-   *  out to other players' clients via the world subscriptions. */
-  async subscribePlayerProfile(playerId: number): Promise<void> {
-    return this.installSubscription(`player_profile:${playerId}`, {
-      queries: [`SELECT * FROM player_profiles WHERE player_id = ${playerId}`],
-      scopeKey: `player_profile:${playerId}`,
-    });
-  }
-
-  unsubscribePlayerProfile(playerId: number): void {
-    this.removeSubscription(`player_profile:${playerId}`);
-  }
 }

@@ -126,6 +126,13 @@ export class ZoneManager {
    *  unavailable zone isn't re-requested on every region update. Cleared when
    *  the zone stops being wanted. */
   private readonly requested = new Set<ZoneId>();
+  /** Zones whose row currently lives in `data.zones.current` — fed by
+   *  `noteZoneArrived` / `noteZoneDeparted` from `main.ts`. Used as the
+   *  authoritative "did the row land" signal in `effectiveClassFor`, so a
+   *  region whose `zone_available` bit got out of sync with the actual
+   *  Zones table (e.g. zones wiped while the region row persisted) still
+   *  triggers a fresh `request_zone` on next viewport open. */
+  private readonly arrivedZones = new Set<ZoneId>();
   /** The query class last emitted to the SDK per zone (the *gated* result, vs
    *  the *desired* class derived from the tier). Absent = `none`. */
   private readonly emitted = new Map<ZoneId, QueryClass>();
@@ -365,6 +372,25 @@ export class ZoneManager {
     for (const zoneId of [...set]) this.reconcileSubscription(zoneId);
   }
 
+  /** Mark `zoneId`'s row as present in `data.zones.current`. Clears any
+   *  pending `requested` flag for it — the request has been fulfilled
+   *  (or the row was already there). Wired by `main.ts` from the
+   *  `data.zones` subscription so the row's arrival is the authoritative
+   *  signal in `effectiveClassFor` (alongside the region's `available`
+   *  bit). */
+  noteZoneArrived(zoneId: ZoneId): void {
+    this.arrivedZones.add(zoneId);
+    this.requested.delete(zoneId);
+  }
+
+  /** Mark `zoneId`'s row as gone from `data.zones.current`. Also clears
+   *  `requested` so that if the zone is still wanted, `effectiveClassFor`
+   *  re-requests it on the next reconcile. */
+  noteZoneDeparted(zoneId: ZoneId): void {
+    this.arrivedZones.delete(zoneId);
+    this.requested.delete(zoneId);
+  }
+
   // ── Region gate internals ────────────────────────────────────────────────
 
   /** True iff `zoneId`'s surface is region-gated: the world layer or a soul's
@@ -437,7 +463,15 @@ export class ZoneManager {
     if (!bits) return "none"; // region not loaded (or no row) → defer / doesn't exist
     const mask = 1n << BigInt(bit);
     if ((bits.presence & mask) === 0n) return "none"; // not present → can't exist
-    if ((bits.available & mask) === 0n && !this.requested.has(zoneId)) {
+    // Request when EITHER the region's `available` bit is clear (zone hasn't
+    // been spawned yet) OR the row genuinely isn't in `data.zones.current`
+    // (state drift — e.g. the Zones table got wiped while the Region row
+    // persisted, so the bit is stale). `requested` rate-limits to one
+    // request per zone per session; `noteZoneArrived` clears it on row
+    // delivery so a subsequent removal + desire round-trip re-requests.
+    const bitClear = (bits.available & mask) === 0n;
+    const rowMissing = !this.arrivedZones.has(zoneId);
+    if ((bitClear || rowMissing) && !this.requested.has(zoneId)) {
       this.requested.add(zoneId);
       this.fireZoneRequest(zoneId);
     }
@@ -573,6 +607,7 @@ export class ZoneManager {
     this.regionBits.clear();
     this.regionWanted.clear();
     this.requested.clear();
+    this.arrivedZones.clear();
     this.emitted.clear();
     this.anchors.clear();
     this.anchorListeners.clear();

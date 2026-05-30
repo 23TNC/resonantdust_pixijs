@@ -126,9 +126,18 @@ export class ParticleManager extends LayoutNode {
    */
   async init(): Promise<void> {
     if (this._initPromise) return this._initPromise;
-    this._initPromise = Assets.load<Texture>(DEFAULT_TEXTURE_URL).then(tex => {
-      this._defaultTexture = tex;
-    });
+    // Catch the load rejection inline so a transient `fetch` failure
+    // (network blip / dev-server stall) doesn't surface as an uncaught
+    // rejection — `MainScene.onEnter` fire-and-forgets via `void`.
+    // `_defaultTexture` stays `null` on failure; `spawn` falls back to
+    // `Texture.WHITE` so particles still render, just textureless.
+    this._initPromise = Assets.load<Texture>(DEFAULT_TEXTURE_URL)
+      .then(tex => {
+        this._defaultTexture = tex;
+      })
+      .catch(err => {
+        debug.warn(["particles"], `[particles] failed to load default texture ${DEFAULT_TEXTURE_URL}: ${err instanceof Error ? err.message : String(err)}`);
+      });
     return this._initPromise;
   }
 

@@ -227,6 +227,18 @@ async function main(): Promise<Runtime> {
       else debug.log(["spacetime"], "[spacetime] chat disconnected", 4);
     },
   });
+  connections.players.addListener({
+    onConnected: (_conn, identity) => {
+      debug.log(["spacetime"], `[spacetime] players connected as ${identity.toHexString()}`, 4);
+    },
+    onConnectError: (error: Error) => {
+      console.error("[spacetime] players connect error", error);
+    },
+    onDisconnected: (error?: Error) => {
+      if (error) debug.warn(["spacetime"], `[spacetime] players disconnected ${String(error)}`, 4);
+      else debug.log(["spacetime"], "[spacetime] players disconnected", 4);
+    },
+  });
   const data = new DataManager(connections, reducers, definitions);
 
   // Per-frame promote: lifts elapsed `valid_at` rows from each table's
@@ -302,6 +314,16 @@ async function main(): Promise<Runtime> {
     else feedRegion(c.kind === "added" ? c.row : c.newRow);
   });
 
+  // Track Zone-row arrivals/departures so `effectiveClassFor` can use the
+  // authoritative "is the row actually here?" signal alongside the region's
+  // `zone_available` bit — heals state drift where the bit got set without
+  // the row (e.g. zones wiped while the region row persisted in dev).
+  for (const z of data.zones.current.values()) zones.noteZoneArrived(z.macroZone.packed);
+  data.zones.subscribe((c) => {
+    if (c.kind === "removed") zones.noteZoneDeparted(c.oldRow.macroZone.packed);
+    else zones.noteZoneArrived((c.kind === "added" ? c.row : c.newRow).macroZone.packed);
+  });
+
   const playerSession = new PlayerManager(reducers, data);
   const souls = new SoulManager(playerSession, data, zones);
 
@@ -315,7 +337,7 @@ async function main(): Promise<Runtime> {
       // discovery bitfield. One-off install per login (the row is
       // keyed by player_id and the SDK dedupes by subscription
       // name).
-      void data.subscriptions.subscribePlayerProfile(player.playerId);
+      void data.playerSubscriptions.subscribePlayerProfile(player.playerId);
     }
   });
 
@@ -330,14 +352,20 @@ async function main(): Promise<Runtime> {
   // event and re-seeds the window. `setLastLogin` is grace-exempt
   // server-side (see `players::set_last_login`) so a stale-capture
   // submission won't be rejected.
-  connections.shard.addListener({
+  const reconnectResync = {
     onConnected: () => {
       if (!playerSession.isLoggedIn()) return;
       void reducers.setLastLogin().catch((err) => {
         debug.warn(["spacetime"], `[spacetime] reconnect setLastLogin failed: ${String(err)}`, 4);
       });
     },
-  });
+  };
+  // Re-seed the clock window on a mid-session reconnect of either DB.
+  // `setLastLogin` dual-routes (players + shard); the players row write is
+  // the canonical `Reducer`-tagged re-sync. Each connection reconnects
+  // independently, so both listen (idempotent if they reconnect together).
+  connections.shard.addListener(reconnectResync);
+  connections.players.addListener(reconnectResync);
 
   // RTT is measured by bookending `performance.now()` around every
   // shard reducer call inside `ReducerManager`. Each user action
