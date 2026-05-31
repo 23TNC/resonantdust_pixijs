@@ -1,6 +1,6 @@
 /**
  * Parsed representation of the server's `magnetic_blocked:` error
- * response, returned from `proposeAction` / `addCard` / `deployMiniZone`
+ * response, returned from `proposeAction` / `addCard`
  * when the caller has expired magnetic actions that haven't been
  * resolved.
  *

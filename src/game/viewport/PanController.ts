@@ -77,7 +77,7 @@ export class PanController {
   surface: number;
 
   /** Zone owner band this controller's anchor pins to — `0` for the world, a
-   *  soul/anchor `card_id` for an inventory / mini-zone bucket. Threaded into
+   *  soul `card_id` for an inventory bucket. Threaded into
    *  every `setAnchor` so the panned viewport subscribes ITS owner's chunks. */
   private readonly owner: number;
 
@@ -177,10 +177,21 @@ export class PanController {
       // Subtract: the grid moves with the cursor, so the viewport
       // anchor (which stays fixed under the cursor's start point)
       // shifts opposite to the cursor's pixel drag.
+      const newQ = this.startViewQ - dq;
+      const newR = this.startViewR - dr;
+      // Server-declared-presence pan gate: the anchor sits at the screen
+      // centre, so refusing to move it into a macro_zone the region marks
+      // `!present` keeps real terrain on screen — you can't pan into the
+      // void. The delta is recomputed absolutely from the gesture start
+      // each frame, so a rejected frame simply leaves the anchor put;
+      // dragging back toward a present zone resumes panning with no drift.
+      if (!this.ctx.zones.panTargetPresent(this.surface, this.owner, newQ, newR)) {
+        return;
+      }
       this.ctx.zones.setAnchor(
         this.viewportAnchorName,
-        this.startViewQ - dq,
-        this.startViewR - dr,
+        newQ,
+        newR,
         this.surface,
         this.owner,
       );

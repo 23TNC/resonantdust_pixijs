@@ -392,24 +392,7 @@ export class DataManager {
     this.unsubMirror.push(
       this.zones.subscribe((c) => this.mirror(this.zonesLocal, c)),
     );
-    // Track visible mini_zone anchor cards and subscribe to each
-    // anchor's `(surface=63, macro_zone=card_id)` channel so the
-    // mini_zone's Zone row + cards on its tiles come into the
-    // server-tier mirror automatically. Watches the cards table on
-    // every server push: anchors entering the visible-world
-    // subscription set get a mini_zone subscription installed;
-    // anchors leaving (card removed, type changed, moved off
-    // WORLD_LAYER) get unsubscribed. The set is keyed on card_id;
-    // an anchor still in the set across multiple promote events
-    // stays subscribed without churn.
-    this.unsubMirror.push(this.cards.subscribe((c) => this.trackMiniZoneAnchor(c)));
   }
-
-  /** card_ids of anchor cards we currently hold a mini_zone
-   *  subscription for. Adds when an anchor enters the visible
-   *  world chunks; removes when it leaves. Maintained by
-   *  `trackMiniZoneAnchor`. */
-  private readonly subscribedMiniZones = new Set<number>();
 
   /** Write a row into the local cards overlay and fire the local-cards
    *  listeners (added/updated as appropriate). Server is still
@@ -668,83 +651,33 @@ export class DataManager {
    *  client-only cards in the same `(root_id, direction)` group
    *  whose position ≥ the forced one by +1 — they "stack after" the
    *  server's confirmed position. */
-  /** Watch the cards mirror for `mini_zone`-type anchor cards
-   *  entering / leaving the visible-world subscription set.
+  /** Walk `startOwnerId` up the `ownerId` chain in `cardsLocal` until a
+   *  `card_type == soul` card is found, returning its `card_id`. `null`
+   *  when the walk terminates without one (chain reaches the world via
+   *  `ownerId === 0`, hits a missing parent due to a subscription gap, or
+   *  trips `OWNER_WALK_DEPTH_CAP`).
    *
-   *  Membership rule: a card is a "visible mini_zone anchor" iff
-   *  it's present in `cards.server` at `surface = WORLD_LAYER`
-   *  with a `card_type == mini_zone` definition. (Membership in
-   *  `cards.server` is what the world-zone subscription drives —
-   *  rows arrive when a chunk is subscribed and depart when it's
-   *  released.)
-   *
-   *  On membership change we install / drop the
-   *  `(surface=63, macro_zone=card_id)` subscription that fetches
-   *  the mini_zone's Zone tile bytes plus any cards on its tiles.
-   *
-   *  Known v1 limitation: this fires on every cards-table push for
-   *  every card, not just anchors — cheap (one card-type decode)
-   *  but not free. A more efficient design would maintain a
-   *  per-card-type index in `ValidAtTable`. Defer until profiling
-   *  warrants it.
-   */
-  /** Walk `startOwnerId` up the `ownerId` chain in `cardsLocal`
-   *  until a card carrying `FLAG_OWNED_BY_PLAYER` (i.e. a soul) is
-   *  found. Returns the soul's `card_id`, or `null` when the walk
-   *  terminates without finding one (chain reaches the world via
-   *  `ownerId === 0`, hits a missing parent due to a subscription
-   *  gap, or trips `OWNER_WALK_DEPTH_CAP`).
-   *
-   *  Mirrors `permissions::owningSoul`'s server-side walk shape but
-   *  is duplicated here to avoid a `permissions.ts → GameContext →
-   *  DataManager → permissions.ts` import cycle. Both walks read the
-   *  same overlay so they agree.
+   *  Mirrors `permissions::owningSoul`'s walk but is duplicated here to
+   *  avoid a `permissions.ts → GameContext → DataManager → permissions.ts`
+   *  import cycle. Both read the same overlay so they agree. Souls are
+   *  identified by card_type, NOT `is_owned_by_player` — that flag marks
+   *  only the player-boundary `player_soul`, while the inventory bucket we
+   *  want is the nearest *rendered* soul (e.g. a `human` two hops below
+   *  the player_soul).
    *
    *  Used by `mirrorCard`'s orphan-slot fallback to figure out which
-   *  soul's inventory an orphaned chain card should land in.
-   *  Previously the fallback assumed `ownerId == soul.cardId`
-   *  (the pre-Phase-5 inventory-bucket pun); now ownership is
-   *  independent of position so the walk is necessary. */
+   *  soul's inventory an orphaned chain card should land in. */
   private findOwningSoulId(startOwnerId: number): number | null {
     let cur = startOwnerId;
     for (let i = 0; i < OWNER_WALK_DEPTH_CAP; i++) {
       if (cur === 0) return null;
       const row = this.cardsLocal.get(cur);
       if (!row) return null;
-      if ((row.flagsState & FLAG_OWNED_BY_PLAYER) !== 0) return cur;
+      if (this.definitions.isCardType(row.packedDefinition, "soul")) return cur;
       if (row.ownerId === 0) return null;
       cur = row.ownerId;
     }
     return null;
-  }
-
-  private trackMiniZoneAnchor(change: TableChange<Card>): void {
-    const cardId = change.key;
-    const isAnchorNow =
-      change.kind !== "removed"
-      && (change.kind === "added" ? change.row : change.newRow).macroZone.surface === WORLD_LAYER
-      && this.definitions.isCardType(
-        (change.kind === "added" ? change.row : change.newRow).packedDefinition,
-        "mini_zone",
-      );
-    const wasAnchor = this.subscribedMiniZones.has(cardId);
-
-    if (isAnchorNow && !wasAnchor) {
-      this.subscribedMiniZones.add(cardId);
-      void this.subscriptions.subscribeMiniZone(cardId).catch((err) => {
-        // Subscription install can fail (disconnect, malformed query).
-        // Drop the tracking entry so a later retry can re-install.
-        this.subscribedMiniZones.delete(cardId);
-        debug.log(
-          ["spacetime"],
-          `[spacetime] subscribeMiniZone(${cardId}) failed: ${err instanceof Error ? err.message : String(err)}`,
-          4,
-        );
-      });
-    } else if (!isAnchorNow && wasAnchor) {
-      this.subscribedMiniZones.delete(cardId);
-      this.subscriptions.unsubscribeMiniZone(cardId);
-    }
   }
 
   private mirrorCard(change: TableChange<Card>): void {
@@ -831,8 +764,8 @@ export class DataManager {
     // never render correctly. Force back to owner-inventory loose
     // (macroZone = owning soul, surface = 1, state = STACKED_LOOSE)
     // so the card is visible and recoverable. The macroZone (inventory
-    // bucket) is resolved by walking the owner chain to find a card
-    // with FLAG_OWNED_BY_PLAYER — see `findOwningSoulId` below — since
+    // bucket) is resolved by walking the owner chain to the nearest
+    // `card_type == soul` — see `findOwningSoulId` below — since
     // post ownership/position split `ownerId` may point at another
     // rect rather than directly at the soul. Same recovery shape that
     // `CardManager.releaseSlotDescendants` uses on the splice path.

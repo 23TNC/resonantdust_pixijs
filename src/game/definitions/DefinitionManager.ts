@@ -333,7 +333,7 @@ export class DefinitionManager {
     return wasmCardFlagFieldValueIn(field, host, name);
   }
 
-  /** Look up a `card_type` id by name (e.g. `"mini_zone"`, `"soul"`).
+  /** Look up a `card_type` id by name (e.g. `"soul"`, `"tile"`).
    *  Returns `undefined` for unknown names. Source of truth is
    *  `content/cards/types.json`. Used to branch on card type
    *  without hard-coding numeric ids. */

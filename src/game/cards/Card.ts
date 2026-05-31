@@ -31,13 +31,9 @@ export type StackDirection = "top" | "bottom" | "hex";
  *  hex-bearing surface. */
 export type CardPositionState =
   | { kind: "loose"; x: number; y: number }
-  /** Inventory placement: `soulCardId` is the bucket address.
-   *
-   *  - **Soul inventory** (default, `surface == INVENTORY_LAYER`):
-   *    `soulCardId` is the owning soul's `card_id`.
-   *  - **Player inventory** (`surface == PLAYER_INVENTORY_LAYER`):
-   *    `soulCardId` is the owning `player_id`. Name kept for
-   *    legacy reasons; the field is just the bucket's macro_zone.
+  /** Inventory placement: `soulCardId` is the bucket address — the owning
+   *  soul's `card_id` (`surface == INVENTORY_LAYER`). A player's own inventory
+   *  is just their `player_soul` card's inventory; there's no separate bucket.
    *
    *  `owner_id` is independent of position and is NOT changed by
    *  inventory placement. */
@@ -46,8 +42,7 @@ export type CardPositionState =
       soulCardId: number;
       x: number;
       y: number;
-      /** Defaults to `INVENTORY_LAYER (1)` for back-compat. Pass
-       *  `PLAYER_INVENTORY_LAYER (2)` for the player-wide bucket. */
+      /** Defaults to `INVENTORY_LAYER (1)`. */
       surface?: number;
     }
   /** Place loose at rect-grid cell `(q, r)` within the CURRENT container
@@ -55,20 +50,16 @@ export type CardPositionState =
    *  occupancy — `q, r` are local cell coords (0-7), not global. */
   | { kind: "cell"; q: number; r: number }
   | { kind: "stacked"; parentId: number; direction: StackDirection }
-  /** World / hex-grid placement. `q, r` are global axial coords.
-   *
-   *  - **Overworld** (default, `surface == WORLD_LAYER`).
-   *  - **Mini-zone** (`surface == MINI_ZONE_LAYER`). `(q, r)` are
-   *    still global axial coords; the converter floors to chunk
-   *    origin the same way as world. */
+  /** World / hex-grid placement. `q, r` are global axial coords on the
+   *  overworld (`surface == WORLD_LAYER`). */
   | {
       kind: "world";
       q: number;
       r: number;
-      /** Defaults to `WORLD_LAYER (64)` for back-compat. */
+      /** Defaults to `WORLD_LAYER (64)`. */
       surface?: number;
-      /** Zone owner band — `0` (world) by default; a soul/anchor `card_id` for
-       *  an inventory / mini-zone bucket. The viewport supplies it. */
+      /** Zone owner band — `0` (world) by default; a soul `card_id` for
+       *  an inventory bucket. The viewport supplies it. */
       owner?: number;
       /** Within-cell pixel offset from cell centre (i12, clamped to ±2047).
        *  Defaults to `0`. Set by the drop resolver when the destination

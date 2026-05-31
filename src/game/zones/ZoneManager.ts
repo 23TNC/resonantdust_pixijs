@@ -1,5 +1,5 @@
-import { type ZoneId, INVENTORY_LAYER, makeMacroZone, PLAYER_INVENTORY_LAYER, regionOfZone } from "../../server/data/packing";
-import { chunksAroundAnchor, WORLD_LAYER } from "../viewport/worldCoords";
+import { type ZoneId, INVENTORY_LAYER, makeMacroZone, regionOfZone } from "../../server/data/packing";
+import { chunksAroundAnchor, WORLD_LAYER, ZONE_SIZE } from "../viewport/worldCoords";
 
 /**
  * Subscription/render tier for a tracked zone, in a demotion-only distance
@@ -60,7 +60,7 @@ export interface WorldAnchor {
   readonly r: number;
   readonly surface: number;
   /** Zone owner band the anchor's chunks belong to — `0` for the world
-   *  (default), a soul/anchor `card_id` for an inventory / mini-zone bucket.
+   *  (default), a soul `card_id` for an inventory bucket.
    *  `recomputeAnchorZones` packs this into the subscribed zone ids so a
    *  non-world viewport subscribes ITS owner's chunks, not owner 0's. */
   readonly owner: number;
@@ -113,11 +113,9 @@ export class ZoneManager {
   private readonly ensureRegionListeners = new Set<ZoneRequestListener>();
 
   // ── Region gate ──────────────────────────────────────────────────────────
-  // Gated zones (world + soul inventory) only exist where a `Region` permits
-  // them; the waterfall decides what we *want*, and the gate decides what we
+  // Every zone (world + soul inventory) only exists where a `Region` permits
+  // it; the waterfall decides what we *want*, and the gate decides what we
   // actually subscribe based on the region's presence/availability bits.
-  // Non-gated surfaces (player inventory / mini_zone / pocket) are
-  // server-provisioned and bypass the gate entirely. See `isGated`.
 
   /** Latest presence/availability bitfields per subscribed `macro_region`,
    *  fed by `noteRegion` from the client's region table mirror. */
@@ -275,17 +273,6 @@ export class ZoneManager {
     return this.ensure(makeMacroZone(soulCardId, INVENTORY_LAYER, 0, 0).packed);
   }
 
-  /**
-   * Convenience wrapper around `ensure` for the player-wide
-   * inventory zone (account-scoped, shared across all of the
-   * player's souls). Mirror of `ensureInventory` but keyed on
-   * `player_id` and `PLAYER_INVENTORY_LAYER (2)`. Returns the
-   * same refcounted release fn.
-   */
-  ensurePlayerInventory(playerId: number): () => void {
-    return this.ensure(makeMacroZone(playerId, PLAYER_INVENTORY_LAYER, 0, 0).packed);
-  }
-
   private release(zoneId: ZoneId): void {
     const prev = this.refs.get(zoneId) ?? 0;
     if (prev <= 1) {
@@ -411,23 +398,47 @@ export class ZoneManager {
 
   // ── Region gate internals ────────────────────────────────────────────────
 
-  /** True iff `zoneId`'s surface is region-gated: the world layer or a soul's
-   *  inventory layer (souls get an inventory `Region` on spawn). Other
-   *  surfaces (player inventory, mini-zone, pocket) are server-provisioned and
-   *  bypass the gate, subscribing directly. */
-  private isGated(zoneId: ZoneId): boolean {
-    const surface = Number((zoneId >> 24n) & 0xffn);
-    return surface === WORLD_LAYER || surface === INVENTORY_LAYER;
+  /** True iff the server says the zone at `zoneId` MAY exist — its governing
+   *  region is mirrored and the zone's presence bit is set. Presence
+   *  (server-declared existence) is distinct from availability
+   *  (`zone_available`: tiles generated) and from arrival (its row is in
+   *  `data.zones.current`): a present-but-unavailable zone is a legal target we
+   *  subscribe to, `request_zone`, and receive. An unmirrored region means "not
+   *  present" — we only subscribe to (and so only mirror) present regions.
+   *  Every zone surface (world + soul inventory) is region-gated, so there's no
+   *  ungated bypass. Used by the drop resolver to gate placement and, via
+   *  [`panTargetPresent`], the pan gate. */
+  isZonePresent(zoneId: ZoneId): boolean {
+    const { macroRegion, bit } = regionOfZone(zoneId);
+    const bits = this.regionBits.get(macroRegion);
+    if (!bits) return false;
+    return (bits.presence & (1n << BigInt(bit))) !== 0n;
+  }
+
+  /**
+   * True iff the viewport anchor may sit at world cell `(q, r)` on
+   * `(surface, owner)` — i.e. the macro_zone containing that cell is
+   * server-declared *present*. Drives the pan gate: the anchor is
+   * screen-centred, so refusing to move it into a `!present` macro_zone keeps
+   * real terrain on screen — the viewport can't pan into the void. A gated
+   * surface whose region row hasn't mirrored yet reads `false` ("unknown"
+   * means "don't pan there"), so the viewport never drifts past the loaded
+   * frontier ahead of its region data. Thin coordinate-taking wrapper over
+   * [`isZonePresent`].
+   */
+  panTargetPresent(surface: number, owner: number, q: number, r: number): boolean {
+    const zoneQ = Math.floor(q / ZONE_SIZE) * ZONE_SIZE;
+    const zoneR = Math.floor(r / ZONE_SIZE) * ZONE_SIZE;
+    return this.isZonePresent(makeMacroZone(owner, surface, zoneQ, zoneR).packed);
   }
 
   /** Called from `set()` when a zone's desired query class crosses a boundary.
-   *  Maintains per-region "wanted" ref-counts (world only) and reconciles the
-   *  zone's actual subscription through the gate. */
+   *  Maintains per-region "wanted" ref-counts and reconciles the zone's actual
+   *  subscription through the gate. Every zone surface (world + soul inventory)
+   *  is region-gated. */
   private onDesireChanged(zoneId: ZoneId, prevDesire: QueryClass, newDesire: QueryClass): void {
-    if (this.isGated(zoneId)) {
-      if (prevDesire === "none" && newDesire !== "none") this.addWanted(zoneId);
-      else if (prevDesire !== "none" && newDesire === "none") this.removeWanted(zoneId);
-    }
+    if (prevDesire === "none" && newDesire !== "none") this.addWanted(zoneId);
+    else if (prevDesire !== "none" && newDesire === "none") this.removeWanted(zoneId);
     this.reconcileSubscription(zoneId);
   }
 
@@ -469,13 +480,12 @@ export class ZoneManager {
   }
 
   /** The query class a zone should actually subscribe at, after region gating.
-   *  Non-gated zones bypass (return their desire). Gated zones return `none`
-   *  until their region is known and marks the zone present; a present-but-
-   *  unavailable zone fires `request_zone` once and subscribes optimistically. */
+   *  Returns `none` until the zone's region is known and marks it present; a
+   *  present-but-unavailable zone fires `request_zone` once and subscribes
+   *  optimistically. */
   private effectiveClassFor(zoneId: ZoneId): QueryClass {
     const desire = subClassOf(this.entries.get(zoneId));
     if (desire === "none") return "none";
-    if (!this.isGated(zoneId)) return desire;
 
     // A gated zone needs a governing `Region` before `request_zone` can spawn
     // it (the reducer no-ops without one). If no region is in our mirror yet,

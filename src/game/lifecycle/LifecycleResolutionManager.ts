@@ -19,6 +19,7 @@ import type {
 import type { DataManager } from "../../server/data/DataManager";
 import type { ReducerManager } from "../../server/spacetime/ReducerManager";
 import type { PlayerManager } from "../../server/player/PlayerManager";
+import { owningPlayer } from "../permissions";
 
 /** How many candidate slot-combinations to try per magnetic card per
  *  resolution attempt. Magnetic recipes today have ≤ 3 slots; with
@@ -413,31 +414,13 @@ export class LifecycleResolutionManager {
     const def = this.ctx.definitions;
     if (!def.hasCardFlag(card.flagsState, card.flagsBk, "magnetic")) return false;
     if (def.hasCardFlag(card.flagsState, card.flagsBk, "dead")) return false;
-    // The magnetic-resolution gate is per-player. World-owned magnetic
-    // cards don't run through this client (no player to resolve);
-    // those are sidecar-territory (when we have one). Check ownership
-    // via `is_owned_by_player` on the card or on a card up its owner
-    // chain — for simplicity we just check the card's direct
-    // owner_id matches the player when the player-owned flag is set,
-    // and otherwise treat it as not-mine.
-    if (def.hasCardFlag(card.flagsState, card.flagsBk, "is_owned_by_player")) {
-      return card.ownerId === playerId;
-    }
-    // Owner chain walk: cards in inventory carry `ownerId =
-    // soul_card_id`. The soul carries `is_owned_by_player` and
-    // `ownerId = player_id`. So a "magnetic card in my inventory"
-    // looks like: this card's ownerId is a soul I own. Resolve by
-    // looking up the owner card in the local view and checking
-    // recursively. For depth-1 (the common case: magnetic anchor in
-    // a soul's inventory bucket), this is a single lookup.
-    const owner = this.ctx.data.cardsLocal.get(card.ownerId);
-    if (owner === undefined) return false;
-    if (def.hasCardFlag(owner.flagsState, owner.flagsBk, "is_owned_by_player")) {
-      return owner.ownerId === playerId;
-    }
-    // Deeper chains would need recursion. Magnetic anchors today are
-    // always direct soul children, so this terminates.
-    return false;
+    // The magnetic-resolution gate is per-player. Walk the card's owner
+    // chain to the controlling player (`owningPlayer` stops at the
+    // `is_owned_by_player` boundary and returns its `owner_id`); a card
+    // anywhere under a soul I own — at any chain depth — is mine. World-
+    // owned magnetic cards resolve to no player and are skipped here
+    // (sidecar territory when we have one).
+    return owningPlayer(this.ctx, card.cardId) === playerId;
   }
 
   private collectInventoryCandidates(magneticCard: Card): Card[] {

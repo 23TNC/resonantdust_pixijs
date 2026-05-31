@@ -35,12 +35,15 @@ import {
 
 // Import all reducer arg schemas
 import AcquireCardShardReducer from "./acquire_card_shard_reducer";
+import AcquireTileHoldReducer from "./acquire_tile_hold_reducer";
 import EnsureRegionReducer from "./ensure_region_reducer";
 import GenerateForestTerrainReducer from "./generate_forest_terrain_reducer";
-import ModifyTileStockReducer from "./modify_tile_stock_reducer";
+import PromoteTileReducer from "./promote_tile_reducer";
 import ReleaseCardShardReducer from "./release_card_shard_reducer";
+import ReleaseTileHoldReducer from "./release_tile_hold_reducer";
 import RequestZoneReducer from "./request_zone_reducer";
 import SetTileReducer from "./set_tile_reducer";
+import SetTileStockReducer from "./set_tile_stock_reducer";
 
 // Import all procedure arg schemas
 
@@ -130,12 +133,15 @@ const tablesSchema = __schema({
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
   __reducerSchema("acquire_card_shard", AcquireCardShardReducer),
+  __reducerSchema("acquire_tile_hold", AcquireTileHoldReducer),
   __reducerSchema("ensure_region", EnsureRegionReducer),
   __reducerSchema("generate_forest_terrain", GenerateForestTerrainReducer),
-  __reducerSchema("modify_tile_stock", ModifyTileStockReducer),
+  __reducerSchema("promote_tile", PromoteTileReducer),
   __reducerSchema("release_card_shard", ReleaseCardShardReducer),
+  __reducerSchema("release_tile_hold", ReleaseTileHoldReducer),
   __reducerSchema("request_zone", RequestZoneReducer),
   __reducerSchema("set_tile", SetTileReducer),
+  __reducerSchema("set_tile_stock", SetTileStockReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

@@ -365,7 +365,7 @@ export class CardManager {
       );
       this.ctx.data.setLocalCard(card.cardId, {
         ...card,
-        macroZone: makeMacroZone(soul.soulCardId, INVENTORY_LAYER, 0, 0),
+        macroZone: makeMacroZone(soul, INVENTORY_LAYER, 0, 0),
         ...placed,
       });
       return;
@@ -462,10 +462,10 @@ export class CardManager {
         { kind: "loose", localQ: 0, localR: 0, x: 0, y: 0, looseKind: looseKindForSurface(INVENTORY_LAYER) },
         deferredRow.flagsBk,
       );
-      debug.log(["splice", "defer"], `[defer] ${deferredRow.cardId} → soul ${soul.soulCardId} inventory`, 1);
+      debug.log(["splice", "defer"], `[defer] ${deferredRow.cardId} → soul ${soul} inventory`, 1);
       this.ctx.data.setLocalCard(deferredRow.cardId, {
         ...deferredRow,
-        macroZone: makeMacroZone(soul.soulCardId, INVENTORY_LAYER, 0, 0),
+        macroZone: makeMacroZone(soul, INVENTORY_LAYER, 0, 0),
         ...placed,
       });
       return;
@@ -589,8 +589,8 @@ export class CardManager {
     } else {
       // Viewport cell drop at `(q, r)`: cell within the chunk + optional
       // within-cell `(offsetX, offsetY)` offset (in pixels, i12 storage —
-      // ±2047). Owner from the viewport — `0` for the world, a soul/anchor
-      // `card_id` for an inventory / mini-zone bucket. The renderer applies
+      // ±2047). Owner from the viewport — `0` for the world, a soul
+      // `card_id` for an inventory bucket. The renderer applies
       // the offset iff the card's `looseKind` is `LOOSE_*` (0/1); for SNAP
       // kinds the renderer ignores it, so storing 0/0 is the norm there.
       // `looseKind` itself comes from `looseKindForSurface(surface)`.

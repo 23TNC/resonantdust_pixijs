@@ -16,7 +16,7 @@ export const TILE_SIZE = 80;
  *  `server/data/packing`. Re-exported here for game-code callers that
  *  already import other world-coord helpers from this module. */
 export { WORLD_LAYER } from "../../server/data/packing";
-import { MINI_ZONE_LAYER } from "../../server/data/packing";
+import { WORLD_LAYER } from "../../server/data/packing";
 import type { ZoneId } from "../../server/data/packing";
 
 // A row's decoded `macroZone: MacroZone` already carries the tile-origin
@@ -195,10 +195,9 @@ export function getZoneTileSlot(
   }
   for (const zone of zonesLocal.values()) {
     if (zone.macroZone.packed !== macroZone) continue;
-    // Skip surfaces with no tile bitfield (inventory layers). Admits
-    // MINI_ZONE_LAYER (63) and WORLD_LAYER (64+) — the tile-bearing
-    // surfaces today.
-    if (zone.macroZone.surface < MINI_ZONE_LAYER) continue;
+    // Skip surfaces with no tile bitfield (the inventory layer). Only
+    // WORLD_LAYER (64+) is tile-bearing today.
+    if (zone.macroZone.surface < WORLD_LAYER) continue;
     const typeId = (zone.packedDefinition >> 4) & 0xF;
     const slot = tileAt(zoneTilesArray(zone), localR * 8 + localQ);
     if (slot.defId === 0) return { packed: 0, stock0: 0, stock1: 0 };

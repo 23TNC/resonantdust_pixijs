@@ -67,7 +67,7 @@ class WorldCardSurface extends LayoutNode {
 
 /**
  * A grid viewport node: renders one `(owner, surface)` zone's tiles + cards
- * onto a pluggable `CellGrid` (hex world / mini-zone, or rect inventory — a
+ * onto a pluggable `CellGrid` (hex world or rect inventory — a
  * pure render-shape toggle). Three responsibilities are split out so this
  * class stays the viewport *shell*:
  *
@@ -225,14 +225,14 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
   surface: number;
 
   /** Owner band of the zones this viewport shows: `0` for the world (the
-   *  chunked, pannable overworld), a soul `card_id` for an inventory, an
-   *  anchor `card_id` for a mini-zone. Drops into this viewport resolve to
-   *  THIS owner — a viewport is `(owner, surface)` regardless of grid shape,
-   *  so an inventory is just a world view pointed at the owner's bucket. */
+   *  chunked, pannable overworld), a soul `card_id` for an inventory. Drops
+   *  into this viewport resolve to THIS owner — a viewport is `(owner, surface)`
+   *  regardless of grid shape, so an inventory is just a world view pointed at
+   *  the owner's bucket. */
   readonly owner: number;
-  /** True for a single-chunk bucket (inventory / mini-zone): cells are clamped
-   *  to chunk `(0,0)` (0..7 per axis). False for the world, which tiles
-   *  infinitely across chunks as the viewport pans. */
+  /** True for a single-chunk bucket (inventory): the board is the one chunk
+   *  `(0,0)` (cells 0..7 per axis), built whole regardless of pan. False for
+   *  the world, which tiles infinitely across chunks as the viewport pans. */
   readonly singleChunk: boolean;
 
 
@@ -255,7 +255,7 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
       origin?: "center" | "topleft";
       /** Owner band of this viewport's zones (default `0` = world). */
       owner?: number;
-      /** Clamp drops to a single chunk `(0,0)` (inventory / mini-zone). */
+      /** Render as a single-chunk bounded board `(0,0)` (inventory). */
       singleChunk?: boolean;
     } = {},
   ) {
@@ -286,7 +286,7 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
     // the adjacent views. The masked-clip path costs ~2 extra draw
     // calls; the over-draw cost of letting world bleed get painted
     // and then overwritten is cheaper.
-    // Object decoration is a hex-grid (world / mini-zone) concern — a rect
+    // Object decoration is a hex-grid (world) concern — a rect
     // inventory has no terrain objects. Build a decorator only for hex
     // viewports that render terrain; it owns the object container.
     this.decorator =
@@ -566,7 +566,7 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
     w: number,
     h: number,
   ): { q: number; r: number; key: string }[] {
-    // A single-chunk bucket (inventory / mini-zone) is a small bounded board —
+    // A single-chunk bucket (inventory) is a small bounded board —
     // 8×8 = 64 cells. Build the WHOLE chunk regardless of pan or visible rect:
     // panning only slides `panLayer` over an already-built board, so cells that
     // scroll past the window edge stay built instead of being dropped +
@@ -614,7 +614,7 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
       );
     }
     // Tile body shape follows the viewport's grid: hex polygon for a hex grid
-    // (world / mini-zone), rectangle for a rect grid (inventory). Same tile
+    // (world), rectangle for a rect grid (inventory). Same tile
     // data either way — only the baked silhouette differs.
     sprite.texture =
       this.grid.shape === "rect"

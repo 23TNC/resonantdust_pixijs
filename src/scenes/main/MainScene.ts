@@ -14,7 +14,7 @@ import { ViewportPanel } from "../../game/viewport/ViewportPanel";
 import { PanelManager } from "../../ui/panels/PanelManager";
 import { LayoutCard } from "../../game/cards/layout/CardLayout";
 import type { LayoutNode } from "../../game/layout/LayoutNode";
-import { owningSoul, tryActivateSoul } from "../../game/permissions";
+import { tryActivateSoul } from "../../game/permissions";
 import { MainLayout } from "./MainLayout";
 import { Scene } from "../Scene";
 
@@ -157,10 +157,11 @@ export class MainScene extends Scene {
     this.mainLayout.openWorldView();
 
     // Inventory spawning is disabled — inventory is being replaced
-    // soon. The `InventoryPanel` code + `MainLayout.open*Inventory`
-    // helpers are kept intact; re-enable by uncommenting this and the
-    // click-handler block below.
-    // this.mainLayout.openPlayerInventoryPanel(player.playerId);
+    // soon. The `InventoryPanel` code + `MainLayout.openInventoryPanel`
+    // helper are kept intact; re-enable by uncommenting this and the
+    // click-handler block below. The player's inventory is the inventory
+    // of their `player_soul` card — pass that card's id.
+    // this.mainLayout.openInventoryPanel(playerSoulCardId);
 
     this.installInputHandlers(ctx);
   }
@@ -200,14 +201,12 @@ export class MainScene extends Scene {
     const releaseFocusDrag = this.inputManager.on("left_drag_start", (data) => {
       focusPanelUnder(data.hit);
       // Drag-start on a card also activates the card's owning soul.
-      // Walking `owning_id` to find the soul covers both soul-card
-      // drags (movement) and item drags (the item's chain-root soul
-      // becomes active so subsequent drag-out behaviors target the
-      // right soul). `tryActivateSoul` no-ops for cards the local
-      // player doesn't own (other players' souls / world tile cards).
+      // `tryActivateSoul` resolves the soul via `owningSoul` (the card
+      // itself if it's a soul, else the nearest soul up its owner
+      // chain), covering both soul-card drags and item drags. No-ops
+      // when the chain reaches no soul (world-tile cards).
       if (data.hit instanceof LayoutCard) {
-        const owned = owningSoul(ctx, data.hit.cardId);
-        if (owned) tryActivateSoul(ctx, owned.soulCardId);
+        tryActivateSoul(ctx, data.hit.cardId);
       }
     });
 
@@ -379,25 +378,27 @@ export class MainScene extends Scene {
     this.pendingDefaultViewUnsub = unsub;
   }
 
-  /** Open the owned-cards subscription, then — once its initial state has
-   *  applied (`installSubscription` resolves on the SDK's `onApplied`, so
-   *  the initial rows are in `cardsLocal` here) — spawn the player's soul
-   *  if they own none yet. Client-driven signup: shard's `claim_or_login`
-   *  no longer spawns the soul. The spawned soul streams in via this same
-   *  subscription and is picked up by `firstOwnedSoul` / the default soul
-   *  view. One-shot per scene; awaiting on `onApplied` means no premature
-   *  double-spawn. */
+  /** Open the owned-cards subscription, wait for its initial rows to apply,
+   *  then spawn the player's soul if they own none yet. Client-driven signup:
+   *  shard's `claim_or_login` no longer spawns the soul. The spawned soul
+   *  streams in via this same subscription and is picked up by `firstOwnedSoul`
+   *  / the default soul view. One-shot per scene.
+   *
+   *  Two waits, both required, or the count reads empty and we spawn a soul on
+   *  every login (the bug this fixes):
+   *   1. `subscribeOwnedCards` now resolves on the gate's `applied` — the
+   *      initial rows are in the `cards` *server tier* when the await returns.
+   *   2. `promote()` flushes that server tier through to `cardsLocal`, which is
+   *      what `ownedSoulCount` reads (rows otherwise only reach `cardsLocal` on
+   *      the next frame's promote tick). */
   private async ensureSoul(ctx: GameContext): Promise<void> {
     await ctx.data.subscriptions.subscribeOwnedCards(this.playerId);
-    // Count the player-owned soul cards we currently see and request the
-    // NEXT index (`count + 1`). The local view can lag the server — rows
-    // land in the `cards` server tier on the subscription's `onApplied`
-    // but only reach `cardsLocal` on a later promote tick — so this count
-    // may read low. That's safe: the `spawn_soul` reducer is the
-    // authority and rejects when the player already owns >= the requested
-    // index, so a stale-low count can never double-spawn. We still skip
-    // the call when we can already see a soul (fast path — avoids a
-    // sure-to-be-rejected round trip).
+    ctx.data.promote();
+    // Count the player-owned soul cards and, if none, request the first one
+    // (index `count + 1`). The `spawn_soul` reducer is the authority and
+    // rejects a request for an index the player already owns, so even if this
+    // count somehow still read low the worst case is one rejected round trip —
+    // never a double-spawn.
     const owned = this.ownedSoulCount(ctx);
     if (owned > 0) return;
     try {
@@ -415,9 +416,9 @@ export class MainScene extends Scene {
 
   /** Count the player-owned soul cards currently visible in `cardsLocal`
    *  (owned-by-player flag + soul card_type). Same predicate as
-   *  `firstOwnedSoul`. May read low when the owned-cards subscription has
-   *  applied but not yet promoted into the local overlay — the server's
-   *  index guard makes that safe. */
+   *  `firstOwnedSoul`. Callers that need an accurate count right after
+   *  subscribing must `await` the subscription (now resolves on `applied`)
+   *  and `promote()` first — see `ensureSoul`. */
   private ownedSoulCount(ctx: GameContext): number {
     let n = 0;
     for (const row of ctx.data.cardsLocal.values()) {

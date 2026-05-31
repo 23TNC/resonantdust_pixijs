@@ -13,8 +13,8 @@ import { tryActivateSoul } from "../permissions";
 
 /**
  * The one viewport panel. A viewport is `(surface, owner)` shown on a
- * `CellGrid`, viewed by a `viewer` soul — the world, a mini-zone, and an
- * inventory are all the same panel, differing only by these flags:
+ * `CellGrid`, viewed by a `viewer` soul — the world and an
+ * inventory are the same panel, differing only by these flags:
  *
  *  - **grid**: `HexGrid` (world) vs `RectGrid` (inventory) — pure render shape.
  *  - **pan**: wire a `PanController` (drag-pan + Space-recenter) or stay fixed.

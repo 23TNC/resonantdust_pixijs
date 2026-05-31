@@ -1,11 +1,21 @@
 import type { GameContext } from "../GameContext";
 import type { Card as CardRow } from "../server/spacetime/bindings/types";
 
+/** The slice of `GameContext` the owner-chain walks read: the local card
+ *  overlay and the definition decoder. Narrowed (rather than the full
+ *  `GameContext`) so non-GameContext callers with the same fields —
+ *  `LifecycleResolutionManager`'s `MagneticResolutionContext` — can pass
+ *  themselves without a cast. */
+type OwnerWalkCtx = Pick<GameContext, "data" | "definitions">;
+
 /** `is_owned_by_player` lives in `cards_state` (bit 4 post unified-
- *  hold-counts rework — see `content/cards/flags.json`). Set on
- *  soul cards (their `ownerId` is a `player_id`); clear on every
- *  other card (their `ownerId` is a `card_id` — the immediate
- *  container card, `0` for world). */
+ *  hold-counts rework — see `content/cards/flags.json`). Marks the
+ *  player-boundary card: set → this row's `ownerId` is a `player_id`
+ *  (the thin player_soul that *is* the player); clear → `ownerId` is
+ *  a `card_id` (the immediate container, `0` for world). It is NOT a
+ *  "this is a soul" marker — playable world souls (human, etc.) carry
+ *  it clear; their `ownerId` points at the player_soul card. So this
+ *  flag answers "who is the controlling player," never "which soul." */
 const FLAG_OWNED_BY_PLAYER = 1 << 4;
 /** Walker depth cap mirroring the server's
  *  `cards::OWNER_WALK_DEPTH_CAP`. Defensive against cycles that
@@ -13,63 +23,78 @@ const FLAG_OWNED_BY_PLAYER = 1 << 4;
 const OWNER_WALK_DEPTH_CAP = 32;
 
 /**
- * Walk `ownerId` through the local card overlay until a row with
- * `FLAG_OWNED_BY_PLAYER` set is reached. Returns `{ soulCardId,
- * playerId }` — `soulCardId` is the row's id (the soul card),
- * `playerId` is the row's `ownerId` (a player id under the
- * post-flag-20 model). Returns `null` if the walk reaches a card
- * not present locally (subscription gap), terminates at a
- * world-owned card (`ownerId === 0` without the flag), or trips
- * the depth cap.
+ * Walk the `ownerId` chain (inclusive of `cardId` itself) to the
+ * nearest `card_type == soul` ancestor and return its `card_id`.
+ * Generic and recursion-safe: a `player_soul → human → human` chain
+ * stops at the FIRST soul, so the card's *immediate* owning soul wins.
+ * Returns `null` when the walk hits a card not present locally
+ * (subscription gap), terminates at the world (`ownerId === 0` with no
+ * soul seen), or trips the depth cap.
  *
- * Centralized so drop-side-effect resolvers and permission gates
- * agree on which soul a given card chain belongs to.
+ * Independent of `FLAG_OWNED_BY_PLAYER` — souls are identified by their
+ * card_type, not the player-boundary flag. Centralized so drop-side-
+ * effect resolvers and the active-soul pointer agree on which soul a
+ * given card belongs to.
  */
-export function owningSoul(ctx: GameContext, cardId: number): { soulCardId: number; playerId: number } | null {
+export function owningSoul(ctx: OwnerWalkCtx, cardId: number): number | null {
   let cur = cardId;
   for (let i = 0; i < OWNER_WALK_DEPTH_CAP; i++) {
     const row = ctx.data.cardsLocal.get(cur);
     if (!row) return null;
-    if ((row.flagsState & FLAG_OWNED_BY_PLAYER) !== 0) {
-      return { soulCardId: cur, playerId: row.ownerId };
-    }
+    if (ctx.definitions.isCardType(row.packedDefinition, "soul")) return cur;
     if (row.ownerId === 0) return null;
     cur = row.ownerId;
   }
   return null;
 }
 
-/** Convenience: just the player id. Returns `null` for cards whose
- *  chain doesn't end at a player-owned soul. */
-function owningPlayerId(ctx: GameContext, cardId: number): number | null {
-  return owningSoul(ctx, cardId)?.playerId ?? null;
+/**
+ * Walk the `ownerId` chain (inclusive) to the controlling player.
+ * Terminates at the first `FLAG_OWNED_BY_PLAYER` card — that row's
+ * `ownerId` is the `player_id` — and returns it. A chain reaching the
+ * world (`ownerId === 0` without the flag) belongs to no player
+ * (world / NPC-controller cards) and returns `null`; same for a
+ * subscription gap or the depth cap. This is the only place the
+ * player-boundary flag is consulted.
+ */
+export function owningPlayer(ctx: OwnerWalkCtx, cardId: number): number | null {
+  let cur = cardId;
+  for (let i = 0; i < OWNER_WALK_DEPTH_CAP; i++) {
+    const row = ctx.data.cardsLocal.get(cur);
+    if (!row) return null;
+    if ((row.flagsState & FLAG_OWNED_BY_PLAYER) !== 0) return row.ownerId;
+    if (row.ownerId === 0) return null;
+    cur = row.ownerId;
+  }
+  return null;
 }
 
 /**
- * Centralized "click on something soul-related → activate it if the
- * local player owns it" helper. Used by:
+ * Centralized "click on something soul-related → make its soul the
+ * active (last-interacted) soul" helper. Used by:
  *
- *   - Clicking a soul card in the game view (focused gameview
- *     retargets to this soul; drag of the same card switches to
- *     ghost-drag for movement).
- *   - Clicking / focusing an inventory panel (drags of cards inside
- *     the inventory are then permission-gated against the new
- *     active soul).
+ *   - Clicking a soul card / a card in the world (the card's owning
+ *     soul becomes active — `owningSoul` resolves it at any chain
+ *     depth, so clicking an item activates the soul that holds it).
+ *   - Clicking / focusing an inventory panel.
  *
- * Returns `true` when activation succeeded, `false` when the card
- * isn't a soul card or isn't owned by the local player. No-op when
- * the soul is already active. The check mirrors `canPickUpCard`'s
- * shape but reads the row directly rather than walking the
- * `owner_id` chain — soul cards carry `is_owned_by_player` and have
- * their `owner_id` set to the player_id directly, so a one-row read
- * suffices.
+ * Resolves `cardId`'s owning soul via [`owningSoul`] (the card itself
+ * when it IS a soul). Returns `true` when a soul resolved (and is now
+ * active), `false` when the card's chain reaches no soul. No-op when
+ * that soul is already active.
+ *
+ * No ownership gate — activation just points the UI at a soul; whether
+ * the local player may *act* through it is the (future) card-vs-card
+ * permission layer's concern, not activation's. `canPickUpCard` remains
+ * the gate for initiating drags.
  */
-export function tryActivateSoul(ctx: GameContext, soulCardId: number): boolean {
-  const row = ctx.data.cardsLocal.get(soulCardId);
-  if (!row) return false;
-  if ((row.flagsState & FLAG_OWNED_BY_PLAYER) === 0) return false;
-  const player = ctx.playerSession.getPlayer();
-  if (!player || row.ownerId !== player.playerId) return false;
+export function tryActivateSoul(ctx: GameContext, cardId: number): boolean {
+  // Resolve the soul this card belongs to (the card itself if it IS a
+  // soul). No ownership gate — activation is "this soul is now the one
+  // the UI tracks"; who may *act* through it is the coming card-vs-card
+  // permission layer's job, not activation's.
+  const soulCardId = owningSoul(ctx, cardId);
+  if (soulCardId === null) return false;
   if (ctx.souls.getSoulId() === soulCardId) return true;
   ctx.souls.setActiveSoul(soulCardId);
   return true;
@@ -111,5 +136,5 @@ export function tryActivateSoul(ctx: GameContext, soulCardId: number): boolean {
 export function canPickUpCard(ctx: GameContext, card: CardRow): boolean {
   const player = ctx.playerSession.getPlayer();
   if (!player) return false;
-  return owningPlayerId(ctx, card.cardId) === player.playerId;
+  return owningPlayer(ctx, card.cardId) === player.playerId;
 }

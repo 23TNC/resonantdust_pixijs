@@ -7,9 +7,8 @@ import { microLooseCell } from "../../../server/data/packing";
 import localeRaw from "../../../content/locales/cards/en.json";
 
 /** Surface threshold above which a card's `(macro_zone, micro_zone)`
- *  resolves to a world hex worth showing. Inventory (`1`) and
- *  anything else below this cutoff has no world position; pocket
- *  dimensions (`32`), mini-zones (`63`), and world (`64+`) all do. */
+ *  resolves to a world hex worth showing. Inventory (`1`) is below the
+ *  cutoff and has no world position; world (`64+`) is above it. */
 const WORLD_SURFACE_THRESHOLD = 31;
 
 // ── Locale lookup ─────────────────────────────────────────────────────────────

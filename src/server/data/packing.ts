@@ -92,29 +92,11 @@ export type ZoneId = bigint;
  *  in bits 24-31 with owner `0`; inventory/card zones use a `surface < 64`. */
 export const WORLD_LAYER = 64;
 
-/** Surface band for a deployed mini_zone's contents — its `Zone`
- *  tile bytes plus any cards placed on its tiles. The anchor card
- *  lives at `surface == WORLD_LAYER`; its `card_id` is the
- *  `macro_zone` value used by the mini_zone's `Zone` row and by
- *  any cards on its tiles. Mirrors the server-side constant in
- *  `spacetime/server/spacetimedb/src/packed.rs`. */
-export const MINI_ZONE_LAYER = 63;
-
-/** Surface band for a pocket dimension — a private interior
- *  carried by an anchor card. `macro_zone` is the anchor's
- *  `card_id`, same convention as `MINI_ZONE_LAYER`. */
-export const POCKET_DIMENSION_LAYER = 32;
-
 /** Surface band for per-soul inventory. `macro_zone` is the
- *  owning soul card's `card_id`. */
+ *  owning soul card's `card_id`. The player's own inventory is just
+ *  the inventory of their `player_soul` card on this same band — there
+ *  is no separate player-inventory surface. */
 export const INVENTORY_LAYER = 1;
-
-/** Surface band for the player's account-wide inventory bucket,
- *  shared across all of that player's souls (for permanent /
- *  account-scoped items). Same bucket convention as
- *  `INVENTORY_LAYER` but `macro_zone = player_id` instead of
- *  `soul.card_id`. */
-export const PLAYER_INVENTORY_LAYER = 2;
 
 /** Each macroZone covers an 8×8 block of hex positions. */
 export const ZONE_SIZE = 8;
@@ -311,15 +293,13 @@ export function zoneBorn(flagsState: number): boolean {
  *  - `LOOSE_HEX (0)` / `LOOSE_RECT (1)` → renderer applies the offset.
  *  - `SNAP_HEX  (2)` / `SNAP_RECT  (3)` → renderer ignores the offset (centred).
  *
- *  Hardcoded for now: **world / mini-zone snap to the hex centre** (no free
+ *  Hardcoded for now: **world snaps to the hex centre** (no free
  *  placement on tiles); **inventories use rect with the offset** (arbitrary
  *  in-cell placement). Soft-code via per-bucket config later.
  *
  *  Mirror of `packed.rs::loose_kind_for_surface`. */
 export function looseKindForSurface(surface: number): number {
-  return surface >= WORLD_LAYER || surface === MINI_ZONE_LAYER
-    ? SNAP_HEX
-    : LOOSE_RECT;
+  return surface >= WORLD_LAYER ? SNAP_HEX : LOOSE_RECT;
 }
 
 /** A card's decoded micro placement — the client mirror of the server's

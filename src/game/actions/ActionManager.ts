@@ -6,7 +6,7 @@ import {
   STACK_DIRECTION_HEX,
   STACK_DIRECTION_UP,
 } from "../cards/cardData";
-import { MINI_ZONE_LAYER, type MacroZone } from "../../server/data/packing";
+import { WORLD_LAYER, type MacroZone } from "../../server/data/packing";
 import type { LocalCard } from "../../server/data/DataManager";
 import { getZoneTileSlot } from "../viewport/worldCoords";
 import type { MatchResult } from "./recipeMatcher";
@@ -391,11 +391,10 @@ export class ActionManager {
     // `zonesLocal` when no tile-card resolves. See
     // `docs/TILE_AS_CARD.md`.
     //
-    // Threshold gates inventory layers (1, 2) out — those have no
-    // tile bitfield — while admitting `MINI_ZONE_LAYER` (63) and
-    // `WORLD_LAYER` (64+), the tile-bearing surfaces today.
+    // Threshold gates the inventory layer (1) out — it has no tile
+    // bitfield — admitting only `WORLD_LAYER` (64+), tile-bearing today.
     let syntheticTile: { packedDef: number; stock0: number; stock1: number } | null = null;
-    if (rootRow.macroZone.surface >= MINI_ZONE_LAYER && branchHex.length === 0) {
+    if (rootRow.macroZone.surface >= WORLD_LAYER && branchHex.length === 0) {
       const { localQ, localR } = microLooseCell(rootRow.microLocation);
       const tileCardRow = findFreeTileCardAt(
         this.ctx.data.cardsLocal,

@@ -94,7 +94,7 @@ function tileCostFromPacked(
 
 /** Look up the tile def_id at a global coord on `surface`. Mirrors
  *  `tile_def_at` in `movement.rs` — but only consults `zonesLocal`
- *  (world tier; no mini_zone overlay support yet — see
+ *  (world tier — see
  *  [MOVEMENT_REWRITE.md](../../../../docs/MOVEMENT_REWRITE.md) "Out
  *  of scope"). Returns `0` (impassable) for tiles in unsubscribed
  *  zones. */

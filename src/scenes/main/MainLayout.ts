@@ -7,15 +7,10 @@ import { GRID_W, GRID_H } from "../../game/viewport/rect/GridInventory";
 import type { LayoutManager } from "../../game/layout/LayoutManager";
 import { LayoutNode } from "../../game/layout/LayoutNode";
 import { DetailsPanel } from "../../game/panels/details/DetailsPanel";
-import {
-  BLUEPRINTS_DEFAULT_WIDTH,
-  BlueprintsPanel,
-} from "../../game/blueprints/BlueprintsPanel";
-import { getSoulBlueprintCapacity } from "../../game/blueprints/blueprintCapacity";
 import { PanelTaskbar } from "../../ui/dom/PanelTaskbar";
 import { PixiPanel } from "../../ui/dom/PixiPanel";
 import type { DomZBand } from "../../ui/dom/DomPanel";
-import { INVENTORY_LAYER, PLAYER_INVENTORY_LAYER, WORLD_LAYER } from "../../server/data/packing";
+import { INVENTORY_LAYER, WORLD_LAYER } from "../../server/data/packing";
 
 /** Right-edge offset (in px) used for default rects of panels that
  *  want to sit inset from the right edge — a layout baseline. */
@@ -82,22 +77,13 @@ class LayerNode extends LayoutNode {
  *     LayoutWorld + viewport + soul subscriptions.
  *   - `details` (singleton, wrapped in `detailsHostPanel`) — opens
  *     on card click via `detailsPanel.show(...)`.
- *   - `blueprints` (taskbar-pinned `blueprintsHostPanel`).
  *
- * MainLayout's job is reduced to: hosting the always-on panels
- * (details, blueprints) as direct children, plus providing
- * `openInventoryPanel(soulId)` / `openGameViewPanel(soulId)` helpers
- * that route through PanelManager.
+ * MainLayout's job is reduced to: hosting the always-on details panel
+ * as a direct child, plus providing `openInventoryPanel(soulId)` /
+ * `openGameViewPanel(soulId)` helpers that route through PanelManager.
  */
 export class MainLayout extends LayoutNode {
   // ── Always-on surfaces (built once at construction) ──────────────
-  /** Blueprint grid for the active soul — drag a slot to craft.
-   *  Lives inside `blueprintsHostPanel`'s content; visibility tracks
-   *  the host's open / close state. Toolbar + wrench-toggle are
-   *  retired; the taskbar entry on `blueprintsHostPanel` is the
-   *  open / focus affordance now. */
-  readonly blueprintsPanel: BlueprintsPanel;
-  readonly blueprintsHostPanel: PixiPanel;
   /** The actual details renderer — a `LayoutNode` that draws the
    *  card-info Pixi visuals. `MainScene` calls `show()` / `hide()` /
    *  `handleClick()` on it directly; the PixiPanel wrapper
@@ -153,19 +139,6 @@ export class MainLayout extends LayoutNode {
    *  so the host (when in `"auto"` heightMode) tracks the inner
    *  panel's compact ↔ expanded toggles. */
   private readonly unsubDetailsSize: () => void;
-  /** Cleanup for the `blueprintsHostPanel.onRectChange` subscription
-   *  — pushes body-rect changes into the inner `BlueprintsPanel`'s
-   *  bounds so the grid re-flows when the user resizes the host. */
-  private readonly unsubBlueprintsRect: () => void;
-  /** Active-soul listener — refreshes the blueprints host panel's
-   *  title bar (`Blueprints (active/max)`) when the player switches
-   *  characters. */
-  private readonly unsubBlueprintsSoul: () => void;
-  /** `soul_privates` side-channel handler — refreshes the title
-   *  whenever the active soul's blueprint count changes (a
-   *  `request_blueprint` succeeds, or a blueprint dies and frees a
-   *  slot via the `on_card_write` hook). */
-  private readonly unsubBlueprintsSoulPrivate: () => void;
 
 
   // ── External wiring ──────────────────────────────────────────────
@@ -185,10 +158,8 @@ export class MainLayout extends LayoutNode {
     // Always-on Pixi surfaces. World views live inside individual
     // `GameViewPanel` instances now (created on demand via
     // `openGameViewPanel(soulId)` and tracked by PanelManager);
-    // blueprints panel lives inside `blueprintsHostPanel`; details
-    // panel inside `detailsHostPanel`. Only the drag overlay still
-    // parents directly under MainLayout.
-    this.blueprintsPanel = new BlueprintsPanel();
+    // details panel inside `detailsHostPanel`. Only the drag overlay
+    // still parents directly under MainLayout.
     this.detailsPanel = new DetailsPanel();
     this.overlay = new OverlayNode();
 
@@ -280,68 +251,6 @@ export class MainLayout extends LayoutNode {
       this.detailsHostPanel.setContentNaturalHeight(height);
     });
 
-    // Blueprints PixiPanel — replaces the old left-edge `WrenchPanel`
-    // + toolbar wrench button. Pinned to the bottom-left taskbar so
-    // the user opens it from there (closing the panel keeps the
-    // taskbar entry). Min/closable on so it minimizes to the bar
-    // and can be dismissed entirely.
-    this.blueprintsHostPanel = new PixiPanel({
-      title: "Blueprints",
-      parent: this.chooserLayer,
-      storageKey: "gameBlueprintsPanel",
-      defaultRect: {
-        left:   "0",
-        top:    `${PanelTaskbar.HEIGHT + 60}px`,
-        width:  `${BLUEPRINTS_DEFAULT_WIDTH}px`,
-        height: "400px",
-      },
-      minWidth:    200,
-      minHeight:   200,
-      pin:         "bottom-left",
-      taskbarIcon: "🔧",
-      pinned:      true,
-      uiEditMode:  ctx.uiEditMode,
-    });
-    this.blueprintsHostPanel.content.addChild(this.blueprintsPanel);
-    this.unsubBlueprintsRect = this.blueprintsHostPanel.onRectChange(() => {
-      this.blueprintsPanel.setBounds(
-        0, 0,
-        this.blueprintsHostPanel.content.width,
-        this.blueprintsHostPanel.content.height,
-      );
-    });
-
-    // Title-bar capacity readout: `Blueprints (active/max)` where
-    // both numbers reflect the currently-active soul. Refresh
-    // hooks fire on three signals:
-    //  1. Active soul changes (player switches characters).
-    //  2. A `soul_privates` row update for the active soul (the
-    //     server's `on_card_write` hook bumped or decremented
-    //     `active_blueprints`).
-    //  3. The active soul's *card* row updates — the cap derives
-    //     from the soul def's `aspects.builder`, which is constant
-    //     per def today, but the def changes if a soul is ever
-    //     re-keyed; cheap to re-read either way.
-    const refreshBlueprintsTitle = (): void => {
-      const soulId = ctx.souls.getSoulId();
-      if (soulId === null) {
-        this.blueprintsHostPanel.setTitle("Blueprints");
-        return;
-      }
-      const cap = getSoulBlueprintCapacity(ctx, soulId);
-      this.blueprintsHostPanel.setTitle(`Blueprints (${cap.active}/${cap.max})`);
-    };
-    refreshBlueprintsTitle();
-    this.unsubBlueprintsSoul = ctx.souls.on(() => refreshBlueprintsTitle());
-    this.unsubBlueprintsSoulPrivate = ctx.data.subscriptions.registerTableHandlers(
-      "soul_privates",
-      {
-        onInsert:  (row)            => { if (row.cardId    === ctx.souls.getSoulId()) refreshBlueprintsTitle(); },
-        onUpdate:  (_oldRow, newRow) => { if (newRow.cardId === ctx.souls.getSoulId()) refreshBlueprintsTitle(); },
-        onDelete:  (row)            => { if (row.cardId    === ctx.souls.getSoulId()) refreshBlueprintsTitle(); },
-      },
-    );
-
     // The inventory PixiPanels are constructed *after* this point (via
     // the `open*` panel helpers) and each one's `parent:` option
     // appends its Pixi `content`
@@ -429,19 +338,18 @@ export class MainLayout extends LayoutNode {
     return this.openWorldView(soulCardId);
   }
 
-  /** Open the inventory viewport for `owner` (rect, pannable, single-chunk
-   *  occupancy). `surface` defaults to per-soul `INVENTORY_LAYER`; pass
-   *  `PLAYER_INVENTORY_LAYER` for the account-wide bucket. The viewer is the
-   *  owner for now (viewing your own bucket); ally-viewing will pass the
-   *  player's active soul instead. */
-  openInventoryPanel(owner: number, surface: number = INVENTORY_LAYER): ViewportPanel {
-    const isSoul = surface === INVENTORY_LAYER;
+  /** Open the inventory viewport for soul `owner` (rect, pannable, single-chunk
+   *  occupancy). The viewer is the owner for now (viewing your own bucket);
+   *  ally-viewing will pass the player's active soul instead. A player's own
+   *  inventory is just the inventory of their `player_soul` card — there's no
+   *  separate player-inventory bucket. */
+  openInventoryPanel(owner: number): ViewportPanel {
     return this.openViewport(this.inventoryLayer, {
-      id: `${surface}:${owner}`,
+      id: `${INVENTORY_LAYER}:${owner}`,
       grid: new RectGrid(GRID_W, GRID_H),
-      surface,
+      surface: INVENTORY_LAYER,
       owner,
-      viewer: isSoul ? owner : null,
+      viewer: owner,
       pan: true,
       occupancy: true,
       follow: false,
@@ -450,9 +358,9 @@ export class MainLayout extends LayoutNode {
       initialQ: 0,
       initialR: 0,
       title: "Inventory",
-      titleSuffix: isSoul ? "soul" : "player",
-      titleSuffixResolvers: this.titleResolvers(isSoul ? owner : null),
-      storageKey: `gameInventoryPanel:${surface}:${owner}`,
+      titleSuffix: "soul",
+      titleSuffixResolvers: this.titleResolvers(owner),
+      storageKey: `gameInventoryPanel:${INVENTORY_LAYER}:${owner}`,
       defaultsKey: "gameInventoryPanel",
       defaultRect: {
         right: "0",
@@ -464,13 +372,6 @@ export class MainLayout extends LayoutNode {
       minHeight: 400,
       taskbar: this.gameContext.taskbar,
     });
-  }
-
-  /** Open the player-wide inventory bucket (account-scoped, shared across the
-   *  player's souls). Thin wrapper over `openInventoryPanel` on
-   *  `PLAYER_INVENTORY_LAYER`. */
-  openPlayerInventoryPanel(playerId: number): ViewportPanel {
-    return this.openInventoryPanel(playerId, PLAYER_INVENTORY_LAYER);
   }
 
   // ── Layout pass ──────────────────────────────────────────────────
@@ -499,13 +400,6 @@ export class MainLayout extends LayoutNode {
     this.unsubDetailsSize();
     this.unsubDetailsRect();
     this.detailsHostPanel.destroy();
-
-    // Blueprints host — same shape; destroy walks the inner
-    // BlueprintsPanel via the host's content destruction.
-    this.unsubBlueprintsRect();
-    this.unsubBlueprintsSoul();
-    this.unsubBlueprintsSoulPrivate();
-    this.blueprintsHostPanel.destroy();
 
     super.destroy();
   }

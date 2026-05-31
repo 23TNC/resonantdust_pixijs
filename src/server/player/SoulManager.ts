@@ -7,14 +7,12 @@ import type { ZoneManager } from "../../game/zones/ZoneManager";
 const FLAG_OWNED_BY_PLAYER = 1 << 4;
 
 /**
- * Tracks the local player's *active soul* — a legacy singleton
- * concept retained for consumers that still expect "the one soul
- * the player is controlling": `BlueprintsPanel`, `DragManager`,
- * `dropResolver`, `CardManager`'s soul-bucket fallback. In the
- * unified PanelManager model, "active" maps to the soul of the
- * currently-focused `GameViewPanel`; `MainScene.handlePlay` keeps
- * this manager in sync by calling `setActiveSoul(soulCardId)`
- * whenever a game-view panel is opened.
+ * Tracks the local player's *active soul* — now a soft "last-interacted
+ * soul" pointer (no ownership gate), set by `tryActivateSoul` on a
+ * card/soul/inventory click via `owningSoul`. Surviving readers are thin:
+ * `dropResolver`'s catch bucket and a few title/label lookups. (The old
+ * blueprints panel that read this was removed; re-impl will be
+ * per-viewport, keyed on the viewport's assigned soul, not this pointer.)
  *
  * `setActiveSoul(id)` installs `subscribeSoul(id)` +
  * `subscribeCard(id)` + `subscribeSoulPrivate(id)` so the soul row
@@ -165,8 +163,25 @@ export class SoulManager {
     this.ownedSoulInventoryReleases.clear();
   }
 
+  /** A *world* soul owned by `playerId` — the rendered, inventory-bearing
+   *  soul (e.g. the `human`), NOT the thin non-rendered `player_soul`.
+   *
+   *  The world soul's `ownerId` points at a `player_soul` *card* (which
+   *  itself carries `FLAG_OWNED_BY_PLAYER` and `ownerId === playerId`); the
+   *  world soul does not carry the flag. So "I own this world soul" =
+   *  "this card's owner is a player_soul of mine." One-hop lookup — no
+   *  card_type decode needed: the player_soul is the only card whose
+   *  `ownerId` is a player_id, so matching it via the flag uniquely
+   *  identifies the boundary. Inventory recipes tick on the world soul's
+   *  bucket (`owner = world-soul card_id`), which is what we hold.
+   *
+   *  The player_soul's own inventory is deliberately skipped — it's an
+   *  unrendered owner shell with nothing to process. */
   private isOwnedSoul(card: LocalCard, playerId: number): boolean {
-    return card.ownerId === playerId && (card.flagsState & FLAG_OWNED_BY_PLAYER) !== 0;
+    const owner = this.data.cardsLocal.get(card.ownerId);
+    return owner !== undefined
+      && owner.ownerId === playerId
+      && (owner.flagsState & FLAG_OWNED_BY_PLAYER) !== 0;
   }
 
   private holdInventory(soulCardId: number): void {

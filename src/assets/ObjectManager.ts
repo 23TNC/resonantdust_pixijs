@@ -32,8 +32,7 @@ export interface ObjectSpriteRequest {
   index?: number;
   /** Optional faction folder under the object's pack. `undefined`
    *  resolves to `neutral/`. Used so tile centre objects on
-   *  player-owned dimensions (e.g. the alter at the pocket-
-   *  dimension centre) render in the owner's faction palette. */
+   *  faction-owned territory render in the owner's faction palette. */
   faction?: string;
   /** Sprite position in the outer Container's coordinate space. */
   x: number;

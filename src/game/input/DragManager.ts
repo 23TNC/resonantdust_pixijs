@@ -156,9 +156,9 @@ export class DragManager {
     // On drop we'll log / fire a move reducer (see `handleDragStop`).
     // Detection is via `card_type == soul (6)` — the
     // `FLAG_OWNED_BY_PLAYER` bit is no longer a reliable "is this a
-    // soul" proxy now that player-inventory items (e.g. the starter
-    // dust card) also carry the flag (their `owner_id` IS a
-    // `player_id`). Other players' soul cards are still blocked by
+    // soul" proxy now that player-owned items (e.g. the starter
+    // dust card in a player_soul's inventory) also carry the flag (their
+    // `owner_id` IS a `player_id`). Other players' soul cards are still blocked by
     // the `canPickUpCard` gate above (their owner chain doesn't
     // reach the local player), so reaching here with the soul
     // card_type means this is a soul this player owns.
@@ -317,7 +317,7 @@ export class DragManager {
     // Resolve the actual view under the cursor (chain-walk, not the
     // last-write-wins singleton). Gate on a world-class surface so a ghost
     // (soul) drop only lands in a terrain view — an inventory `LayoutWorld`
-    // (surface < WORLD_LAYER) and mini-zones are excluded. A hit on a card
+    // (surface < WORLD_LAYER) is excluded. A hit on a card
     // sitting on a world surface resolves to its owning view via the walk.
     const worldView = findLayoutWorldInChain(up.hit);
     if (!worldView || worldView.surface < WORLD_LAYER) return null;

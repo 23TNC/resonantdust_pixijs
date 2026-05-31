@@ -15,7 +15,7 @@
 //! timestamps), so `serverNowMs` falls back to its `Date.now()` baseline —
 //! fine for past-stamped terrain, revisit when writes move over.
 
-import { makeMacroZone, MINI_ZONE_LAYER, type ZoneId } from "../data/packing";
+import { type ZoneId } from "../data/packing";
 import type { Card, Soul, SoulPrivate } from "../spacetime/bindings/cards/types";
 import type { Region, Zone } from "../spacetime/bindings/regions/types";
 import type { TableHandlers } from "../spacetime/SubscriptionBase";
@@ -71,11 +71,24 @@ interface SubDef {
   filter?: string;
 }
 
+/** Safety net for `install`'s applied-wait. The gate sends one `applied` per
+ *  sid once a subscription's initial rows have been delivered; we resolve the
+ *  install promise on that. But a protocol-level `error` carries no sid (it
+ *  can't be correlated back to a waiting sid) and a dropped socket sends
+ *  nothing — so without a fallback an awaiter could hang. After this long we
+ *  resolve anyway (with a warning) so callers proceed degraded rather than
+ *  stall. The happy path resolves in well under a second. */
+const APPLIED_TIMEOUT_MS = 10_000;
+
 export class GateSubscriptionManager {
   private readonly conn = sharedGate();
   private readonly handlers = new Map<GateTable, Set<TableHandlers<unknown>>>();
   private readonly subs = new Map<string, GateSub>();
   private readonly sidTable = new Map<number, GateTable>();
+  /** Resolvers for in-flight `install` calls awaiting their parts' `applied`
+   *  messages, keyed by sid. Resolved by `dispatch` on `applied`, by
+   *  `removeByName` if the sub is torn down first, or by the timeout. */
+  private readonly pendingApplied = new Map<number, () => void>();
   /** Kept for API parity; the gate read path delivers no reducer events. */
   protected readonly onReducerEvent?: (microsSinceUnixEpoch: bigint) => void;
 
@@ -110,6 +123,8 @@ export class GateSubscriptionManager {
     this.subs.clear();
     this.sidTable.clear();
     this.handlers.clear();
+    // Resolve any outstanding install waiters so disposal can't strand them.
+    for (const resolve of [...this.pendingApplied.values()]) resolve();
     // Don't close the shared connection here — ReducerManager uses it too. It
     // closes on page unload (and HMR full-reloads this module anyway).
   }
@@ -139,7 +154,33 @@ export class GateSubscriptionManager {
         .join(", ")}`,
       3,
     );
-    return Promise.resolve();
+    // Resolve only once every part's initial rows have been delivered (the
+    // gate's `applied` per sid). Awaiters — notably `MainScene.ensureSoul` —
+    // depend on this: the rows must be in the `cards` server tier before they
+    // count what they own, or the count reads empty and they act on it (the
+    // "always spawns a soul on login" bug). Fire-and-forget callers (`void
+    // subscribe*`) ignore the promise and are unaffected.
+    return Promise.all(parts.map((p) => this.waitApplied(p.sid))).then(() => {});
+  }
+
+  /** Promise that resolves when sid's `applied` arrives (or the safety
+   *  timeout / a teardown fires). Idempotent: the resolver self-deletes from
+   *  `pendingApplied` so `applied`, timeout, and `removeByName` can't
+   *  double-resolve or leak. */
+  private waitApplied(sid: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        if (this.pendingApplied.delete(sid)) {
+          debug.warn(["gate"], `sub sid=${sid} not applied within ${APPLIED_TIMEOUT_MS}ms; proceeding`, 0);
+          resolve();
+        }
+      }, APPLIED_TIMEOUT_MS);
+      this.pendingApplied.set(sid, () => {
+        clearTimeout(timer);
+        this.pendingApplied.delete(sid);
+        resolve();
+      });
+    });
   }
 
   private removeByName(name: string): void {
@@ -148,6 +189,9 @@ export class GateSubscriptionManager {
     for (const part of sub.parts) {
       this.conn.unsubscribe(part.sid);
       this.sidTable.delete(part.sid);
+      // Torn down before `applied` landed — resolve the waiter so an install
+      // promise for a since-removed sub can't hang.
+      this.pendingApplied.get(part.sid)?.();
     }
     this.subs.delete(name);
   }
@@ -174,6 +218,7 @@ export class GateSubscriptionManager {
       }
       case "applied":
         debug.log(["gate"], `applied sid=${msg.sid}`, 3);
+        this.pendingApplied.get(msg.sid)?.();
         return;
       case "error":
         debug.warn(["gate"], msg.error);
@@ -245,17 +290,6 @@ export class GateSubscriptionManager {
   }
   unsubscribeRegion(macroRegion: bigint): void {
     this.removeByName(`region:${macroRegion}`);
-  }
-
-  subscribeMiniZone(anchorCardId: number): Promise<void> {
-    const key = makeMacroZone(anchorCardId, MINI_ZONE_LAYER, 0, 0).packed;
-    return this.install(`mini_zone:${anchorCardId}`, `mini_zone:${anchorCardId}`, [
-      { table: "zones", filter: `macro_zone = ${key}` },
-      { table: "cards", filter: `macro_zone = ${key}` },
-    ]);
-  }
-  unsubscribeMiniZone(anchorCardId: number): void {
-    this.removeByName(`mini_zone:${anchorCardId}`);
   }
 
   subscribeCard(cardId: number): Promise<void> {

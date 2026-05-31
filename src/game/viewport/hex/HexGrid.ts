@@ -1,7 +1,7 @@
 import type { CellGrid } from "../CellGrid";
 
-/** Pointy-top axial hex grid of the given display radius — the world /
- *  mini-zone grid. Implements the `CellGrid` coordinate strategy with the hex
+/** Pointy-top axial hex grid of the given display radius — the world
+ *  grid. Implements the `CellGrid` coordinate strategy with the hex
  *  math `LayoutWorld` once used inline. */
 export class HexGrid implements CellGrid {
   readonly shape = "hex" as const;

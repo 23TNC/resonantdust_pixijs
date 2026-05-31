@@ -16,16 +16,15 @@ import {
   looseKindForSurface,
   makeMacroZone,
   microLooseCell,
+  regionOfZone,
   WORLD_LAYER,
   ZONE_SIZE,
 } from "../../server/data/packing";
 import type { PointerEventData } from "./InputManager";
-import { owningSoul } from "../permissions";
 
 /** `is_owned_by_player` — bit 4 of `cards_state` post unified-hold-counts
  *  rework. Used to verify that an equip-side target is actually a soul,
  *  not a non-soul card that happens to be at the drop position. */
-const FLAG_OWNED_BY_PLAYER = 1 << 4;
 
 /** Maximum allowed chain depth from root to leaf, exclusive of the
  *  root itself. State-2 (`OnRoot`) rows pack `position` into a u5
@@ -63,15 +62,12 @@ export type DropIntent =
   | { kind: "stack";     target: Card;   direction: StackDirection }
   /** Place at cell `(q, r)` in the viewport under the cursor. `(owner,
    *  surface)` come from that viewport (`LayoutWorld`): world is `(0,
-   *  WORLD_LAYER)`, an inventory `(soulCardId, INVENTORY_LAYER)`, a mini-zone
-   *  `(anchorId, MINI_ZONE_LAYER)`. Grid shape is irrelevant — any viewport
-   *  resolves the same way. */
+   *  WORLD_LAYER)`, an inventory `(soulCardId, INVENTORY_LAYER)`. Grid shape is
+   *  irrelevant — any viewport resolves the same way. */
   | { kind: "world";     q: number;      r: number; surface: number; owner: number; offsetX?: number; offsetY?: number }
   | { kind: "loose";     x: number;      y: number }
-  /** `soulCardId` is the inventory bucket's macro_zone — the soul's
-   *  `card_id` for soul inventory, or the `player_id` for player
-   *  inventory. `surface` discriminates (`INVENTORY_LAYER` vs
-   *  `PLAYER_INVENTORY_LAYER`). Distinct from `c.card`'s current
+  /** `soulCardId` is the inventory bucket's macro_zone — the owning soul's
+   *  `card_id` (`surface == INVENTORY_LAYER`). Distinct from `c.card`'s current
    *  owner — placement doesn't transfer ownership. */
   | { kind: "inventory"; soulCardId: number; x: number; y: number; surface: number }
   | { kind: "rejected";  reason: string };
@@ -128,7 +124,7 @@ export function resolveRectDrop(c: DropContext): DropIntent {
   }
 
   // 2. Viewport drop — the cell under the cursor in whichever viewport the
-  // cursor is over (world, mini-zone, OR inventory; they're all `LayoutWorld`s
+  // cursor is over (world OR inventory; they're all `LayoutWorld`s
   // distinguished by `(owner, surface)`, not grid shape).
   const coord = resolveWorldDropCoords(c);
   if (coord) {
@@ -308,33 +304,14 @@ function intentForCardTarget(c: DropContext, target: Card): DropIntent | null {
   return null;
 }
 
-/** Fallback intent shared by every "no usable target" path: world-source
- *  → inventory return when a soul context can be derived, otherwise
- *  loose in the source's current zone. The soul is derived from the
- *  source card's chain root (so dropping a card you grabbed off
- *  soul B's chain returns it to B's inventory) — if the source has
- *  no owning soul (truly free world card never chained), falls back
- *  to the locally-active soul. Surface-locked sources still flow
- *  through the inventory branch here; `applySourceGate` converts to
- *  `rejected` downstream. */
+/** Fallback intent shared by every "no usable target" path: a card with
+ *  no usable drop target stays loose in its current zone. World-source
+ *  cards used to be force-returned to a soul's inventory here; that's
+ *  gone — loose placement in the world is a valid resting spot now, so a
+ *  missed drop simply leaves the card where the cursor landed in its own
+ *  zone. Surface-locked sources still flow through; `applySourceGate`
+ *  converts them to `rejected` downstream. */
 function resolveFallback(c: DropContext): DropIntent {
-  if (c.sourceRow.macroZone.surface >= WORLD_LAYER) {
-    const ownedSoul = owningSoul(c.ctx, c.card.cardId);
-    const soulId = ownedSoul?.soulCardId ?? c.ctx.souls.getSoulId() ?? 0;
-    if (soulId !== 0) {
-      const inv = c.ctx.layout?.surfaceFor(makeMacroZone(soulId, INVENTORY_LAYER, 0, 0).packed);
-      if (inv) {
-        const ig = inv.container.getGlobalPosition();
-        return {
-          kind: "inventory",
-          soulCardId: soulId,
-          surface: INVENTORY_LAYER,
-          x: c.up.x - ig.x - c.offsetX,
-          y: c.up.y - ig.y - c.offsetY,
-        };
-      }
-    }
-  }
   const surface = c.ctx.layout?.surfaceFor(c.card.zoneId());
   if (!surface) {
     return { kind: "rejected", reason: "no surface for loose drop" };
@@ -483,8 +460,8 @@ function wouldExceedChainDepth(
  *  when the drop isn't inside any hex-grid view. Two signals:
  *
  *  - Explicit hit on a `LayoutWorld` (empty grid area). With
- *    multiple game-view panels open (e.g. the overworld view + a
- *    mini-zone view), we use the SPECIFIC LayoutWorld the cursor
+ *    multiple game-view panels open (e.g. the overworld view + an
+ *    inventory view), we use the SPECIFIC LayoutWorld the cursor
  *    landed on — not the singleton `ctx.layout.worldView`. That
  *    pointer is last-write-wins and may not match the panel the
  *    user is hovering.
@@ -518,57 +495,28 @@ function resolveWorldDropCoords(
   const cardCenterX = localX - c.offsetX + halfW;
   const cardCenterY = localY - c.offsetY + halfH;
   const { q, r } = view.localToWorld(cardCenterX, cardCenterY);
-  // Reject drops onto any cell whose containing Zone row hasn't been
-  // provisioned / subscribed — both the multi-chunk "off the map" world
-  // case AND the single-chunk "inventory bucket with no Zone" case. A
-  // `macroZone` address by itself isn't enough; the bucket has to have an
-  // actual Zone row backing it. Returning `null` falls through to the
-  // `findLayoutWorldInChain` reject at the top of `resolveRectDrop`,
-  // which produces the snap-back animation. Linear-scan over
-  // `data.zones.current` (only subscribed zones, few hundred at most).
+  // We now know the exact cell — and therefore the exact `macro_zone` —
+  // this drop targets. The gate is region PRESENCE, identical for every
+  // viewport and grid shape: the server declares per region which zones
+  // MAY exist (`zone_presence`); we subscribe to present zones whether or
+  // not they've been generated yet (`zone_available`), request them, and
+  // catch their rows when the server materializes them. So a drop into a
+  // present zone is valid even before its Zone row has arrived in
+  // `data.zones.current` — gating on row-arrival (the old check) wrongly
+  // rejected present-but-unavailable targets. A drop into a NON-present
+  // zone is off the map (the server says it doesn't exist) → reject.
+  // Only the (q, r) → `macro_zone` packing below is grid-dependent, and
+  // that's the shared `CellGrid` / `makeMacroZone` math.
   const chunkQ = Math.floor(q / ZONE_SIZE) * ZONE_SIZE;
   const chunkR = Math.floor(r / ZONE_SIZE) * ZONE_SIZE;
   const targetMacro = makeMacroZone(view.owner, view.surface, chunkQ, chunkR).packed;
-  let zoneExists = false;
-  for (const z of c.ctx.data.zones.current.values()) {
-    if (z.macroZone.packed === targetMacro) { zoneExists = true; break; }
-  }
-  if (!zoneExists) {
-    // Dump the comparison so a stuck inventory drop is debuggable. Print the
-    // target the resolver wants vs every subscribed zone — if the row IS in
-    // `current` but the packed key doesn't match, the bug is in `makeMacroZone`
-    // vs the server's packing (parity). If the row simply isn't there, the
-    // subscription / region gate isn't delivering it yet.
-    const presentMacros = [...c.ctx.data.zones.current.values()]
-      .map((z) => `${z.macroZone.packed}(o=${z.macroZone.owner},s=${z.macroZone.surface},q=${z.macroZone.zoneQ},r=${z.macroZone.zoneR})`)
-      .join(", ");
-    const presentRegions = [...c.ctx.data.regions.current.values()]
-      .map((rg) => `${rg.macroRegion}(p=${rg.zonePresence},a=${rg.zoneAvailable})`)
-      .join(", ");
-    const zm = c.ctx.zones as unknown as {
-      entries?: Map<bigint, string>;
-      anchors?: Map<string, { q: number; r: number; surface: number; owner: number }>;
-      arrivedZones?: Set<bigint>;
-      requested?: Set<bigint>;
-    };
-    const entriesStr = zm.entries
-      ? [...zm.entries.entries()].map(([z, t]) => `${z}=${t}`).join(", ")
-      : "(no entries field)";
-    const anchorsStr = zm.anchors
-      ? [...zm.anchors.entries()].map(([n, a]) => `${n}@(${a.q},${a.r})/s=${a.surface}/o=${a.owner}`).join(", ")
-      : "(no anchors field)";
-    const arrivedStr = zm.arrivedZones ? [...zm.arrivedZones].join(",") : "(no arrived field)";
-    const requestedStr = zm.requested ? [...zm.requested].join(",") : "(no requested field)";
+  if (!c.ctx.zones.isZonePresent(targetMacro)) {
+    const { macroRegion, bit } = regionOfZone(targetMacro);
     debug.warn(
       ["drag"],
-      `[drop] reject — no zone matches target=${targetMacro} ` +
-        `(owner=${view.owner} surface=${view.surface} chunk=${chunkQ},${chunkR} cell=${q},${r}). ` +
-        `zones.current=[${presentMacros}]. ` +
-        `regions.current=[${presentRegions}]. ` +
-        `zm.anchors=[${anchorsStr}]. ` +
-        `zm.entries(tiers)=[${entriesStr}]. ` +
-        `zm.arrived=[${arrivedStr}]. ` +
-        `zm.requested=[${requestedStr}].`,
+      `[drop] reject — zone not present per regions: target=${targetMacro} ` +
+        `(owner=${view.owner} surface=${view.surface} chunk=${chunkQ},${chunkR} cell=${q},${r}) ` +
+        `region=${macroRegion} bit=${bit}.`,
     );
     return null;
   }
@@ -622,7 +570,7 @@ function findLayoutWorldInChain(hit: LayoutNode | null): LayoutWorld | null {
  *  for further state-1 chain members) over a hex occupant.
  *  `excludeId` excludes the dragged card itself. `surface` is the
  *  layer the LayoutWorld under the cursor renders — `WORLD_LAYER`
- *  for the overworld, `MINI_ZONE_LAYER` for a deployed mini-zone. */
+ *  for the overworld, `INVENTORY_LAYER` for a soul inventory. */
 function findCardAtTile(
   ctx: GameContext,
   q: number,
@@ -638,7 +586,7 @@ function findCardAtTile(
   const localQ = q - zoneQ;
   const localR = r - zoneR;
   // Full packed zone key for the viewport — owner band from the viewport (0 for
-  // world, the soul/anchor card_id for an inventory / mini-zone). Matches the
+  // world, the soul card_id for an inventory). Matches the
   // `macroZone.packed` on rows in that zone exactly.
   const targetMacroZone = makeMacroZone(owner, surface, zoneQ, zoneR).packed;
 
@@ -785,7 +733,7 @@ function buildPlacement(
     case "world": {
       // Convert (q, r) → (macroZone, localQ, localR). Same 8×8-chunk math for
       // any viewport; the owner band comes from the viewport (0 = world, a
-      // soul/anchor card_id for an inventory / mini-zone bucket).
+      // soul card_id for an inventory bucket).
       const zoneQ = Math.floor(intent.q / ZONE_SIZE) * ZONE_SIZE;
       const zoneR = Math.floor(intent.r / ZONE_SIZE) * ZONE_SIZE;
       const localQ = intent.q - zoneQ;
@@ -810,17 +758,12 @@ function buildPlacement(
       };
     }
     case "inventory": {
-      // For soul-inventory intents derived from a fallback (where
-      // `soulCardId` wasn't set by an explicit panel hit), confirm
-      // the source has a resolvable owning soul. For explicit
-      // panel hits (`resolveInventoryDropTarget`) the soulCardId
-      // already names the bucket and the inferTargetSoul gate is
-      // a no-op overhead — skip it on the player-inventory layer
-      // where the bucket is the player_id (a non-soul value).
-      if (intent.surface === INVENTORY_LAYER) {
-        const soulId = inferTargetSoul(c);
-        if (soulId === null) return null;
-      }
+      // `inventory` intents now come only from an explicit panel hit
+      // (`resolveInventoryDropTarget`), which already names the bucket in
+      // `intent.soulCardId` from the panel's `(owner, surface)`. The old
+      // source-derived `inferTargetSoul` gate is gone — the destination
+      // panel is authoritative, and gating on the *source* having an
+      // owning soul would wrongly reject dropping a fresh world card in.
       const clampedX = Math.max(I16_MIN, Math.min(I16_MAX, intent.x));
       const clampedY = Math.max(I16_MIN, Math.min(I16_MAX, intent.y));
       // micro_location packs (x, y) into u32: high u16 = x, low u16 = y.
@@ -843,32 +786,3 @@ function buildPlacement(
   }
 }
 
-/** Find the soul to target for an `inventory` intent. Prefers the
- *  source's existing owning soul (so dragging a card off a soul S
- *  drops it back into S's inventory, regardless of which soul the
- *  player is "actively" playing). Falls back to the active soul
- *  when the source has no owning soul (e.g. a world-loose card
- *  being picked up).
- *
- *  Walks `ownerId` (via `owningSoul`), not chain root: ownership is
- *  independent of chain shape post unified-card model. A card S owns
- *  via `ownerId` can be temporarily chained under a world-tile root
- *  (chain_stitch makes the hex tile root, the soul-owned rect a
- *  child), and `rootOf` would surface the world tile — which has no
- *  `FLAG_OWNED_BY_PLAYER` and would defeat the "drop returns to
- *  source soul" intent. */
-function inferTargetSoul(c: DropContext): number | null {
-  const owned = owningSoul(c.ctx, c.card.cardId);
-  if (owned !== null) return owned.soulCardId;
-  // Fall back to the active soul. `playerSession.getPlayer` carries
-  // the player_id; the active soul card is the one with
-  // FLAG_OWNED_BY_PLAYER whose owner_id matches.
-  const player = c.ctx.playerSession.getPlayer();
-  if (!player) return null;
-  for (const row of c.ctx.data.cardsLocal.values()) {
-    if ((row.flagsState & FLAG_OWNED_BY_PLAYER) === 0) continue;
-    if (row.ownerId !== player.playerId) continue;
-    return row.cardId;
-  }
-  return null;
-}
