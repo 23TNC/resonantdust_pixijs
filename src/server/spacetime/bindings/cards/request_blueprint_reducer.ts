@@ -12,6 +12,10 @@ import {
 
 export default {
   clientTimeMs: __t.u64(),
-  playerId: __t.u32(),
-  soulIndex: __t.u32(),
+  callerPlayerId: __t.u32(),
+  soulCardId: __t.u32(),
+  blueprintId: __t.u16(),
+  surface: __t.u8(),
+  macroZone: __t.u64(),
+  microLocation: __t.u32(),
 };

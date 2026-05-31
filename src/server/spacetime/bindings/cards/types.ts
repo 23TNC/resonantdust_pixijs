@@ -40,6 +40,18 @@ export const PendingAction = __t.object("PendingAction", {
 });
 export type PendingAction = __Infer<typeof PendingAction>;
 
+export const Placement = __t.object("Placement", {
+  kind: __t.u8(),
+  parentId: __t.u32(),
+  direction: __t.u8(),
+  surface: __t.u8(),
+  macroZone: __t.u64(),
+  q: __t.u8(),
+  r: __t.u8(),
+  xy: __t.u32(),
+});
+export type Placement = __Infer<typeof Placement>;
+
 export const SequenceCounter = __t.object("SequenceCounter", {
   id: __t.u8(),
   next: __t.u16(),
@@ -64,4 +76,11 @@ export const SoulPrivate = __t.object("SoulPrivate", {
   activeBlueprints: __t.u8(),
 });
 export type SoulPrivate = __Infer<typeof SoulPrivate>;
+
+export const TilePoint = __t.object("TilePoint", {
+  surface: __t.u8(),
+  macroZone: __t.u64(),
+  microLocation: __t.u32(),
+});
+export type TilePoint = __Infer<typeof TilePoint>;
 

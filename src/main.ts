@@ -27,7 +27,7 @@ import { DataManager } from "./server/data/DataManager";
 import { DomPanel } from "./ui/dom/DomPanel";
 import panelDefaults from "./content/panels/defaults.json";
 import { ZoneManager, type QueryClass } from "./game/zones/ZoneManager";
-import { decodeMacroZone, WORLD_LAYER, type ZoneId } from "./server/data/packing";
+import { type ZoneId } from "./server/data/packing";
 import { PanelTaskbar } from "./ui/dom/PanelTaskbar";
 import { UiEditMode } from "./ui/dom/UiEditMode";
 import { PanelSettingsPopup } from "./ui/dom/PanelSettingsPopup";
@@ -160,11 +160,20 @@ async function main(): Promise<Runtime> {
   // lands on a real texture rather than the white floor while the
   // ideal LOD races to load. Higher LODs lazy-load on first
   // reference and fire `onLoad` so consumers re-resolve.
+  // Only definitions + fonts genuinely gate the login form: fonts
+  // must precede any Pixi text rasterisation, and `initTextures()`
+  // below reads the wasm content crate. The 64px prewarm floor (632
+  // PNGs / ~5MB) is NOT needed until the world renders post-login, so
+  // kick it off here without awaiting — otherwise the login form is
+  // held hostage to a multi-second fan-out of fetches it never uses.
+  // The promise is threaded onto `ctx.assetsReady` and joined at the
+  // LoginScene → MainScene transition (almost always already resolved
+  // by then), so the white-floor fallback guarantee still holds.
   await Promise.all([
     initDefinitions(),
     loadFonts(),
-    lodTextures.prewarm(smallestLodUrls()),
   ]);
+  const assetsReady = lodTextures.prewarm(smallestLodUrls());
 
   // TextureRegistry reads its data from the wasm content crate, so it
   // must be initialised after initDefinitions resolves. Sync — just a
@@ -196,25 +205,6 @@ async function main(): Promise<Runtime> {
   });
   const reducers = new ReducerManager(connections);
   debugPanel.setReducers(reducers);
-  connections.shard.addListener({
-    onConnected: (_conn, identity) => {
-      debug.log(["spacetime"], `[spacetime] shard connected as ${identity.toHexString()}`, 4);
-      // Clock sync happens implicitly via `claim_or_login`: PlayerManager
-      // subscribes to the player row before calling the reducer, so the
-      // resulting row write is delivered as a `Reducer`-tagged event and
-      // `captureReducerTimestamp` seeds `noteServerTime` from it. No
-      // separate sync_clock call is needed — and wouldn't help anyway,
-      // since sync_clock writes no rows and therefore produces no row
-      // callback to capture the timestamp from.
-    },
-    onConnectError: (error: Error) => {
-      console.error("[spacetime] shard connect error", error);
-    },
-    onDisconnected: (error?: Error) => {
-      if (error) debug.warn(["spacetime"], `[spacetime] shard disconnected ${String(error)}`, 4);
-      else debug.log(["spacetime"], "[spacetime] shard disconnected", 4);
-    },
-  });
   connections.chat.addListener({
     onConnected: (_conn, identity) => {
       debug.log(["spacetime"], `[spacetime] chat connected as ${identity.toHexString()}`, 4);
@@ -260,26 +250,21 @@ async function main(): Promise<Runtime> {
   // (0, 0), the "active" set starts empty at app boot — no zone
   // subscriptions until a caller actually sets an anchor.
   //
-  // Driven by the zone's query class (full / skeleton / none), branched on
-  // the zoneId's layer:
+  // Driven by the zone's query class (full / skeleton / none). The same
+  // subscription shape works for any surface — `subscribeWorldZone` queries
+  // the zones row plus its cards and souls, and on non-world surfaces the
+  // souls query simply returns 0 rows. Previously this branched on surface
+  // and skipped the zones-table sub for inventory (only subscribed `cards`),
+  // which left inventory Zone rows undelivered once they started existing.
   //
-  //  - World zones (`layer === WORLD_LAYER`):
-  //      full     → `subscribeWorldZone` (zones row + cards + souls)
-  //      skeleton → `subscribeWorldZoneSkeleton` (zones row only — the cold
-  //                 tier's tile keepalive, no card/soul streaming)
-  //      none     → `unsubscribeWorldZone`
-  //    full↔skeleton swaps reuse the same sub name, so the SDK re-issues in
-  //    place (drops/re-adds cards+souls) rather than tearing down the row.
-  //  - Inventory / non-world zones: ref-pinned and always full — they never
-  //    enter the cold tier, so only full/none apply via `subscribeCards`.
+  //  full     → `subscribeWorldZone` (zones row + cards + souls)
+  //  skeleton → `subscribeWorldZoneSkeleton` (zones row only — cold-tier tile
+  //             keepalive). Inventory zones don't get cold-tiered today but
+  //             the shape stays uniform.
+  //  none     → `unsubscribeWorldZone`
+  // full↔skeleton swaps reuse the same sub name so the SDK re-issues in
+  // place (drops/re-adds cards+souls) rather than tearing down the row.
   const applySubscriptionClass = (zoneId: ZoneId, queryClass: QueryClass) => {
-    // `zoneId` is the full packed `macro_zone` bigint; its surface band picks
-    // world (cold-tierable) vs inventory (always-full) handling.
-    if (decodeMacroZone(zoneId).surface !== WORLD_LAYER) {
-      if (queryClass === "none") data.subscriptions.unsubscribeCards(zoneId);
-      else void data.subscriptions.subscribeCards(zoneId);
-      return;
-    }
     if (queryClass === "full") void data.subscriptions.subscribeWorldZone(zoneId);
     else if (queryClass === "skeleton") void data.subscriptions.subscribeWorldZoneSkeleton(zoneId);
     else data.subscriptions.unsubscribeWorldZone(zoneId);
@@ -308,6 +293,9 @@ async function main(): Promise<Runtime> {
     else data.subscriptions.unsubscribeRegion(macroRegion);
   });
   zones.onZoneRequest((zoneId) => void reducers.requestZone(zoneId));
+  // A gated zone with no governing region yet: ask the server to declare one
+  // (`ensure_region`). Once the region row lands, the gate fires `requestZone`.
+  zones.onEnsureRegion((zoneId) => void reducers.ensureRegion(zoneId));
   for (const row of data.regions.current.values()) feedRegion(row);
   data.regions.subscribe((c) => {
     if (c.kind === "removed") zones.noteRegionRemoved(c.oldRow.macroRegion);
@@ -360,11 +348,9 @@ async function main(): Promise<Runtime> {
       });
     },
   };
-  // Re-seed the clock window on a mid-session reconnect of either DB.
-  // `setLastLogin` dual-routes (players + shard); the players row write is
-  // the canonical `Reducer`-tagged re-sync. Each connection reconnects
-  // independently, so both listen (idempotent if they reconnect together).
-  connections.shard.addListener(reconnectResync);
+  // Re-seed the clock window on a mid-session reconnect. `setLastLogin`
+  // updates the `players` row, whose `Reducer`-tagged write is the canonical
+  // re-sync signal.
   connections.players.addListener(reconnectResync);
 
   // RTT is measured by bookending `performance.now()` around every
@@ -407,6 +393,7 @@ async function main(): Promise<Runtime> {
     lifecycle,
     data,
     zones,
+    assetsReady,
     taskbar,
     topTaskbar,
     uiEditMode,

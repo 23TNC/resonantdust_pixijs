@@ -1,4 +1,3 @@
-import { DbConnection as ShardDbConnection } from "./bindings/shard";
 import { DbConnection as ChatDbConnection } from "./bindings/chat";
 import { DbConnection as PlayersDbConnection } from "./bindings/players";
 import {
@@ -13,21 +12,6 @@ export interface ConnectionRegistryOptions {
   /** Environment segment of the DB name, e.g. `"dev"`, `"prod"`. */
   env: string;
   tokenStore?: TokenStore;
-}
-
-function makeShardConnectFn(): ConnectFn<ShardDbConnection> {
-  return (opts) => {
-    ShardDbConnection.builder()
-      .withUri(opts.uri)
-      .withDatabaseName(opts.databaseName)
-      .withToken(opts.token ?? undefined)
-      .onConnect(opts.onConnect)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .onConnectError(opts.onConnectError as any)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .onDisconnect(opts.onDisconnect as any)
-      .build();
-  };
 }
 
 function makeChatConnectFn(): ConnectFn<ChatDbConnection> {
@@ -61,43 +45,32 @@ function makePlayersConnectFn(): ConnectFn<PlayersDbConnection> {
 }
 
 /**
- * Owns one typed `ConnectionManager` per SpacetimeDB module (`shard`,
- * `chat`, `players`). DB names follow the pattern
- * `resonantdust-{env}-{module}`.
+ * Owns one typed `ConnectionManager` per directly-connected SpacetimeDB module
+ * (`chat`, `players`). DB names follow `resonantdust-{env}-{module}-{shard}`
+ * (single-instance modules use shard `0`).
  *
- * Callers that need to route a reducer or subscription to the right database
- * read from `registry.shard` / `registry.chat` / `registry.players` directly.
- * The `players` module is the canonical auth DB (player record + profile);
- * the world still lives on `shard` (see the migration plan).
+ * `players` is the canonical auth DB (player record + profile); `chat` is the
+ * world chat. Everything else — cards, souls, zones, regions, and all gameplay
+ * reducers — goes through the gate, not a direct module connection here.
  */
 export class ConnectionRegistry {
-  readonly shard: ConnectionManager<ShardDbConnection>;
   readonly chat: ConnectionManager<ChatDbConnection>;
   readonly players: ConnectionManager<PlayersDbConnection>;
 
   constructor(options: ConnectionRegistryOptions) {
     const { uri, env } = options;
 
-    const shardOpts: ConnectionManagerOptions = {
-      uri,
-      databaseName: `resonantdust-${env}-shard`,
-      tokenStore: options.tokenStore,
-    };
     const chatOpts: ConnectionManagerOptions = {
       uri,
-      databaseName: `resonantdust-${env}-chat`,
+      databaseName: `resonantdust-${env}-chat-0`,
       tokenStore: options.tokenStore,
     };
     const playersOpts: ConnectionManagerOptions = {
       uri,
-      databaseName: `resonantdust-${env}-players`,
+      databaseName: `resonantdust-${env}-players-0`,
       tokenStore: options.tokenStore,
     };
 
-    this.shard = new ConnectionManager<ShardDbConnection>(
-      shardOpts,
-      makeShardConnectFn(),
-    );
     this.chat = new ConnectionManager<ChatDbConnection>(
       chatOpts,
       makeChatConnectFn(),
@@ -109,13 +82,11 @@ export class ConnectionRegistry {
   }
 
   connectAll(): void {
-    void this.shard.connect();
     void this.chat.connect();
     void this.players.connect();
   }
 
   disconnectAll(): void {
-    this.shard.disconnect();
     this.chat.disconnect();
     this.players.disconnect();
   }

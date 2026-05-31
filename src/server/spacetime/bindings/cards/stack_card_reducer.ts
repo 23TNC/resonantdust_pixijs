@@ -11,8 +11,11 @@ import {
 } from "spacetimedb";
 
 export default {
-  soulId: __t.u32(),
-  targetSurface: __t.u8(),
-  targetMacroZone: __t.u32(),
-  targetMicroZone: __t.u8(),
+  cardId: __t.u32(),
+  timeMs: __t.u64(),
+  surface: __t.u8(),
+  macroZone: __t.u64(),
+  root: __t.u32(),
+  branch: __t.u8(),
+  index: __t.u8(),
 };

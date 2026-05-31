@@ -10,15 +10,10 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default __t.row({
-  validAt: __t.u64().primaryKey().name("valid_at"),
-  cardId: __t.u32().name("card_id"),
-  ownerId: __t.u32().name("owner_id"),
+export default {
+  cardId: __t.u32(),
+  timeMs: __t.u64(),
   surface: __t.u8(),
-  macroZone: __t.u32().name("macro_zone"),
-  microZone: __t.u8().name("micro_zone"),
-  microLocation: __t.u32().name("micro_location"),
-  stats: __t.u32(),
-  fatigued: __t.u32(),
-  injured: __t.u32(),
-});
+  macroZone: __t.u64(),
+  microLocation: __t.u32(),
+};

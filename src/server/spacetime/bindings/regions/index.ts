@@ -35,7 +35,9 @@ import {
 
 // Import all reducer arg schemas
 import AcquireCardShardReducer from "./acquire_card_shard_reducer";
+import EnsureRegionReducer from "./ensure_region_reducer";
 import GenerateForestTerrainReducer from "./generate_forest_terrain_reducer";
+import ModifyTileStockReducer from "./modify_tile_stock_reducer";
 import ReleaseCardShardReducer from "./release_card_shard_reducer";
 import RequestZoneReducer from "./request_zone_reducer";
 import SetTileReducer from "./set_tile_reducer";
@@ -44,6 +46,7 @@ import SetTileReducer from "./set_tile_reducer";
 
 // Import all table schema definitions
 import CardShardsRow from "./card_shards_table";
+import CardsRow from "./cards_table";
 import RegionsRow from "./regions_table";
 import ZonesRow from "./zones_table";
 
@@ -65,6 +68,29 @@ const tablesSchema = __schema({
       { name: 'card_shards_valid_at_key', constraint: 'unique', columns: ['validAt'] },
     ],
   }, CardShardsRow),
+  cards: __table({
+    name: 'cards',
+    indexes: [
+      { accessor: 'card_id', name: 'cards_card_id_idx_btree', algorithm: 'btree', columns: [
+        'cardId',
+      ] },
+      { accessor: 'macro_zone', name: 'cards_macro_zone_idx_btree', algorithm: 'btree', columns: [
+        'macroZone',
+      ] },
+      { accessor: 'micro_location', name: 'cards_micro_location_idx_btree', algorithm: 'btree', columns: [
+        'microLocation',
+      ] },
+      { accessor: 'owner_id', name: 'cards_owner_id_idx_btree', algorithm: 'btree', columns: [
+        'ownerId',
+      ] },
+      { accessor: 'valid_at', name: 'cards_valid_at_idx_btree', algorithm: 'btree', columns: [
+        'validAt',
+      ] },
+    ],
+    constraints: [
+      { name: 'cards_valid_at_key', constraint: 'unique', columns: ['validAt'] },
+    ],
+  }, CardsRow),
   regions: __table({
     name: 'regions',
     indexes: [
@@ -104,7 +130,9 @@ const tablesSchema = __schema({
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
   __reducerSchema("acquire_card_shard", AcquireCardShardReducer),
+  __reducerSchema("ensure_region", EnsureRegionReducer),
   __reducerSchema("generate_forest_terrain", GenerateForestTerrainReducer),
+  __reducerSchema("modify_tile_stock", ModifyTileStockReducer),
   __reducerSchema("release_card_shard", ReleaseCardShardReducer),
   __reducerSchema("request_zone", RequestZoneReducer),
   __reducerSchema("set_tile", SetTileReducer),

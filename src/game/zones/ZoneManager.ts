@@ -107,6 +107,10 @@ export class ZoneManager {
   private readonly subscriptionChangeListeners = new Set<SubscriptionChangeListener>();
   private readonly regionSubscriptionListeners = new Set<RegionSubscriptionListener>();
   private readonly zoneRequestListeners = new Set<ZoneRequestListener>();
+  /** `main.ts` maps these to `reducers.ensureRegion` — fired when a gated zone
+   *  is wanted but no `Region` governs it yet (the server declares one with
+   *  surface-keyed presence, self-healing). */
+  private readonly ensureRegionListeners = new Set<ZoneRequestListener>();
 
   // ── Region gate ──────────────────────────────────────────────────────────
   // Gated zones (world + soul inventory) only exist where a `Region` permits
@@ -126,6 +130,10 @@ export class ZoneManager {
    *  unavailable zone isn't re-requested on every region update. Cleared when
    *  the zone stops being wanted. */
   private readonly requested = new Set<ZoneId>();
+  /** Regions we've already fired `ensure_region` for (keyed by `macro_region`),
+   *  so a gated zone with no governing region asks the server to declare one
+   *  only once. Cleared when the region's wanted set empties. */
+  private readonly ensuredRegions = new Set<bigint>();
   /** Zones whose row currently lives in `data.zones.current` — fed by
    *  `noteZoneArrived` / `noteZoneDeparted` from `main.ts`. Used as the
    *  authoritative "did the row land" signal in `effectiveClassFor`, so a
@@ -352,6 +360,16 @@ export class ZoneManager {
     };
   }
 
+  /** Fires when a gated zone is wanted but no `Region` governs it — the server
+   *  should declare one (`ensure_region`). `main.ts` maps this to
+   *  `reducers.ensureRegion`. */
+  onEnsureRegion(listener: ZoneRequestListener): () => void {
+    this.ensureRegionListeners.add(listener);
+    return () => {
+      this.ensureRegionListeners.delete(listener);
+    };
+  }
+
   /** Feed the latest presence/availability bits for a subscribed region (from
    *  the client's region mirror). Re-evaluates every wanted zone in that
    *  region — promoting newly-present/available zones into a live subscription
@@ -434,6 +452,7 @@ export class ZoneManager {
     if (set.size === 0) {
       this.regionWanted.delete(macroRegion);
       this.regionBits.delete(macroRegion);
+      this.ensuredRegions.delete(macroRegion);
       this.fireRegionSubscription(macroRegion, false);
     }
   }
@@ -458,24 +477,31 @@ export class ZoneManager {
     if (desire === "none") return "none";
     if (!this.isGated(zoneId)) return desire;
 
-    const { macroRegion, bit } = regionOfZone(zoneId);
-    const bits = this.regionBits.get(macroRegion);
-    if (!bits) return "none"; // region not loaded (or no row) → defer / doesn't exist
-    const mask = 1n << BigInt(bit);
-    if ((bits.presence & mask) === 0n) return "none"; // not present → can't exist
-    // Request when EITHER the region's `available` bit is clear (zone hasn't
-    // been spawned yet) OR the row genuinely isn't in `data.zones.current`
-    // (state drift — e.g. the Zones table got wiped while the Region row
-    // persisted, so the bit is stale). `requested` rate-limits to one
-    // request per zone per session; `noteZoneArrived` clears it on row
-    // delivery so a subsequent removal + desire round-trip re-requests.
-    const bitClear = (bits.available & mask) === 0n;
-    const rowMissing = !this.arrivedZones.has(zoneId);
-    if ((bitClear || rowMissing) && !this.requested.has(zoneId)) {
+    // A gated zone needs a governing `Region` before `request_zone` can spawn
+    // it (the reducer no-ops without one). If no region is in our mirror yet,
+    // ask the server to declare one — `ensure_region` writes surface-keyed
+    // presence, the row arrives via the region subscription → `noteRegion`
+    // re-enters here with the region known, and we then request the zone. We
+    // still subscribe optimistically (0 rows until it spawns). This replaces
+    // the prior unconditional `request_zone`, which silently no-op'd whenever a
+    // region was absent (e.g. a soul's inventory region was never seeded).
+    const { macroRegion } = regionOfZone(zoneId);
+    if (!this.regionBits.has(macroRegion)) {
+      if (!this.ensuredRegions.has(macroRegion)) {
+        this.ensuredRegions.add(macroRegion);
+        this.fireEnsureRegion(zoneId);
+      }
+      return desire;
+    }
+
+    // Region is known — request the zone's materialization once. The
+    // `arrivedZones` check keeps this self-healing if the Zones table and
+    // region bits ever drift (zones wiped while the region row persisted).
+    if (!this.arrivedZones.has(zoneId) && !this.requested.has(zoneId)) {
       this.requested.add(zoneId);
       this.fireZoneRequest(zoneId);
     }
-    return desire; // optimistic: subscribe now; rows arrive when the spawn lands
+    return desire;
   }
 
   // ── World coordinate anchor API ──────────────────────────────────────────
@@ -604,9 +630,11 @@ export class ZoneManager {
     this.subscriptionChangeListeners.clear();
     this.regionSubscriptionListeners.clear();
     this.zoneRequestListeners.clear();
+    this.ensureRegionListeners.clear();
     this.regionBits.clear();
     this.regionWanted.clear();
     this.requested.clear();
+    this.ensuredRegions.clear();
     this.arrivedZones.clear();
     this.emitted.clear();
     this.anchors.clear();
@@ -659,6 +687,16 @@ export class ZoneManager {
         listener(zoneId);
       } catch (err) {
         console.error(`[ZoneManager] zoneRequest listener threw`, err);
+      }
+    }
+  }
+
+  private fireEnsureRegion(zoneId: ZoneId): void {
+    for (const listener of this.ensureRegionListeners) {
+      try {
+        listener(zoneId);
+      } catch (err) {
+        console.error(`[ZoneManager] ensureRegion listener threw`, err);
       }
     }
   }

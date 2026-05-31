@@ -10,10 +10,8 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default __t.row({
-  validAt: __t.u64().primaryKey().name("valid_at"),
-  dataShard: __t.u16().name("data_shard"),
-  macroRegion: __t.u64().name("macro_region"),
-  zonePresence: __t.u64().name("zone_presence"),
-  zoneAvailable: __t.u64().name("zone_available"),
-});
+export default {
+  cardId: __t.u32(),
+  timeMs: __t.u64(),
+  progressStyle: __t.u8(),
+};

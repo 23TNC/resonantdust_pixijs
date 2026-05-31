@@ -118,6 +118,10 @@ export class PlayerManager {
 
   private setPlayer(player: Player | null): void {
     this.player = player;
+    // The gate relays writes under its own identity, so the shard reducers
+    // that authenticate the caller now trust a `caller_player_id` arg —
+    // `ReducerManager` injects this for them.
+    this.reducers.setCallerPlayerId(player?.playerId ?? null);
     for (const listener of this.listeners) listener(player);
   }
 }

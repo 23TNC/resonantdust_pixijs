@@ -10,9 +10,13 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default __t.row({
-  sentAt: __t.u64().primaryKey().name("sent_at"),
-  senderPlayerId: __t.u32().name("sender_player_id"),
-  senderName: __t.string().name("sender_name"),
-  body: __t.string(),
-});
+export default {
+  timeMs: __t.u64(),
+  surface: __t.u8(),
+  macroZone: __t.u64(),
+  q: __t.u8(),
+  r: __t.u8(),
+  slot: __t.u8(),
+  op: __t.u8(),
+  delta: __t.u8(),
+};

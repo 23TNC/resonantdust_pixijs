@@ -10,7 +10,15 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+import {
+  TilePoint,
+} from "./types";
+
 export default {
   clientTimeMs: __t.u64(),
-  anchorCardId: __t.u32(),
+  callerPlayerId: __t.u32(),
+  soulId: __t.u32(),
+  get path() {
+    return __t.array(TilePoint);
+  },
 };

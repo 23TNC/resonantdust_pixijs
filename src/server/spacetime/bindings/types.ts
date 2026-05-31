@@ -1,19 +1,16 @@
-// Compatibility barrel — the SpacetimeDB codegen now writes per-module
-// bindings under `bindings/shard/` and `bindings/chat/`. The legacy
-// top-level paths in this file are kept as re-exports so existing
-// userland imports (`import type { Card } from ".../bindings/types"`)
-// continue to work without per-file edits.
+// Compatibility barrel — SpacetimeDB codegen writes per-module bindings under
+// `bindings/{cards,regions,players,chat}/`. The legacy top-level paths here are
+// kept as re-exports so existing userland imports
+// (`import type { Card } from ".../bindings/types"`) keep working without
+// per-file edits. The world is split across modules now (cards / regions /
+// players); this barrel hides that from the game code.
 //
-// Add to this file when a new module-side type needs to be reachable
-// via the legacy path. Modules with name conflicts (e.g. both shard
-// and chat declare `SequenceCounter`) must be re-exported explicitly
-// rather than via `export *`.
+// Add to this file when a new module-side type needs the legacy path. Types
+// with cross-module name conflicts must be re-exported explicitly, not via
+// `export *`.
 
-import type {
-  Card as GenCard,
-  Soul as GenSoul,
-  Zone as GenZone,
-} from "./shard/types";
+import type { Card as GenCard, Soul as GenSoul } from "./cards/types";
+import type { Zone as GenZone } from "./regions/types";
 import type { MacroZone } from "../../data/packing";
 
 // `macro_zone` is the complete packed location key
@@ -31,12 +28,7 @@ export type Card = Omit<GenCard, "macroZone"> & { macroZone: MacroZone };
 export type Soul = Omit<GenSoul, "macroZone"> & { macroZone: MacroZone };
 export type Zone = Omit<GenZone, "macroZone"> & { macroZone: MacroZone };
 
-export type {
-  Player,
-  PlayerProfile,
-  Region,
-  SoulPrivate,
-  TilePoint,
-} from "./shard/types";
-
+export type { Player, PlayerProfile } from "./players/types";
+export type { Region } from "./regions/types";
+export type { SoulPrivate } from "./cards/types";
 export type { ChatMessage } from "./chat/types";

@@ -138,6 +138,12 @@ export class LoginScene extends Scene {
     this.overlay.setStatus(`Logging in as ${username}…`);
     try {
       await ctx.playerSession.claimOrLogin(username);
+      // Join the 64px prewarm floor before entering the world. The
+      // login round-trip above almost always outlasts the prewarm, so
+      // this resolves instantly; it only ever blocks on a cold reload
+      // with an unusually fast login, where it prevents MainScene from
+      // building tiles against the white-floor fallback.
+      await ctx.assetsReady;
       // SceneManager.change is fire-and-forget here — once it
       // succeeds, this scene's `onExit` will unmount the overlay.
       ctx.scenes.change(new MainScene()).catch((err) => {

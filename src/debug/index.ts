@@ -9,6 +9,10 @@
 const config: readonly (readonly [string, number])[] = [
   ["actions",     5],
   ["spacetime",   3],
+  // Gateway client tracing. `0` = print everything while we bring the relay
+  // up; raise to `3` to keep lifecycle (connect/subscribe/applied) but drop
+  // the per-message / per-row chatter (level 2).
+  ["gate",        0],
   ["zone",        5],
   ["vite",        5],
   ["definitions", 5],

@@ -11,8 +11,12 @@ import {
 } from "spacetimedb";
 
 export default __t.row({
-  playerId: __t.u32().primaryKey().name("player_id"),
-  dataShard: __t.u16().name("data_shard"),
-  lifecycleCount: __t.u32().name("lifecycle_count"),
-  earliestLifecycleExpiresMs: __t.u64().name("earliest_lifecycle_expires_ms"),
+  validAt: __t.u64().primaryKey().name("valid_at"),
+  cardId: __t.u32().name("card_id"),
+  macroZone: __t.u64().name("macro_zone"),
+  microLocation: __t.u32().name("micro_location"),
+  ownerId: __t.u32().name("owner_id"),
+  packedDefinition: __t.u16().name("packed_definition"),
+  flagsState: __t.u32().name("flags_state"),
+  flagsBk: __t.u32().name("flags_bk"),
 });

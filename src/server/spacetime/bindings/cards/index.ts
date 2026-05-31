@@ -39,9 +39,16 @@ import AddCardReducer from "./add_card_reducer";
 import ClaimPendingReducer from "./claim_pending_reducer";
 import CreateCardReducer from "./create_card_reducer";
 import DestroyCardReducer from "./destroy_card_reducer";
+import FinalizeCardReducer from "./finalize_card_reducer";
+import MoveCardReducer from "./move_card_reducer";
+import MoveSoulReducer from "./move_soul_reducer";
+import PlaceCardReducer from "./place_card_reducer";
 import ReleaseHoldReducer from "./release_hold_reducer";
 import ReleasePendingReducer from "./release_pending_reducer";
+import RequestBlueprintReducer from "./request_blueprint_reducer";
 import SpawnSoulReducer from "./spawn_soul_reducer";
+import StackCardReducer from "./stack_card_reducer";
+import UnlockBlueprintReducer from "./unlock_blueprint_reducer";
 
 // Import all procedure arg schemas
 
@@ -114,9 +121,16 @@ const reducersSchema = __reducers(
   __reducerSchema("claim_pending", ClaimPendingReducer),
   __reducerSchema("create_card", CreateCardReducer),
   __reducerSchema("destroy_card", DestroyCardReducer),
+  __reducerSchema("finalize_card", FinalizeCardReducer),
+  __reducerSchema("move_card", MoveCardReducer),
+  __reducerSchema("move_soul", MoveSoulReducer),
+  __reducerSchema("place_card", PlaceCardReducer),
   __reducerSchema("release_hold", ReleaseHoldReducer),
   __reducerSchema("release_pending", ReleasePendingReducer),
+  __reducerSchema("request_blueprint", RequestBlueprintReducer),
   __reducerSchema("spawn_soul", SpawnSoulReducer),
+  __reducerSchema("stack_card", StackCardReducer),
+  __reducerSchema("unlock_blueprint", UnlockBlueprintReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

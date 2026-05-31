@@ -496,20 +496,28 @@ function resolveWorldDropCoords(
   c: DropContext,
 ): { q: number; r: number; surface: number; owner: number; offsetX: number; offsetY: number } | null {
   // A drop into ANY viewport resolves to that viewport's `(owner, surface)` +
-  // the cell under the cursor — grid shape is irrelevant (a hex inventory
-  // owned by a soul behaves like the world owned by 0). The world is the
-  // owner-0, multi-chunk case; an inventory / mini-zone is a single-chunk
-  // bucket, so clamp its cell into chunk (0,0).
+  // the cell the CARD CENTRE lands on — grid shape is irrelevant (a hex
+  // inventory owned by a soul behaves like the world owned by 0). The
+  // zone-existence check below is the only gate: a cell whose chunk has no
+  // subscribed Zone row rejects.
+  //
+  // Cell resolution uses the card's centre (`cursor − grabPoint + halfCard`),
+  // NOT the raw cursor. A user grabbing a card by its right edge ends up with
+  // the cursor at the right edge of the destination cell — past cell N's
+  // visual centre. The rounded cell would be N+1 (phantom, no chunk subscribed)
+  // even though the card visually sits on cell N. Using the card centre keeps
+  // the visual ↔ resolved cell in lockstep — same point the offset math below
+  // uses to compute the within-cell offset.
   const view = findLayoutWorldInChain(c.up.hit);
   if (!view) return null;
   const g = view.container.getGlobalPosition();
   const localX = c.up.x - g.x;
   const localY = c.up.y - g.y;
-  let { q, r } = view.localToWorld(localX, localY);
-  if (view.singleChunk) {
-    q = Math.max(0, Math.min(7, q));
-    r = Math.max(0, Math.min(7, r));
-  }
+  const halfW = c.card.layoutCard.width / 2;
+  const halfH = c.card.layoutCard.height / 2;
+  const cardCenterX = localX - c.offsetX + halfW;
+  const cardCenterY = localY - c.offsetY + halfH;
+  const { q, r } = view.localToWorld(cardCenterX, cardCenterY);
   // Reject drops onto any cell whose containing Zone row hasn't been
   // provisioned / subscribed — both the multi-chunk "off the map" world
   // case AND the single-chunk "inventory bucket with no Zone" case. A
@@ -537,12 +545,30 @@ function resolveWorldDropCoords(
     const presentRegions = [...c.ctx.data.regions.current.values()]
       .map((rg) => `${rg.macroRegion}(p=${rg.zonePresence},a=${rg.zoneAvailable})`)
       .join(", ");
+    const zm = c.ctx.zones as unknown as {
+      entries?: Map<bigint, string>;
+      anchors?: Map<string, { q: number; r: number; surface: number; owner: number }>;
+      arrivedZones?: Set<bigint>;
+      requested?: Set<bigint>;
+    };
+    const entriesStr = zm.entries
+      ? [...zm.entries.entries()].map(([z, t]) => `${z}=${t}`).join(", ")
+      : "(no entries field)";
+    const anchorsStr = zm.anchors
+      ? [...zm.anchors.entries()].map(([n, a]) => `${n}@(${a.q},${a.r})/s=${a.surface}/o=${a.owner}`).join(", ")
+      : "(no anchors field)";
+    const arrivedStr = zm.arrivedZones ? [...zm.arrivedZones].join(",") : "(no arrived field)";
+    const requestedStr = zm.requested ? [...zm.requested].join(",") : "(no requested field)";
     debug.warn(
       ["drag"],
       `[drop] reject — no zone matches target=${targetMacro} ` +
         `(owner=${view.owner} surface=${view.surface} chunk=${chunkQ},${chunkR} cell=${q},${r}). ` +
-        `zones.current has [${presentMacros}]. ` +
-        `regions.current has [${presentRegions}].`,
+        `zones.current=[${presentMacros}]. ` +
+        `regions.current=[${presentRegions}]. ` +
+        `zm.anchors=[${anchorsStr}]. ` +
+        `zm.entries(tiers)=[${entriesStr}]. ` +
+        `zm.arrived=[${arrivedStr}]. ` +
+        `zm.requested=[${requestedStr}].`,
     );
     return null;
   }
@@ -563,10 +589,8 @@ function resolveWorldDropCoords(
   const destIsLoose = (destKind & 0b10) === 0;
   if (destIsLoose) {
     const cellCenter = view.worldToLocal(q, r);
-    const halfW = c.card.layoutCard.width / 2;
-    const halfH = c.card.layoutCard.height / 2;
-    offsetX = clampI12(Math.round(localX - c.offsetX + halfW - cellCenter.x));
-    offsetY = clampI12(Math.round(localY - c.offsetY + halfH - cellCenter.y));
+    offsetX = clampI12(Math.round(cardCenterX - cellCenter.x));
+    offsetY = clampI12(Math.round(cardCenterY - cellCenter.y));
   }
   debug.log(
     ["drag"],

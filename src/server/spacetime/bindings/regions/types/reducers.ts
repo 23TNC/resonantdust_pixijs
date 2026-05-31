@@ -7,13 +7,17 @@ import { type Infer as __Infer } from "spacetimedb";
 
 // Import all reducer arg schemas
 import AcquireCardShardReducer from "../acquire_card_shard_reducer";
+import EnsureRegionReducer from "../ensure_region_reducer";
 import GenerateForestTerrainReducer from "../generate_forest_terrain_reducer";
+import ModifyTileStockReducer from "../modify_tile_stock_reducer";
 import ReleaseCardShardReducer from "../release_card_shard_reducer";
 import RequestZoneReducer from "../request_zone_reducer";
 import SetTileReducer from "../set_tile_reducer";
 
 export type AcquireCardShardParams = __Infer<typeof AcquireCardShardReducer>;
+export type EnsureRegionParams = __Infer<typeof EnsureRegionReducer>;
 export type GenerateForestTerrainParams = __Infer<typeof GenerateForestTerrainReducer>;
+export type ModifyTileStockParams = __Infer<typeof ModifyTileStockReducer>;
 export type ReleaseCardShardParams = __Infer<typeof ReleaseCardShardReducer>;
 export type RequestZoneParams = __Infer<typeof RequestZoneReducer>;
 export type SetTileParams = __Infer<typeof SetTileReducer>;

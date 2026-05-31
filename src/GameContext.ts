@@ -49,6 +49,14 @@ export interface GameContext {
   readonly lifecycle: LifecycleResolutionManager;
   readonly data: DataManager;
   readonly zones: ZoneManager;
+  /** Resolves once the 64px LOD prewarm floor has finished loading.
+   *  Kicked off (but NOT awaited) during bootstrap so the login form
+   *  paints immediately; the LoginScene → MainScene transition awaits
+   *  it before entering the world, guaranteeing the white-floor
+   *  fallback is backed by real textures before any tile renders.
+   *  By login time the prewarm is almost always already done, so the
+   *  await is effectively free. */
+  readonly assetsReady: Promise<void>;
   /** Bottom-anchored taskbar for primary app surfaces (chat,
    *  inventory, world panels). Panels constructed with
    *  `taskbar: ctx.taskbar` minimize-to-taskbar; panels without fall

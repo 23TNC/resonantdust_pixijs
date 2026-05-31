@@ -13,4 +13,5 @@ import {
 export default {
   clientTimeMs: __t.u64(),
   playerId: __t.u32(),
+  soulIndex: __t.u32(),
 };

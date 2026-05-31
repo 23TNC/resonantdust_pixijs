@@ -9,7 +9,7 @@
  * field lands.
  */
 import type { GameContext } from "../../GameContext";
-import type { Player } from "../spacetime/bindings/shard/types";
+import type { Player } from "../spacetime/bindings/players/types";
 import type { LocalCard } from "../data/DataManager";
 
 /** Bit offset of the `faction` subfield inside `Player.flags`. */

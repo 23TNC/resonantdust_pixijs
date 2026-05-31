@@ -1,5 +1,23 @@
 import { debug } from "../../debug";
+import { sharedGate } from "../gate/GateConnection";
 import type { ConnectionRegistry } from "./ConnectionRegistry";
+
+/** Recursively shape a reducer's named args for SpacetimeDB's HTTP `/call`:
+ *  camelCase keys → snake_case, and `bigint` → `number` (u64 args must be JSON
+ *  numbers; dev values — `clientTimeMs`, low-card_id `macroZone` — fit under
+ *  2^53). Carries the gate-relayed write payload. */
+function toCallArgs(value: unknown): unknown {
+  if (typeof value === "bigint") return Number(value);
+  if (Array.isArray(value)) return value.map(toCallArgs);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)] = toCallArgs(v);
+    }
+    return out;
+  }
+  return value;
+}
 
 /**
  * Owns reducer calls. Each reducer is a thin wrapper that awaits the
@@ -51,8 +69,10 @@ import type { ConnectionRegistry } from "./ConnectionRegistry";
  *      client adapts freely within `[1500, 5000]` without telling
  *      the server anything.
  *
- * Routing: all reducers go to `registry.shard` except `sendChatMessage`,
- * which targets `registry.chat`.
+ * Routing: gameplay/world reducers go through the gate (`gateCall`); login
+ * (`claimOrLogin` / `setLastLogin`) targets `registry.players` and
+ * `sendChatMessage` targets `registry.chat` — the two DBs the client still
+ * connects to directly.
  */
 export class ReducerManager {
   /** Sliding window of recent reducer-event captures. Each entry pairs
@@ -225,6 +245,30 @@ export class ReducerManager {
   private static readonly CLIENT_DELAY_MAX_MS = 5_000;
 
   constructor(private readonly registry: ConnectionRegistry) {}
+
+  /** The logged-in player_id, set by `PlayerManager` after login. Forwarded
+   *  to the gate as `caller_player_id` for the shard reducers that authenticate
+   *  the caller (the gate is the auth boundary now; the reducers trust it). */
+  private callerPlayerId: number | null = null;
+
+  setCallerPlayerId(playerId: number | null): void {
+    this.callerPlayerId = playerId;
+  }
+
+  private requireCaller(): number {
+    if (this.callerPlayerId == null) {
+      throw new Error("[gate] no caller player_id set (not logged in yet)");
+    }
+    return this.callerPlayerId;
+  }
+
+  /** Relay a shard reducer through the gate (write path). `args` is the named
+   *  argument set; it's shaped for `/call` by `toCallArgs`. */
+  private gateCall(reducer: string, args: Record<string, unknown>): Promise<void> {
+    const gate = sharedGate();
+    gate.ensureConnected();
+    return gate.call(reducer, toCallArgs(args));
+  }
 
   /** Record a fresh server timestamp from a reducer event. Captures
    *  `performance.now()` (the canonical client clock for all sync
@@ -607,10 +651,13 @@ export class ReducerManager {
       `[spacetime] moveSoul soul=${args.soulId} steps=${args.path.length} clientTimeMs=${clientTimeMs}`,
       0,
     );
-    const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.moveSoul({ ...args, clientTimeMs });
+      await this.gateCall("move_soul", {
+        ...args,
+        callerPlayerId: this.requireCaller(),
+        clientTimeMs,
+      });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
@@ -649,10 +696,13 @@ export class ReducerManager {
       `[spacetime] placeCard card=${args.cardId} placement=${JSON.stringify(args.placement, (_k, v) => typeof v === "bigint" ? v.toString() : v)} clientTimeMs=${clientTimeMs}`,
       0,
     );
-    const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.placeCard({ ...args, clientTimeMs });
+      await this.gateCall("place_card", {
+        ...args,
+        callerPlayerId: this.requireCaller(),
+        clientTimeMs,
+      });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
@@ -684,10 +734,13 @@ export class ReducerManager {
         `microLocation=${args.microLocation} clientTimeMs=${clientTimeMs}`,
       0,
     );
-    const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.requestBlueprint({ ...args, clientTimeMs });
+      await this.gateCall("request_blueprint", {
+        ...args,
+        callerPlayerId: this.requireCaller(),
+        clientTimeMs,
+      });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
@@ -720,20 +773,17 @@ export class ReducerManager {
     } finally {
       this.recordRtt(performance.now() - start);
     }
-    // Transitional dual-login: also bind shard's `player_sessions` so the
-    // world's gameplay reducers (`resolve_caller`) authenticate. Removed
-    // once the gateway fronts shard. Soul spawn is no longer a side-effect
-    // of this call — the client drives it via `spawnSoul`.
-    const shardConn = await this.registry.shard.connect();
-    await shardConn.reducers.claimOrLogin({ ...args, clientTimeMs });
+    // Login is `players`-only now; the world's gameplay reducers run through
+    // the gate, which supplies `caller_player_id` (no shard `player_sessions`
+    // binding). Soul spawn is driven client-side via `spawnSoul`.
   }
 
-  /** Spawn the local player's `player_soul` on the world (`shard`) DB.
+  /** Spawn the local player's `player_soul` (via the gate → cards shard).
    *  Driven client-side: after login the client subscribes its owned
    *  cards and, seeing none, calls this. `soulIndex` is `1 + owned-soul
    *  count`; the reducer rejects if the player already owns >= that many
    *  souls, so a stale-low client count can't double-spawn. Trusts
-   *  `playerId` (auth is the gateway's job — see the shard reducer doc). */
+   *  `playerId` (auth is the gateway's job). */
   async spawnSoul(playerId: number, soulIndex: number): Promise<void> {
     const clientTimeMs = BigInt(Math.round(this.serverNowMs()));
     debug.log(
@@ -741,10 +791,9 @@ export class ReducerManager {
       `[spacetime] spawnSoul playerId=${playerId} index=${soulIndex} clientTimeMs=${clientTimeMs}`,
       4,
     );
-    const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.spawnSoul({ playerId, soulIndex, clientTimeMs });
+      await this.gateCall("spawn_soul", { playerId, soulIndex, clientTimeMs });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
@@ -778,10 +827,13 @@ export class ReducerManager {
       `[spacetime] proposeAction recipe=${args.recipeId} root=${args.root} surface=${args.surface} macroZone=${args.macroZone} microLocation=0x${args.microLocation.toString(16)} bindings=${JSON.stringify(args.bindings)} clientTimeMs=${clientTimeMs}`,
       0,
     );
-    const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.proposeAction({ ...args, clientTimeMs });
+      await this.gateCall("propose_action", {
+        ...args,
+        callerPlayerId: this.requireCaller(),
+        clientTimeMs,
+      });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
@@ -810,10 +862,6 @@ export class ReducerManager {
     } finally {
       this.recordRtt(performance.now() - start);
     }
-    // Transitional: keep shard's row in step too (welcome-back stamp +
-    // shard-side reconnect clock repair). Removed with the dual-login.
-    const shardConn = await this.registry.shard.connect();
-    await shardConn.reducers.setLastLogin({ clientTimeMs });
   }
 
   /** Ask the server to spawn the zone at `macroZone` (region-gated, idempotent
@@ -830,10 +878,32 @@ export class ReducerManager {
       `[spacetime] requestZone macroZone=${macroZone} clientTimeMs=${clientTimeMs}`,
       2,
     );
-    const conn = await this.registry.shard.connect();
     const start = performance.now();
     try {
-      await conn.reducers.requestZone({ macroZone, clientTimeMs });
+      await this.gateCall("request_zone", { macroZone, clientTimeMs });
+    } catch (err) {
+      this.correctFromDrift(err, Number(clientTimeMs), start);
+      throw err;
+    } finally {
+      this.recordRtt(performance.now() - start);
+    }
+  }
+
+  /** Ask the server to declare a `Region` governing `macroZone` (idempotent,
+   *  surface-keyed presence). Driven by `ZoneManager`'s region gate when a
+   *  gated zone is wanted but no region governs it yet — e.g. a soul's
+   *  inventory region, which `spawn_soul` no longer seeds cross-DB. The region
+   *  row arriving lets the gate then fire `requestZone`. */
+  async ensureRegion(macroZone: bigint): Promise<void> {
+    const clientTimeMs = BigInt(Math.round(this.serverNowMs()));
+    debug.log(
+      ["spacetime"],
+      `[spacetime] ensureRegion macroZone=${macroZone} clientTimeMs=${clientTimeMs}`,
+      2,
+    );
+    const start = performance.now();
+    try {
+      await this.gateCall("ensure_region", { macroZone, clientTimeMs });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;

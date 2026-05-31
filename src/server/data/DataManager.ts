@@ -8,7 +8,10 @@ import { ChatSubscriptionManager } from "../spacetime/ChatSubscriptionManager";
 import { PlayersSubscriptionManager } from "../spacetime/PlayersSubscriptionManager";
 import type { ConnectionRegistry } from "../spacetime/ConnectionRegistry";
 import type { ReducerManager } from "../spacetime/ReducerManager";
-import { SubscriptionManager } from "../spacetime/SubscriptionManager";
+// Shard reads now route through the gate (relay-first migration): the gate
+// fronts the `shard` module, fanning rows back over its own protocol. Drop-in
+// for the SDK-backed `SubscriptionManager` — same public surface.
+import { GateSubscriptionManager } from "../gate/GateSubscriptionManager";
 import {
   applyMicro,
   decodeMacroZone,
@@ -197,7 +200,7 @@ export class DataManager {
    *  there is no `current` view to promote — `chatMessages.rows` is
    *  the table itself. See `AppendTable` and `chat.rs`. */
   readonly chatMessages = new AppendTable<ChatMessage>((row) => row.sentAt);
-  readonly subscriptions: SubscriptionManager;
+  readonly subscriptions: GateSubscriptionManager;
   readonly chatSubscriptions: ChatSubscriptionManager;
   /** Canonical auth-DB subscriptions — the player record + profile rows,
    *  fed from the `players` module connection (not `shard`). */
@@ -273,7 +276,7 @@ export class DataManager {
     // then reads from `reducers.serverNowMs()` instead of
     // `Date.now()`, aligning `ValidAtTable` promotion to the
     // server's timeline.
-    this.subscriptions = new SubscriptionManager(registry.shard, {
+    this.subscriptions = new GateSubscriptionManager({
       onReducerEvent: (micros) => this.reducers.noteServerTime(micros),
     });
     this.chatSubscriptions = new ChatSubscriptionManager(registry.chat);
@@ -285,9 +288,35 @@ export class DataManager {
     });
 
     this.subscriptions.registerTableHandlers("cards", {
-      onInsert: (row) => this.cards.insert(decodeMacro(row)),
-      onUpdate: (oldRow, newRow) =>
-        this.cards.update(decodeMacro(oldRow), decodeMacro(newRow)),
+      onInsert: (row) => {
+        const r = decodeMacro(row);
+        this.cards.insert(r);
+        this.kickFutureProgress(r);
+      },
+      onUpdate: (oldRow, newRow) => {
+        const n = decodeMacro(newRow);
+        this.cards.update(decodeMacro(oldRow), n);
+        this.kickFutureProgress(n);
+      },
+      onDelete: (row) => this.cards.delete(decodeMacro(row)),
+    });
+    // Tile-cards live in the regions DB's own `cards` table (promoted world
+    // tiles, `card_type = 7`). They share the Card schema and a disjoint
+    // id-space (the regions database bit in `card_id`), so we mirror them into
+    // the SAME `this.cards` overlay — the recipe matcher's tile lookup and the
+    // ZoneTileCache read them like any other card, and a GC demote arrives as a
+    // delete that drops the card back to its (now folded-back) zone slot.
+    this.subscriptions.registerTableHandlers("tile_cards", {
+      onInsert: (row) => {
+        const r = decodeMacro(row);
+        this.cards.insert(r);
+        this.kickFutureProgress(r);
+      },
+      onUpdate: (oldRow, newRow) => {
+        const n = decodeMacro(newRow);
+        this.cards.update(decodeMacro(oldRow), n);
+        this.kickFutureProgress(n);
+      },
       onDelete: (row) => this.cards.delete(decodeMacro(row)),
     });
     this.playerSubscriptions.registerTableHandlers("players", {
@@ -828,14 +857,14 @@ export class DataManager {
     let serverForcesStackPosition = false;
     if (!orphanSlot) {
       if (serverMicro.kind === "loose") {
-        // Position-ownership for LOOSE cards splits on surface:
-        //   - container (`surface < WORLD_LAYER`, e.g. inventory): client owns
-        //     the cell + within-cell offset locally; the server's view
+        // Position-ownership splits on `looseKind` (the per-card stack_state):
+        //   - LOOSE_HEX / LOOSE_RECT (bit `0b10` clear): client owns the cell
+        //     + within-cell offset — arbitrary placement; the server's view
         //     shouldn't clobber a drag/splice transplant.
-        //   - WORLD (`surface >= WORLD_LAYER`): server owns — `move_soul`'s
-        //     per-step writes update the soul's tile; preserving locally would
-        //     silently drop those moves.
-        preservePosition = serverRow.macroZone.surface < WORLD_LAYER;
+        //   - SNAP_HEX / SNAP_RECT (bit `0b10` set): server owns — soul-walk
+        //     and other server-driven writes are authoritative; preserving
+        //     locally would silently drop those moves.
+        preservePosition = (serverMicro.looseKind & 0b10) === 0;
       } else {
         // Stacked member (deferred already short-circuited above). The client
         // owns the chain locally unless the server asserts `pos_need` /
@@ -1050,6 +1079,34 @@ export class DataManager {
       // missing (no harm; the chain is still spliced, just over-tall).
       this.cardManager?.evictCard(spliceOverflow);
     }
+  }
+
+  /** Re-mirror a card when a future-stamped completion row carrying
+   *  `progress_style` arrives, so its progress bar actually starts.
+   *
+   *  An action's effects land as two separate writes: the in-flight **hold**
+   *  row (stamped at `now`) and, many reducer-calls later, the **completion**
+   *  row (stamped at `completion_ms`, carrying `progress_style`). The hold row
+   *  promotes immediately and runs [`scanProgress`] — but the completion row
+   *  isn't in `cards.server` yet, so no bar is found. When the completion row
+   *  finally arrives it is future-stamped, so [`ValidAtTable.promote`] does NOT
+   *  fire (the card's *current* row is unchanged) and [`mirrorCard`] never
+   *  re-runs → the bar never starts. (Short actions whose two writes land in
+   *  the same frame dodge this by luck; longer / cross-DB ones don't.)
+   *
+   *  Fix: on a future progress-bearing row, re-mirror the card's current row so
+   *  `scanProgress` re-scans `server` — which now includes this row. No-op when
+   *  the card has no current row yet (its own promote will scan) or when the row
+   *  isn't a future completion row. Uses the same `validAtOf <= serverNow`
+   *  cutoff `promote` uses, so "future" is judged on the identical timeline. */
+  private kickFutureProgress(row: Card): void {
+    const style =
+      (row.flagsState >>> FLAG_PROGRESS_STYLE_SHIFT) & FLAG_PROGRESS_STYLE_MASK;
+    if (style === 0) return;
+    if (validAtOf(row.validAt) <= this.reducers.serverNowMs()) return;
+    const current = this.cards.current.get(row.cardId);
+    if (current === undefined) return;
+    this.mirrorCard({ kind: "updated", key: row.cardId, oldRow: current, newRow: current });
   }
 
   /** Build the `progress` array for a card by scanning the server tier

@@ -11,13 +11,14 @@ import {
 } from "spacetimedb";
 
 import {
-  TilePoint,
+  Placement,
 } from "./types";
 
 export default {
   clientTimeMs: __t.u64(),
-  soulId: __t.u32(),
-  get path() {
-    return __t.array(TilePoint);
+  callerPlayerId: __t.u32(),
+  cardId: __t.u32(),
+  get placement() {
+    return Placement;
   },
 };
