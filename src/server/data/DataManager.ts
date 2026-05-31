@@ -4,9 +4,6 @@ import type { Card, ChatMessage, Player, Region, Soul, SoulPrivate, Zone } from 
 // PlayerProfile is canonically the `players` (auth DB) shape now — keyed by
 // player_id, no lifecycle fields. The client only reads `playerId` off it.
 import type { PlayerProfile } from "../spacetime/bindings/players/types";
-import { ChatSubscriptionManager } from "../spacetime/ChatSubscriptionManager";
-import { PlayersSubscriptionManager } from "../spacetime/PlayersSubscriptionManager";
-import type { ConnectionRegistry } from "../spacetime/ConnectionRegistry";
 import type { ReducerManager } from "../spacetime/ReducerManager";
 // Shard reads now route through the gate (relay-first migration): the gate
 // fronts the `shard` module, fanning rows back over its own protocol. Drop-in
@@ -165,9 +162,8 @@ export type LocalCard = Card & {
  *  whether to keep position fields or not. There is no all-or-nothing
  *  override flag — server changes never get dropped wholesale.
  *
- *  DataManager owns its own `SubscriptionManager` — the SDK ingress for
- *  this layer. `main.ts` constructs `ConnectionRegistry` and hands it
- *  in; `subscribeCards(zoneId)` / etc. are reachable as
+ *  DataManager owns its own `GateSubscriptionManager` — the gate ingress
+ *  for this layer. `subscribeCards(zoneId)` / etc. are reachable as
  *  `data.subscriptions.<method>`. */
 export class DataManager {
   readonly cards = new ValidAtTable<Card>(
@@ -201,10 +197,6 @@ export class DataManager {
    *  the table itself. See `AppendTable` and `chat.rs`. */
   readonly chatMessages = new AppendTable<ChatMessage>((row) => row.sentAt);
   readonly subscriptions: GateSubscriptionManager;
-  readonly chatSubscriptions: ChatSubscriptionManager;
-  /** Canonical auth-DB subscriptions — the player record + profile rows,
-   *  fed from the `players` module connection (not `shard`). */
-  readonly playerSubscriptions: PlayersSubscriptionManager;
 
   /** Local overlays — what game code reads/writes for displayed state.
    *  Mirrors `<table>.current` via subscription. */
@@ -266,7 +258,6 @@ export class DataManager {
   private cardManager: CardManager | null = null;
 
   constructor(
-    registry: ConnectionRegistry,
     private readonly reducers: ReducerManager,
     private readonly definitions: DefinitionManager,
   ) {
@@ -279,13 +270,9 @@ export class DataManager {
     this.subscriptions = new GateSubscriptionManager({
       onReducerEvent: (micros) => this.reducers.noteServerTime(micros),
     });
-    this.chatSubscriptions = new ChatSubscriptionManager(registry.chat);
-    // The login row write now arrives on the `players` connection, so it
-    // must feed the clock-sync re-baseline just like the shard subscription
-    // above (mirrors the `onReducerEvent` wiring on `this.subscriptions`).
-    this.playerSubscriptions = new PlayersSubscriptionManager(registry.players, {
-      onReducerEvent: (micros) => this.reducers.noteServerTime(micros),
-    });
+    // players/player_profiles now flow through the gate too; the clock-sync
+    // re-baseline rides the gate's `time` heartbeat via `this.subscriptions`'
+    // `onReducerEvent` (wired above), not a players-SDK reducer event.
 
     this.subscriptions.registerTableHandlers("cards", {
       onInsert: (row) => {
@@ -319,7 +306,7 @@ export class DataManager {
       },
       onDelete: (row) => this.cards.delete(decodeMacro(row)),
     });
-    this.playerSubscriptions.registerTableHandlers("players", {
+    this.subscriptions.registerTableHandlers("players", {
       onInsert: this.players.insert,
       onUpdate: this.players.update,
       onDelete: this.players.delete,
@@ -349,7 +336,7 @@ export class DataManager {
     // Same flat-row pattern as `soul_privates` above — the server
     // table is keyed by `player_id` and updated in place via
     // delete + insert; we mirror straight into `playerProfilesLocal`.
-    this.playerSubscriptions.registerTableHandlers("player_profiles", {
+    this.subscriptions.registerTableHandlers("player_profiles", {
       onInsert: (row) => {
         this.playerProfilesLocal.set(row.playerId, row);
       },
@@ -373,7 +360,9 @@ export class DataManager {
       onUpdate: this.regions.update,
       onDelete: this.regions.delete,
     });
-    this.chatSubscriptions.registerTableHandlers("chat_messages", {
+    // Chat now flows through the gate (the `chat_messages` table is fronted by
+    // the gate like cards/regions); append-only mirror into `chatMessages`.
+    this.subscriptions.registerTableHandlers("chat_messages", {
       onInsert: this.chatMessages.insert,
       onUpdate: this.chatMessages.update,
       onDelete: this.chatMessages.delete,
@@ -592,7 +581,6 @@ export class DataManager {
     for (const unsub of this.unsubMirror) unsub();
     this.unsubMirror.length = 0;
     this.subscriptions.dispose();
-    this.chatSubscriptions.dispose();
     this.cards.dispose();
     this.players.dispose();
     this.souls.dispose();

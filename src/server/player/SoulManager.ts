@@ -18,8 +18,8 @@ const FLAG_OWNED_BY_PLAYER = 1 << 4;
  * `subscribeCard(id)` + `subscribeSoulPrivate(id)` so the soul row
  * arrives in `soulsLocal` and listeners (`on(cb)`) get notified.
  * `GameViewPanel` independently installs the same subs (deduped at
- * `SubscriptionBase`) so per-panel queries keep working even when
- * the singleton "active" pointer is stale.
+ * `GateSubscriptionManager`) so per-panel queries keep working even
+ * when the singleton "active" pointer is stale.
  *
  * Also owns the player-wide owned-soul inventory tracker
  * (`startTrackingOwnedSoulInventories`) — refcounts every owned

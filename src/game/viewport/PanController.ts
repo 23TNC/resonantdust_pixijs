@@ -179,19 +179,25 @@ export class PanController {
       // shifts opposite to the cursor's pixel drag.
       const newQ = this.startViewQ - dq;
       const newR = this.startViewR - dr;
-      // Server-declared-presence pan gate: the anchor sits at the screen
-      // centre, so refusing to move it into a macro_zone the region marks
-      // `!present` keeps real terrain on screen — you can't pan into the
-      // void. The delta is recomputed absolutely from the gesture start
-      // each frame, so a rejected frame simply leaves the anchor put;
-      // dragging back toward a present zone resumes panning with no drift.
-      if (!this.ctx.zones.panTargetPresent(this.surface, this.owner, newQ, newR)) {
-        return;
-      }
-      this.ctx.zones.setAnchor(
-        this.viewportAnchorName,
+      // Presence-clamped pan: the anchor sits at the screen centre, so it must
+      // stay inside a server-`present` macro_zone or the viewport would show
+      // void. Rather than reject a frame whose candidate overshoots the
+      // boundary (which stops a fast drag short of the edge a slow drag can
+      // creep to), clamp the candidate to the furthest present position along
+      // each axis. Clamp is computed from the gesture start each frame, so fast
+      // and slow drags settle at the same edge with no drift.
+      const { q: clampedQ, r: clampedR } = this.ctx.zones.clampPanTarget(
+        this.surface,
+        this.owner,
+        this.startViewQ,
+        this.startViewR,
         newQ,
         newR,
+      );
+      this.ctx.zones.setAnchor(
+        this.viewportAnchorName,
+        clampedQ,
+        clampedR,
         this.surface,
         this.owner,
       );

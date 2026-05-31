@@ -5,6 +5,7 @@ import type { CardDefinition } from "../../definitions/DefinitionManager";
 import { NOTO_EMOJI_FAMILY } from "../../../assets/fonts";
 import { microLooseCell } from "../../../server/data/packing";
 import localeRaw from "../../../content/locales/cards/en.json";
+import { panelText } from "../panelStrings";
 
 /** Surface threshold above which a card's `(macro_zone, micro_zone)`
  *  resolves to a world hex worth showing. Inventory (`1`) is below the
@@ -302,7 +303,7 @@ export class DetailsPanel extends LayoutNode {
     this.container.addChild(this.dividerGfx);
 
     this.descHeaderText = new Text({
-      text: "Description",
+      text: panelText("gameDetailsPanel", "descriptionHeader"),
       style: {
         fill: 0x778899,
         fontFamily: "sans-serif",

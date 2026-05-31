@@ -15,7 +15,6 @@ import type { MainManager } from "./scenes/main/MainManager";
 import type { InputManager } from "./game/input/InputManager";
 import type { LayoutManager } from "./game/layout/LayoutManager";
 import type { SceneManager } from "./scenes/SceneManager";
-import type { ConnectionRegistry } from "./server/spacetime/ConnectionRegistry";
 import type { ReducerManager } from "./server/spacetime/ReducerManager";
 import type { DataManager } from "./server/data/DataManager";
 // LayoutWorld is owned by MainLayout; world consumers reach the
@@ -38,7 +37,6 @@ export interface GameContext {
   readonly scenes: SceneManager;
   readonly definitions: DefinitionManager;
   // readonly recipes: RecipeManager;
-  readonly connections: ConnectionRegistry;
   readonly reducers: ReducerManager;
   readonly playerSession: PlayerManager;
   readonly souls: SoulManager;

@@ -1,5 +1,5 @@
 import { Application } from "pixi.js";
-import { debug, installPixiWarnInterceptor } from "./debug";
+import { installPixiWarnInterceptor } from "./debug";
 
 // Route PixiJS' internal `console.warn` chatter through `debug` so
 // the `"pixi"` tag in `debug/config` gates visibility. Has to run
@@ -21,9 +21,9 @@ import { SoulManager } from "./server/player/SoulManager";
 import type { GameContext } from "./GameContext";
 import { LoginScene } from "./scenes/login/LoginScene";
 import { SceneManager } from "./scenes/SceneManager";
-import { ConnectionRegistry } from "./server/spacetime/ConnectionRegistry";
 import { ReducerManager } from "./server/spacetime/ReducerManager";
 import { DataManager } from "./server/data/DataManager";
+import { closeSharedGate } from "./server/gate/GateConnection";
 import { DomPanel } from "./ui/dom/DomPanel";
 import panelDefaults from "./content/panels/defaults.json";
 import { ZoneManager, type QueryClass } from "./game/zones/ZoneManager";
@@ -37,7 +37,6 @@ import { SettingsMenu } from "./game/panels/titlebar/SettingsMenu";
 interface Runtime {
   app: Application;
   scenes: SceneManager;
-  connections: ConnectionRegistry;
   playerSession: PlayerManager;
   souls: SoulManager;
   data: DataManager;
@@ -199,37 +198,12 @@ async function main(): Promise<Runtime> {
   // const recipes = new RecipeManager(definitions);
   const zones = new ZoneManager();
 
-  const connections = new ConnectionRegistry({
-    uri: import.meta.env.VITE_SPACETIME_URI ?? "http://localhost:3000",
-    env: import.meta.env.VITE_SPACETIME_ENV ?? "dev",
-  });
-  const reducers = new ReducerManager(connections);
+  const reducers = new ReducerManager();
   debugPanel.setReducers(reducers);
-  connections.chat.addListener({
-    onConnected: (_conn, identity) => {
-      debug.log(["spacetime"], `[spacetime] chat connected as ${identity.toHexString()}`, 4);
-    },
-    onConnectError: (error: Error) => {
-      console.error("[spacetime] chat connect error", error);
-    },
-    onDisconnected: (error?: Error) => {
-      if (error) debug.warn(["spacetime"], `[spacetime] chat disconnected ${String(error)}`, 4);
-      else debug.log(["spacetime"], "[spacetime] chat disconnected", 4);
-    },
-  });
-  connections.players.addListener({
-    onConnected: (_conn, identity) => {
-      debug.log(["spacetime"], `[spacetime] players connected as ${identity.toHexString()}`, 4);
-    },
-    onConnectError: (error: Error) => {
-      console.error("[spacetime] players connect error", error);
-    },
-    onDisconnected: (error?: Error) => {
-      if (error) debug.warn(["spacetime"], `[spacetime] players disconnected ${String(error)}`, 4);
-      else debug.log(["spacetime"], "[spacetime] players disconnected", 4);
-    },
-  });
-  const data = new DataManager(connections, reducers, definitions);
+  // Every server transport is the gate now (cards, souls, zones, regions,
+  // chat, and players all flow over its WS protocol) — no direct
+  // SpacetimeDB SDK connection to construct or listen on.
+  const data = new DataManager(reducers, definitions);
 
   // Per-frame promote: lifts elapsed `valid_at` rows from each table's
   // `server` map into `current` and fires `added`/`updated`/`removed` events
@@ -325,33 +299,15 @@ async function main(): Promise<Runtime> {
       // discovery bitfield. One-off install per login (the row is
       // keyed by player_id and the SDK dedupes by subscription
       // name).
-      void data.playerSubscriptions.subscribePlayerProfile(player.playerId);
+      void data.subscriptions.subscribePlayerProfile(player.playerId);
     }
   });
 
-  // Reconnect-time clock re-sync. On the FIRST connect of a session,
-  // `PlayerManager.claimOrLogin` is the sync primitive — its server
-  // row write is delivered as a `Reducer`-tagged event that seeds
-  // `noteServerTime`. But on a mid-session reconnect, `claim_or_login`
-  // doesn't fire (the player is already cached), so the offset window
-  // is left with stale captures from the previous connection.
-  // `setLastLogin` is the per-reconnect re-sync hook: it updates the
-  // already-subscribed player row, which delivers as a `Reducer`-tagged
-  // event and re-seeds the window. `setLastLogin` is grace-exempt
-  // server-side (see `players::set_last_login`) so a stale-capture
-  // submission won't be rejected.
-  const reconnectResync = {
-    onConnected: () => {
-      if (!playerSession.isLoggedIn()) return;
-      void reducers.setLastLogin().catch((err) => {
-        debug.warn(["spacetime"], `[spacetime] reconnect setLastLogin failed: ${String(err)}`, 4);
-      });
-    },
-  };
-  // Re-seed the clock window on a mid-session reconnect. `setLastLogin`
-  // updates the `players` row, whose `Reducer`-tagged write is the canonical
-  // re-sync signal.
-  connections.players.addListener(reconnectResync);
+  // Clock sync no longer needs a reconnect hook: the gate streams a `time`
+  // heartbeat every second (see `GateSubscriptionManager` → `noteServerTime`),
+  // so the offset window re-seeds continuously and survives a reconnect on its
+  // own. (The old SDK path re-synced via a `setLastLogin` players-row write
+  // fired from the players connection's `onConnected`; both are gone.)
 
   // RTT is measured by bookending `performance.now()` around every
   // shard reducer call inside `ReducerManager`. Each user action
@@ -386,7 +342,6 @@ async function main(): Promise<Runtime> {
     drawCallCounter,
     definitions,
     // recipes,
-    connections,
     reducers,
     playerSession,
     souls,
@@ -409,11 +364,9 @@ async function main(): Promise<Runtime> {
   };
   scenes.setContext(ctx);
 
-  connections.connectAll();
-
   await scenes.change(new LoginScene());
 
-  return { app, scenes, connections, playerSession, souls, data, zones };
+  return { app, scenes, playerSession, souls, data, zones };
 }
 
 function showFatalError(error: unknown): void {
@@ -446,7 +399,7 @@ if (import.meta.hot) {
     rt.souls.dispose();
     rt.data.dispose();
     rt.playerSession.dispose();
-    rt.connections.disconnectAll();
+    closeSharedGate();
     await rt.scenes.dispose();
     rt.app.destroy(true, { children: true, texture: true });
     document

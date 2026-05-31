@@ -7,10 +7,16 @@ import { GRID_W, GRID_H } from "../../game/viewport/rect/GridInventory";
 import type { LayoutManager } from "../../game/layout/LayoutManager";
 import { LayoutNode } from "../../game/layout/LayoutNode";
 import { DetailsPanel } from "../../game/panels/details/DetailsPanel";
+import { panelTitle, panelText } from "../../game/panels/panelStrings";
 import { PanelTaskbar } from "../../ui/dom/PanelTaskbar";
 import { PixiPanel } from "../../ui/dom/PixiPanel";
 import type { DomZBand } from "../../ui/dom/DomPanel";
-import { INVENTORY_LAYER, WORLD_LAYER } from "../../server/data/packing";
+import { INVENTORY_LAYER, WORLD_LAYER, ZONE_SIZE } from "../../server/data/packing";
+
+/** Midpoint cell of a single-chunk board (cells `0..ZONE_SIZE-1`). Used as the
+ *  inventory viewport's anchor so a `"center"` origin centres the whole board
+ *  in the panel rather than pinning cell (0,0) to the top-left. */
+const BOARD_CENTER = (ZONE_SIZE - 1) / 2;
 
 /** Right-edge offset (in px) used for default rects of panels that
  *  want to sit inset from the right edge — a layout baseline. */
@@ -185,7 +191,7 @@ export class MainLayout extends LayoutNode {
     // is selected; `detailsPanel.show(...)` fires `onVisibilityChange`
     // which opens this host. Closable so the user can dismiss it.
     this.detailsHostPanel = new PixiPanel({
-      title: "Details",
+      title: panelTitle("gameDetailsPanel"),
       parent: this.chooserLayer,
       storageKey: "gameDetailsPanel",
       defaultRect: {
@@ -316,7 +322,7 @@ export class MainLayout extends LayoutNode {
       singleChunk: false,
       initialQ: 0,
       initialR: 0,
-      title: "Game View",
+      title: panelTitle("gameViewPanel"),
       titleSuffix: viewer !== null ? "soul" : "player",
       titleSuffixResolvers: this.titleResolvers(viewer),
       storageKey: `gameViewPanel:${WORLD_LAYER}:0`,
@@ -353,11 +359,15 @@ export class MainLayout extends LayoutNode {
       pan: true,
       occupancy: true,
       follow: false,
-      origin: "topleft",
+      // Centre the 8×8 board in the panel (matches the world view's centred
+      // origin). The anchor sits at the board's midpoint cell so a `"center"`
+      // origin puts the board centre at the panel centre; resizing the panel
+      // larger keeps the board centred instead of top-left-pinned.
+      origin: "center",
       singleChunk: true,
-      initialQ: 0,
-      initialR: 0,
-      title: "Inventory",
+      initialQ: BOARD_CENTER,
+      initialR: BOARD_CENTER,
+      title: panelTitle("gameInventoryPanel"),
       titleSuffix: "soul",
       titleSuffixResolvers: this.titleResolvers(owner),
       storageKey: `gameInventoryPanel:${INVENTORY_LAYER}:${owner}`,

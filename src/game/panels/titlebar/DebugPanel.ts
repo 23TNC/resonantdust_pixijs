@@ -3,6 +3,7 @@ import type { ReducerManager } from "../../../server/spacetime/ReducerManager";
 import { DomPanel } from "../../../ui/dom/DomPanel";
 import type { PanelTaskbar } from "../../../ui/dom/PanelTaskbar";
 import type { UiEditMode } from "../../../ui/dom/UiEditMode";
+import { panelTitle, panelText } from "../panelStrings";
 
 /** Frames between history samples. At ~60fps that's roughly 2Hz —
  *  combined with `ReducerManager.HISTORY_LIMIT = 600`, the sparkline
@@ -262,7 +263,7 @@ export class DebugPanel {
   ) {
     this.reducers = reducers;
     this.panel = new DomPanel({
-      title: "Debug",
+      title: panelTitle("debugPanel"),
       storageKey: "debugPanel",
       defaultRect: { right: "36px", top: "32px", width: "260px" },
       taskbar,
@@ -281,41 +282,41 @@ export class DebugPanel {
     // feature code reads to decide whether to render debug overlays.
     this.addToggleRow(
       mainContent,
-      "Debug info",
+      panelText("debugPanel", "debugInfo"),
       () => debug.showInfo,
       () => debug.toggleInfo(),
     );
-    this.mainServerNow = this.addRow(mainContent, "Server now");
-    this.mainOffset    = this.addRow(mainContent, "Offset");
-    this.mainFps       = this.addRow(mainContent, "FPS");
-    this.mainDrawCalls = this.addRow(mainContent, "Draw Calls");
+    this.mainServerNow = this.addRow(mainContent, panelText("debugPanel", "serverNow"));
+    this.mainOffset    = this.addRow(mainContent, panelText("debugPanel", "offset"));
+    this.mainFps       = this.addRow(mainContent, panelText("debugPanel", "fps"));
+    this.mainDrawCalls = this.addRow(mainContent, panelText("debugPanel", "drawCalls"));
 
     // ── Textures tab — atlas / slot counts ────────────────────────
-    this.texFps       = this.addRow(texturesContent, "FPS");
-    this.texDrawCalls = this.addRow(texturesContent, "Draw Calls");
-    this.texAtlases   = this.addRow(texturesContent, "Atlases");
-    this.texS256      = this.addRow(texturesContent, "256");
-    this.texS128      = this.addRow(texturesContent, "128");
-    this.texS64       = this.addRow(texturesContent, "64");
+    this.texFps       = this.addRow(texturesContent, panelText("debugPanel", "fps"));
+    this.texDrawCalls = this.addRow(texturesContent, panelText("debugPanel", "drawCalls"));
+    this.texAtlases   = this.addRow(texturesContent, panelText("debugPanel", "atlases"));
+    this.texS256      = this.addRow(texturesContent, panelText("debugPanel", "size256"));
+    this.texS128      = this.addRow(texturesContent, panelText("debugPanel", "size128"));
+    this.texS64       = this.addRow(texturesContent, panelText("debugPanel", "size64"));
 
     // ── Sync tab — full time-sync state ───────────────────────────
     // Clocks render `mm:ss.sss` within the current hour (plain rows;
     // the temporal axis is already visible in the value). Offsets,
     // captures count, and RTT get sparklines so trends across the
     // ~5-minute history window are visible at a glance.
-    this.syncDateNow       = this.addRow(syncContent, "Date.now");
-    this.syncServerNow     = this.addRow(syncContent, "Server now");
-    this.syncClientLag     = this.addGraphRow(syncContent, "Client delay");
-    this.syncRunningDelay  = this.addGraphRow(syncContent, "Running delay");
-    this.syncRunningDelta  = this.addGraphRow(syncContent, "Running delta");
-    this.syncDelta         = this.addGraphRow(syncContent, "Delta");
-    this.syncOffset        = this.addGraphRow(syncContent, "Offset");
-    this.syncBestOffset    = this.addGraphRow(syncContent, "Best capture");
-    this.syncWorstOffset   = this.addGraphRow(syncContent, "Worst capture");
-    this.syncCaptures      = this.addGraphRow(syncContent, "Captures");
-    this.syncCaptureOffset = this.addGraphRow(syncContent, "Capture spread");
-    this.syncRtt           = this.addGraphRow(syncContent, "RTT");
-    this.syncBestRtt       = this.addGraphRow(syncContent, "RTT (best)");
+    this.syncDateNow       = this.addRow(syncContent, panelText("debugPanel", "dateNow"));
+    this.syncServerNow     = this.addRow(syncContent, panelText("debugPanel", "serverNow"));
+    this.syncClientLag     = this.addGraphRow(syncContent, panelText("debugPanel", "clientDelay"));
+    this.syncRunningDelay  = this.addGraphRow(syncContent, panelText("debugPanel", "runningDelay"));
+    this.syncRunningDelta  = this.addGraphRow(syncContent, panelText("debugPanel", "runningDelta"));
+    this.syncDelta         = this.addGraphRow(syncContent, panelText("debugPanel", "delta"));
+    this.syncOffset        = this.addGraphRow(syncContent, panelText("debugPanel", "offset"));
+    this.syncBestOffset    = this.addGraphRow(syncContent, panelText("debugPanel", "bestCapture"));
+    this.syncWorstOffset   = this.addGraphRow(syncContent, panelText("debugPanel", "worstCapture"));
+    this.syncCaptures      = this.addGraphRow(syncContent, panelText("debugPanel", "captures"));
+    this.syncCaptureOffset = this.addGraphRow(syncContent, panelText("debugPanel", "captureSpread"));
+    this.syncRtt           = this.addGraphRow(syncContent, panelText("debugPanel", "rtt"));
+    this.syncBestRtt       = this.addGraphRow(syncContent, panelText("debugPanel", "rttBest"));
 
     this.panel.addTab("main",     "🛈", mainContent);
     this.panel.addTab("textures", "🖌", texturesContent);

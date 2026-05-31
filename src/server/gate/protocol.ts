@@ -31,4 +31,9 @@ export type GateMsg =
     }
   | { t: "call_ok"; cid: number }
   | { t: "call_err"; cid: number; error: string }
-  | { t: "error"; error: string };
+  | { t: "error"; error: string }
+  // Server-clock heartbeat: the gate's wall clock in microseconds since epoch
+  // (string — exceeds JS safe-integer range). Fed to `noteServerTime` so
+  // `serverNowMs()` tracks the gate's future-stamp timeline (the players SDK
+  // reducer-event anchor is gone once players move to the gate).
+  | { t: "time"; server_micros: string };

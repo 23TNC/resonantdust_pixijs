@@ -74,6 +74,11 @@ export type AnchorListener = (
 
 const TIERS: readonly ZoneTier[] = ["active", "hot", "cold"];
 
+/** Sub-cell margin the pan clamp keeps below a present zone's far edge so the
+ *  clamped anchor still `Math.floor`s into that zone (cell `(C+1)*ZONE_SIZE`
+ *  would round up into the next, `!present`, chunk). */
+const PAN_CLAMP_EPS = 1e-3;
+
 /** Map a tier to its subscription query class. `active`+`hot` → `full`,
  *  `cold` → `skeleton`, `null` → `none`. `set()` fires
  *  `onSubscriptionChange` only when this value changes, so active↔hot (both
@@ -430,6 +435,80 @@ export class ZoneManager {
     const zoneQ = Math.floor(q / ZONE_SIZE) * ZONE_SIZE;
     const zoneR = Math.floor(r / ZONE_SIZE) * ZONE_SIZE;
     return this.isZonePresent(makeMacroZone(owner, surface, zoneQ, zoneR).packed);
+  }
+
+  /**
+   * Clamp a pan target `(toQ, toR)` to the furthest *present* anchor position
+   * reachable from the known-present `(fromQ, fromR)`. Replaces the old
+   * "reject the whole frame" gate: rejecting stopped a fast drag short of the
+   * edge (the candidate overshoots the boundary, so the frame is dropped and
+   * the anchor never reaches the edge a slow drag could creep to). Clamping
+   * instead slides the anchor right up to the present-zone boundary so fast and
+   * slow drags settle at the same place.
+   *
+   * A present target is returned unchanged (fast path) — so every present cell
+   * is always fully reachable, no matter the path between `from` and `to`. The
+   * axis walk below only runs for a target that is itself `!present` (a drag
+   * into actual void), deciding where to stop short.
+   *
+   * For that void case each axis is clamped independently by walking
+   * chunk-by-chunk from `from` toward `to` and stopping at the first `!present`
+   * chunk — so a fast flick across several present zones still travels the full
+   * present span, only halting at the real frontier. The `q` axis is scanned
+   * against `fromR`'s row, then `r` against the already-clamped `q`'s column;
+   * that ordering guarantees the returned `(q, r)`'s zone was presence-checked
+   * (the `r` scan validates the final joint chunk), so the stop always lands on
+   * a present zone (verified exhaustively against an L-shaped boundary).
+   *
+   * `from` must itself be present (it's the live anchor, which we only ever set
+   * to present/clamped positions). Computed from the gesture start each frame
+   * by `PanController`, so the clamp is deterministic and drift-free.
+   */
+  clampPanTarget(
+    surface: number,
+    owner: number,
+    fromQ: number,
+    fromR: number,
+    toQ: number,
+    toR: number,
+  ): { q: number; r: number } {
+    if (this.panTargetPresent(surface, owner, toQ, toR)) return { q: toQ, r: toR };
+    const q = this.clampAxisToPresent(surface, owner, fromQ, toQ, fromR, true);
+    const r = this.clampAxisToPresent(surface, owner, fromR, toR, q, false);
+    return { q, r };
+  }
+
+  /** One axis of [`clampPanTarget`]. Walk chunks from `from` toward `to` along
+   *  the varying axis (`varyIsQ` picks which), holding the other axis at
+   *  `otherCoord`'s chunk; stop at the first `!present` chunk and clamp to the
+   *  present chunk's boundary in the direction of travel (far edge minus
+   *  `PAN_CLAMP_EPS` going up, chunk origin going down). Returns `to`
+   *  unchanged when the whole span is present. */
+  private clampAxisToPresent(
+    surface: number,
+    owner: number,
+    from: number,
+    to: number,
+    otherCoord: number,
+    varyIsQ: boolean,
+  ): number {
+    if (to === from) return to;
+    const dir = to > from ? 1 : -1;
+    const otherChunk = Math.floor(otherCoord / ZONE_SIZE);
+    const targetChunk = Math.floor(to / ZONE_SIZE);
+    let chunk = Math.floor(from / ZONE_SIZE);
+    while (chunk !== targetChunk) {
+      const nextChunk = chunk + dir;
+      const zoneQ = (varyIsQ ? nextChunk : otherChunk) * ZONE_SIZE;
+      const zoneR = (varyIsQ ? otherChunk : nextChunk) * ZONE_SIZE;
+      if (!this.isZonePresent(makeMacroZone(owner, surface, zoneQ, zoneR).packed)) {
+        return dir > 0
+          ? Math.min(to, (chunk + 1) * ZONE_SIZE - PAN_CLAMP_EPS)
+          : Math.max(to, chunk * ZONE_SIZE);
+      }
+      chunk = nextChunk;
+    }
+    return to;
   }
 
   /** Called from `set()` when a zone's desired query class crosses a boundary.

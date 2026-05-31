@@ -2,8 +2,7 @@ import type { GameContext } from "../../../GameContext";
 import type { ChatMessage } from "../../../server/spacetime/bindings/types";
 import { debug } from "../../../debug";
 import { DomPanel } from "../../../ui/dom/DomPanel";
-
-const PLACEHOLDER_TEXT = "Type a message…";
+import { panelTitle, panelText } from "../panelStrings";
 
 /** How close to the bottom the scroll has to be (in px) before we
  *  consider the user "anchored" and auto-scroll new messages into
@@ -115,7 +114,7 @@ export class ChatPanel {
     this.ctx = ctx;
 
     this.panel = new DomPanel({
-      title: "Chat",
+      title: panelTitle("chatPanel"),
       storageKey: "chatPanel",
       // Bottom-anchored above the taskbar strip. `PanelTaskbar.HEIGHT`
       // is the source of truth; reading from the static keeps this
@@ -142,7 +141,7 @@ export class ChatPanel {
     this.inputEl = document.createElement("input");
     this.inputEl.type = "text";
     this.inputEl.autocomplete = "off";
-    this.inputEl.placeholder = PLACEHOLDER_TEXT;
+    this.inputEl.placeholder = panelText("chatPanel", "inputPlaceholder");
     Object.assign(this.inputEl.style, INPUT_CSS);
     this.inputEl.addEventListener("keydown", (e) => this.onInputKeyDown(e));
     footer.appendChild(this.inputEl);
@@ -166,7 +165,7 @@ export class ChatPanel {
       ["chat"],
       `[ChatPanel] subscribing to chat: lastLogin=${lastLoginSecs}s now=${nowSecs}s → threshold=${thresholdSecs}s (packed=${thresholdPacked})`,
     );
-    void ctx.data.chatSubscriptions.subscribeChat(thresholdPacked);
+    void ctx.data.subscriptions.subscribeChat(thresholdPacked);
     void ctx.reducers.setLastLogin();
 
     // Seed initial render: any rows that already arrived before we
@@ -206,7 +205,7 @@ export class ChatPanel {
   destroy(): void {
     this.unsubChat();
     this.unsubLogs();
-    this.ctx.data.chatSubscriptions.unsubscribeChat();
+    this.ctx.data.subscriptions.unsubscribeChat();
     this.panel.destroy();
   }
 

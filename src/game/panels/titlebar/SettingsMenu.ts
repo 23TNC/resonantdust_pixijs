@@ -2,6 +2,7 @@ import { debug } from "../../../debug";
 import { DomPanel } from "../../../ui/dom/DomPanel";
 import type { PanelTaskbar } from "../../../ui/dom/PanelTaskbar";
 import type { UiEditMode } from "../../../ui/dom/UiEditMode";
+import { panelTitle, panelText } from "../panelStrings";
 
 const ITEM_CSS: Partial<CSSStyleDeclaration> = {
   padding: "10px 16px",
@@ -47,7 +48,7 @@ export class SettingsMenu {
   constructor(taskbar?: PanelTaskbar, uiEditMode?: UiEditMode) {
     this.uiEditMode = uiEditMode ?? null;
     this.panel = new DomPanel({
-      title: "Settings",
+      title: panelTitle("settingsMenu"),
       storageKey: "settingsMenu",
       defaultRect: { right: "0", top: "32px", width: "200px" },
       resizable: false,
@@ -68,7 +69,7 @@ export class SettingsMenu {
       // useful even in degenerate setups.
       this.uiEditMode?.toggle();
     });
-    this.addItem(body, "Reset All Panels", () => {
+    this.addItem(body, panelText("settingsMenu", "resetPanels"), () => {
       // Recovery escape hatch for the "I dragged chat off-screen
       // and can't find it" case. Sweeps every live `DomPanel`
       // back to its constructor-defined position / size / toggle
@@ -77,16 +78,16 @@ export class SettingsMenu {
       DomPanel.resetAllToDefaults();
       this.panel.close();
     });
-    this.addItem(body, "Log Out", () => {
+    this.addItem(body, panelText("settingsMenu", "logOut"), () => {
       this.panel.close();
       if (this.onLogOut) this.onLogOut();
       else debug.log(["ui"], "[SettingsMenu] Log Out: no handler set", 2);
     });
-    this.addItem(body, "Toggle Fullscreen", () => {
+    this.addItem(body, panelText("settingsMenu", "toggleFullscreen"), () => {
       if (this.onToggleFullscreen) this.onToggleFullscreen();
       else debug.log(["ui"], "[SettingsMenu] Toggle Fullscreen: not implemented", 2);
     });
-    this.addItem(body, "Sound", () => {
+    this.addItem(body, panelText("settingsMenu", "sound"), () => {
       if (this.onSound) this.onSound();
       else debug.log(["ui"], "[SettingsMenu] Sound: not implemented", 2);
     });
@@ -101,8 +102,10 @@ export class SettingsMenu {
   }
 
   private editModeLabel(): string {
-    if (!this.uiEditMode) return "UI Edit Mode (unavailable)";
-    return this.uiEditMode.enabled ? "Exit UI Edit Mode" : "Enter UI Edit Mode";
+    if (!this.uiEditMode) return panelText("settingsMenu", "editModeUnavailable");
+    return this.uiEditMode.enabled
+      ? panelText("settingsMenu", "exitEditMode")
+      : panelText("settingsMenu", "enterEditMode");
   }
 
   private addItem(parent: HTMLDivElement, label: string, onClick: () => void): HTMLButtonElement {

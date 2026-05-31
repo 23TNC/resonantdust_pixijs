@@ -53,7 +53,6 @@ export type AspectCategory = "aspect" | "feature" | "trait";
 export interface AspectInfo {
   id: number;
   name: string;
-  description: string;
   /** Optional — defaults to `""` for entries (typically `trait`-category)
    *  with no display intent. */
   icon: string;
@@ -207,7 +206,9 @@ export async function initDefinitions(): Promise<void> {
 
 export class DefinitionManager {
   /** Look up an aspect by numeric id. Returns `null` for id 0 (ASPECT_NONE)
-   *  and unknown ids. Includes `name`, `description`, `icon`, and `group`. */
+   *  and unknown ids. Includes `name`, `icon`, `color`, and `group`.
+   *  Labels / descriptions are resolved separately via the locales
+   *  registry (`aspectLabel` / `aspectDescription`). */
   aspectInfo(id: number): AspectInfo | null {
     const raw = wasmAspectInfo(id);
     return raw === null ? null : (raw as AspectInfo);

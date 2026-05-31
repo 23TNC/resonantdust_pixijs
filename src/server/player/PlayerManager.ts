@@ -53,32 +53,24 @@ export class PlayerManager {
     // appearance in `current` after the next promote tick.
     const arrived = this.waitForPlayer(name);
 
-    // **Subscribe BEFORE the reducer call.** This reducer is the
-    // session's clock-sync primitive: the server's row write needs to
-    // be delivered to *this client* via the transaction-update path
-    // (not the post-subscribe initial-state path) so the row
-    // callback fires with a `Reducer`-tagged event. That's what the
-    // existing `captureReducerTimestamp` mechanism in
-    // `SubscriptionBase` keys off of to seed `noteServerTime` and
-    // sync the offset window. If we called the reducer first and
-    // subscribed after, the row would arrive via initial-subscription
-    // delivery (no timestamp) and we'd stay unsynced.
+    // Subscribe BEFORE the reducer call so the row's first appearance
+    // (existing player resolved by name, or freshly inserted) is
+    // already covered by a live subscription when the gate fans it
+    // back. Subscribing to a name that doesn't yet exist is fine — the
+    // gate returns an empty initial set, then the upcoming reducer
+    // write matches the filter and gets delivered as a row update.
     //
-    // Subscribing to a name that doesn't yet exist is fine — the SDK
-    // returns an empty initial set, then the upcoming reducer write
-    // matches the filter and gets delivered as a row update.
-    await this.data.playerSubscriptions.subscribePlayerByName(name);
+    // Clock sync no longer rides this reducer's delivery: the gate's
+    // `time` heartbeat (`GateSubscriptionManager` → `onReducerEvent` →
+    // `noteServerTime`) is the offset source now, independent of any
+    // players row write.
+    await this.data.subscriptions.subscribePlayerByName(name);
     this.subscribedName = name;
 
-    // Reducer next. Server has either resolved the existing player
-    // row by name or inserted a new one, and the (caller identity →
-    // player_id) mapping in `player_sessions` is bound. A reducer
-    // error (reserved name, validation failure) throws here, before
-    // we wait on the row. claim_or_login is exempt from the server's
-    // `effective_now_ms` grace check (see `players.rs`) since it's
-    // the very call that establishes the offset — the `client_time_ms`
-    // we send is whatever stale value `serverNowMs()` returns from
-    // the fallback, and that's fine.
+    // Reducer next. The gate establishes the session (WS → player_id,
+    // read from the resolved/created players row by name) as part of
+    // relaying this call. A reducer error (reserved name, validation
+    // failure) throws here, before we wait on the row.
     await this.reducers.claimOrLogin({ name });
 
     const player = await arrived;
@@ -88,7 +80,7 @@ export class PlayerManager {
 
   dispose(): void {
     if (this.subscribedName !== null) {
-      this.data.playerSubscriptions.unsubscribePlayerByName(this.subscribedName);
+      this.data.subscriptions.unsubscribePlayerByName(this.subscribedName);
       this.subscribedName = null;
     }
     this.player = null;

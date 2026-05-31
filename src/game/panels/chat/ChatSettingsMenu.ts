@@ -1,3 +1,5 @@
+import { panelTitle, panelText } from "../panelStrings";
+
 const HOST_ID = "app";
 
 const MIN_FONT_SIZE = 10;
@@ -146,7 +148,7 @@ export class ChatSettingsMenu {
     const header = document.createElement("div");
     Object.assign(header.style, HEADER_CSS);
     const title = document.createElement("span");
-    title.textContent = "Chat Settings";
+    title.textContent = panelTitle("chatSettings");
     const closeBtn = document.createElement("button");
     Object.assign(closeBtn.style, CLOSE_BTN_CSS);
     closeBtn.textContent = "✕";
@@ -160,7 +162,7 @@ export class ChatSettingsMenu {
     Object.assign(fontRow.style, ROW_CSS);
     const fontLabel = document.createElement("span");
     Object.assign(fontLabel.style, LABEL_CSS);
-    fontLabel.textContent = "Font size";
+    fontLabel.textContent = panelText("chatSettings", "fontSize");
     const stepper = document.createElement("div");
     Object.assign(stepper.style, STEPPER_CSS);
     const decBtn = document.createElement("button");
@@ -186,13 +188,13 @@ export class ChatSettingsMenu {
     Object.assign(tsRow.style, TOGGLE_ROW_CSS);
     const tsLabel = document.createElement("span");
     Object.assign(tsLabel.style, LABEL_CSS);
-    tsLabel.textContent = "Timestamps";
+    tsLabel.textContent = panelText("chatSettings", "timestamps");
     const tsBtns = document.createElement("div");
     Object.assign(tsBtns.style, STEPPER_CSS);
     this.timestampsOnBtn = document.createElement("button");
-    this.timestampsOnBtn.textContent = "On";
+    this.timestampsOnBtn.textContent = panelText("chatSettings", "on");
     this.timestampsOffBtn = document.createElement("button");
-    this.timestampsOffBtn.textContent = "Off";
+    this.timestampsOffBtn.textContent = panelText("chatSettings", "off");
     this.timestampsOnBtn.addEventListener("click", () => this.setTimestamps(true));
     this.timestampsOffBtn.addEventListener("click", () => this.setTimestamps(false));
     tsBtns.appendChild(this.timestampsOnBtn);
@@ -206,13 +208,13 @@ export class ChatSettingsMenu {
     Object.assign(sysRow.style, TOGGLE_ROW_CSS);
     const sysLabel = document.createElement("span");
     Object.assign(sysLabel.style, LABEL_CSS);
-    sysLabel.textContent = "System messages";
+    sysLabel.textContent = panelText("chatSettings", "systemMessages");
     const sysBtns = document.createElement("div");
     Object.assign(sysBtns.style, STEPPER_CSS);
     this.systemMsgsOnBtn = document.createElement("button");
-    this.systemMsgsOnBtn.textContent = "On";
+    this.systemMsgsOnBtn.textContent = panelText("chatSettings", "on");
     this.systemMsgsOffBtn = document.createElement("button");
-    this.systemMsgsOffBtn.textContent = "Off";
+    this.systemMsgsOffBtn.textContent = panelText("chatSettings", "off");
     this.systemMsgsOnBtn.addEventListener("click", () => this.setSystemMsgs(true));
     this.systemMsgsOffBtn.addEventListener("click", () => this.setSystemMsgs(false));
     sysBtns.appendChild(this.systemMsgsOnBtn);

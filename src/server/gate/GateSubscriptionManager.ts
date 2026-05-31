@@ -9,21 +9,32 @@
 //! per-table and fanned out to the registered handlers, just like the SDK
 //! callbacks did.
 //!
-//! Gaps vs the SDK path (deliberate, for later): no auto-reconnect re-issue yet
-//! (the gate connection queues pre-open sends, so initial connect is covered);
-//! `onReducerEvent` never fires (the gate read path carries no reducer-event
-//! timestamps), so `serverNowMs` falls back to its `Date.now()` baseline —
-//! fine for past-stamped terrain, revisit when writes move over.
+//! Clock: the gate pushes a `time` heartbeat (its wall clock — the timeline it
+//! future-stamps on) every second, which `dispatch` feeds to `onReducerEvent`
+//! → `noteServerTime`. That replaces the SDK's reducer-event timestamps as the
+//! `serverNowMs()` anchor, so the gate path no longer falls back to `Date.now()`.
+//!
+//! Gap vs the SDK path (deliberate, for later): no auto-reconnect re-issue yet
+//! (the gate connection queues pre-open sends, so initial connect is covered).
 
 import { type ZoneId } from "../data/packing";
 import type { Card, Soul, SoulPrivate } from "../spacetime/bindings/cards/types";
 import type { Region, Zone } from "../spacetime/bindings/regions/types";
-import type { TableHandlers } from "../spacetime/SubscriptionBase";
+import type { ChatMessage } from "../spacetime/bindings/chat/types";
+import type { Player, PlayerProfile } from "../spacetime/bindings/players/types";
 import { debug } from "../../debug";
 import { sharedGate } from "./GateConnection";
 import type { GateMsg, RawRow } from "./protocol";
 
-export type { TableHandlers };
+/** Insert/update/delete callbacks a consumer registers for a table. The gate
+ *  fan-out invokes whichever are present per row op. (Formerly defined on the
+ *  SDK `SubscriptionBase`; now SDK-free and owned here, the sole subscription
+ *  manager.) */
+export interface TableHandlers<T> {
+  onInsert?: (row: T) => void;
+  onUpdate?: (oldRow: T, newRow: T) => void;
+  onDelete?: (row: T) => void;
+}
 
 type GateTableRowMap = {
   cards: Card;
@@ -35,11 +46,20 @@ type GateTableRowMap = {
   // to a `cards` row; addressed under a distinct logical name so the gate routes
   // it to the regions upstream rather than the cards DB.
   tile_cards: Card;
+  // Global world chat (chat DB). Append-only; `sentAt` is the u64 key. Carries
+  // genuine string columns (`senderName`, `body`) — see STRING_FIELDS.
+  chat_messages: ChatMessage;
+  // Players auth DB. `players` is versioned (`validAt` u64 key) and carries a
+  // string `name`; `player_profiles` is flat, keyed by `playerId`.
+  players: Player;
+  player_profiles: PlayerProfile;
 };
 type GateTable = keyof GateTableRowMap;
 
-/** u64 fields (the wire delivers all numbers as strings; these become
- *  `bigint`, the rest `number`). Mirrors the generated row types. */
+/** u64 fields → `bigint`. The wire delivers all *numbers* as strings (so they
+ *  survive 64-bit), so a field here becomes `bigint`; a field in
+ *  [`STRING_FIELDS`] stays a `string`; everything else becomes `number`. Mirrors
+ *  the generated row types. */
 const BIGINT_FIELDS: Record<GateTable, ReadonlySet<string>> = {
   cards: new Set(["validAt", "macroZone"]),
   souls: new Set(["validAt", "macroZone"]),
@@ -51,12 +71,28 @@ const BIGINT_FIELDS: Record<GateTable, ReadonlySet<string>> = {
   ]),
   regions: new Set(["validAt", "macroRegion", "zonePresence", "zoneAvailable"]),
   tile_cards: new Set(["validAt", "macroZone"]),
+  chat_messages: new Set(["sentAt"]),
+  players: new Set(["validAt"]),
+  player_profiles: new Set([]),
+};
+
+/** Genuine `string` columns — kept verbatim (NOT `Number(...)`'d, which would
+ *  yield `NaN`). On the wire a real string and a stringified number are
+ *  indistinguishable, so the schema must say which is which. */
+const STRING_FIELDS: Partial<Record<GateTable, ReadonlySet<string>>> = {
+  chat_messages: new Set(["senderName", "body"]),
+  players: new Set(["name"]),
 };
 
 function coerce<K extends GateTable>(table: K, raw: RawRow): GateTableRowMap[K] {
   const big = BIGINT_FIELDS[table];
+  const str = STRING_FIELDS[table];
   const out: Record<string, unknown> = {};
-  for (const k in raw) out[k] = big.has(k) ? BigInt(raw[k] as string) : Number(raw[k]);
+  for (const k in raw) {
+    if (big.has(k)) out[k] = BigInt(raw[k] as string);
+    else if (str?.has(k)) out[k] = raw[k];
+    else out[k] = Number(raw[k]);
+  }
   return out as GateTableRowMap[K];
 }
 
@@ -95,11 +131,11 @@ export class GateSubscriptionManager {
   constructor(options?: { onReducerEvent?: (microsSinceUnixEpoch: bigint) => void }) {
     this.onReducerEvent = options?.onReducerEvent;
     this.conn.setDispatch((msg) => this.dispatch(msg));
-    debug.log(["gate"], "GateSubscriptionManager init (connect deferred to first use)", 3);
+    debug.log(["gate"], "GateSubscriptionManager init (connect deferred to first use)", 4);
   }
 
   /** Register insert/update/delete handlers for a table; returns an
-   *  unregister fn. Matches `SubscriptionBase.registerTableHandlers`. */
+   *  unregister fn. */
   registerTableHandlers<K extends GateTable>(
     table: K,
     handlers: TableHandlers<GateTableRowMap[K]>,
@@ -110,7 +146,7 @@ export class GateSubscriptionManager {
       this.handlers.set(table, set);
     }
     set.add(handlers as TableHandlers<unknown>);
-    debug.log(["gate"], `registered handler for "${String(table)}" (${set.size} total)`, 3);
+    debug.log(["gate"], `registered handler for "${String(table)}" (${set.size} total)`, 2);
     return () => {
       set!.delete(handlers as TableHandlers<unknown>);
     };
@@ -134,7 +170,7 @@ export class GateSubscriptionManager {
   private install(name: string, scopeKey: string, defs: SubDef[]): Promise<void> {
     const existing = this.subs.get(name);
     if (existing && existing.scopeKey === scopeKey) {
-      debug.log(["gate"], `sub "${name}" already active (scope=${scopeKey}), skipping`, 3);
+      debug.log(["gate"], `sub "${name}" already active (scope=${scopeKey}), skipping`, 2);
       return Promise.resolve();
     }
     if (existing) this.removeByName(name);
@@ -171,7 +207,7 @@ export class GateSubscriptionManager {
     return new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         if (this.pendingApplied.delete(sid)) {
-          debug.warn(["gate"], `sub sid=${sid} not applied within ${APPLIED_TIMEOUT_MS}ms; proceeding`, 0);
+          debug.warn(["gate"], `sub sid=${sid} not applied within ${APPLIED_TIMEOUT_MS}ms; proceeding`, 4);
           resolve();
         }
       }, APPLIED_TIMEOUT_MS);
@@ -199,12 +235,17 @@ export class GateSubscriptionManager {
   private dispatch(msg: GateMsg): void {
     switch (msg.t) {
       case "row": {
-        const table = this.sidTable.get(msg.sid);
-        if (!table) {
-          debug.warn(["gate"], `row for unknown sid ${msg.sid} (table?)`, 0);
+        // Routed by **table**, not sid. The gate registers row callbacks once
+        // per table and tags rows with a sentinel sid, so the client fans by the
+        // table name the message carries. `sidTable` remains only for `applied`
+        // correlation / unsub bookkeeping, not row routing. (Tolerant of the old
+        // gate too: it sent the real table on every row.)
+        if (!Object.prototype.hasOwnProperty.call(BIGINT_FIELDS, msg.table)) {
+          debug.warn(["gate"], `row ${msg.op} for unknown table ${msg.table}`, 4);
           return;
         }
-        debug.log(["gate"], `row ${msg.op} ${table}#${msg.sid}`, 2);
+        const table = msg.table as GateTable;
+        debug.log(["gate"], `row ${msg.op} ${table}`, 1);
         const row = coerce(table, msg.row);
         if (msg.op === "insert") {
           this.fanOut(table, (h) => h.onInsert?.(row));
@@ -217,11 +258,17 @@ export class GateSubscriptionManager {
         return;
       }
       case "applied":
-        debug.log(["gate"], `applied sid=${msg.sid}`, 3);
+        // Logged at the connection's recv chokepoint (`← applied sid=N`).
         this.pendingApplied.get(msg.sid)?.();
         return;
+      case "time":
+        // The gate's server-clock heartbeat — feed the clock discipline so
+        // `serverNowMs()` tracks the gate's future-stamp timeline. This is the
+        // gate-path replacement for the SDK's reducer-event timestamps.
+        this.onReducerEvent?.(BigInt(msg.server_micros));
+        return;
       case "error":
-        debug.warn(["gate"], msg.error);
+        debug.warn(["gate"], msg.error, 4);
         return;
     }
   }
@@ -229,10 +276,10 @@ export class GateSubscriptionManager {
   private fanOut(table: GateTable, fn: (h: TableHandlers<unknown>) => void): void {
     const set = this.handlers.get(table);
     if (!set || set.size === 0) {
-      debug.warn(["gate"], `no handlers registered for "${table}" — row dropped`, 0);
+      debug.warn(["gate"], `no handlers registered for "${table}" — row dropped`, 4);
       return;
     }
-    debug.log(["gate"], `fanOut ${table} → ${set.size} handler(s)`, 2);
+    debug.log(["gate"], `fanOut ${table} → ${set.size} handler(s)`, 1);
     for (const h of set) {
       try {
         fn(h);
@@ -290,6 +337,40 @@ export class GateSubscriptionManager {
   }
   unsubscribeRegion(macroRegion: bigint): void {
     this.removeByName(`region:${macroRegion}`);
+  }
+
+  /** Subscribe to the global chat feed with a `sent_at` cutoff — only rows whose
+   *  `sent_at > threshold` (packed u64) flow through. Re-subscribing with a new
+   *  threshold replaces the prior window (single `"chat"` scope). */
+  subscribeChat(threshold: bigint): Promise<void> {
+    return this.install("chat", `since:${threshold.toString()}`, [
+      { table: "chat_messages", filter: `sent_at > ${threshold.toString()}` },
+    ]);
+  }
+  unsubscribeChat(): void {
+    this.removeByName("chat");
+  }
+
+  /** Subscribe to the caller's player row by name (the login lookup). The gate
+   *  reads the resulting `player_id` off this same row to establish the session. */
+  subscribePlayerByName(name: string): Promise<void> {
+    const escaped = name.replace(/'/g, "''");
+    return this.install(`player:${name}`, `player:${name}`, [
+      { table: "players", filter: `name = '${escaped}'` },
+    ]);
+  }
+  unsubscribePlayerByName(name: string): void {
+    this.removeByName(`player:${name}`);
+  }
+
+  /** Subscribe to the caller's own `player_profiles` row. */
+  subscribePlayerProfile(playerId: number): Promise<void> {
+    return this.install(`player_profile:${playerId}`, `player_profile:${playerId}`, [
+      { table: "player_profiles", filter: `player_id = ${playerId}` },
+    ]);
+  }
+  unsubscribePlayerProfile(playerId: number): void {
+    this.removeByName(`player_profile:${playerId}`);
   }
 
   subscribeCard(cardId: number): Promise<void> {

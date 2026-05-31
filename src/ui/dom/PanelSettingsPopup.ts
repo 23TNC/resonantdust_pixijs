@@ -1,4 +1,5 @@
 import { NOTO_EMOJI_FAMILY } from "../../assets/fonts";
+import { panelTitle, panelText } from "../../game/panels/panelStrings";
 import { CyclingSelect } from "./CyclingSelect";
 import {
   DomPanel,
@@ -9,6 +10,13 @@ import {
   type SnapMode,
   type TitleSuffix,
 } from "./DomPanel";
+
+/** Panels-locale key for this popup (matches `content/panels/defaults.json`
+ *  and `content/locales/panels/en.json`). */
+const POPUP = "panelSettingsPopup";
+/** Resolve one of this popup's strings from the panels locale. Short
+ *  alias since every label / option below flows through it. */
+const pp = (key: string): string => panelText(POPUP, key);
 
 /**
  * Shared "Panel Settings" popup. One instance per app session,
@@ -95,47 +103,61 @@ const CYCLER_WRAP_CSS: Partial<CSSStyleDeclaration> = {
   display: "flex",
 };
 
-const ANCHOR_OPTIONS: readonly { value: AnchorMode; label: string }[] = [
-  { value: "top-left",     label: "Top Left" },
-  { value: "top-right",    label: "Top Right" },
-  { value: "bottom-left",  label: "Bottom Left" },
-  { value: "bottom-right", label: "Bottom Right" },
+// Option lists carry a locale `labelKey` rather than a baked label —
+// these consts evaluate at module load, before the wasm locale
+// registry is initialised, so the display string is resolved lazily
+// in `localizeOptions` at row-construction time (inside the
+// constructor, post-init). `value` stays the typed mode enum.
+const ANCHOR_OPTIONS: readonly { value: AnchorMode; labelKey: string }[] = [
+  { value: "top-left",     labelKey: "topLeft" },
+  { value: "top-right",    labelKey: "topRight" },
+  { value: "bottom-left",  labelKey: "bottomLeft" },
+  { value: "bottom-right", labelKey: "bottomRight" },
 ];
 
-const SNAP_OPTIONS: readonly { value: SnapMode; label: string }[] = [
-  { value: "none",         label: "None" },
-  { value: "top-left",     label: "Top Left" },
-  { value: "top-right",    label: "Top Right" },
-  { value: "bottom-left",  label: "Bottom Left" },
-  { value: "bottom-right", label: "Bottom Right" },
+const SNAP_OPTIONS: readonly { value: SnapMode; labelKey: string }[] = [
+  { value: "none",         labelKey: "none" },
+  { value: "top-left",     labelKey: "topLeft" },
+  { value: "top-right",    labelKey: "topRight" },
+  { value: "bottom-left",  labelKey: "bottomLeft" },
+  { value: "bottom-right", labelKey: "bottomRight" },
 ];
 
-const HEIGHT_OPTIONS: readonly { value: HeightMode; label: string }[] = [
-  { value: "off",     label: "Off" },
-  { value: "auto",    label: "Auto" },
-  { value: "full",    label: "Full" },
-  { value: "half",    label: "Half" },
-  { value: "quarter", label: "Quarter" },
+const HEIGHT_OPTIONS: readonly { value: HeightMode; labelKey: string }[] = [
+  { value: "off",     labelKey: "off" },
+  { value: "auto",    labelKey: "auto" },
+  { value: "full",    labelKey: "full" },
+  { value: "half",    labelKey: "half" },
+  { value: "quarter", labelKey: "quarter" },
 ];
 
-/** Display labels for every possible suffix mode. The popup row
- *  filters this down to the subset the bound panel actually
- *  supports (via `availableTitleSuffixes`). */
-const TITLE_SUFFIX_LABELS: Record<TitleSuffix, string> = {
-  none:   "None",
-  player: "Player",
-  soul:   "Soul",
+/** Locale key for every possible suffix mode. The popup row filters
+ *  this down to the subset the bound panel actually supports (via
+ *  `availableTitleSuffixes`). Resolved through `pp` at bind time. */
+const TITLE_SUFFIX_KEYS: Record<TitleSuffix, string> = {
+  none:   "none",
+  player: "player",
+  soul:   "soul",
 };
 
-const PIN_OPTIONS: readonly { value: PinMode; label: string }[] = [
-  { value: "none",          label: "None" },
-  { value: "bottom-left",   label: "Bottom Left" },
-  { value: "bottom-center", label: "Bottom Center" },
-  { value: "bottom-right",  label: "Bottom Right" },
-  { value: "top-left",      label: "Top Left" },
-  { value: "top-center",    label: "Top Center" },
-  { value: "top-right",     label: "Top Right" },
+const PIN_OPTIONS: readonly { value: PinMode; labelKey: string }[] = [
+  { value: "none",          labelKey: "none" },
+  { value: "bottom-left",   labelKey: "bottomLeft" },
+  { value: "bottom-center", labelKey: "bottomCenter" },
+  { value: "bottom-right",  labelKey: "bottomRight" },
+  { value: "top-left",      labelKey: "topLeft" },
+  { value: "top-center",    labelKey: "topCenter" },
+  { value: "top-right",     labelKey: "topRight" },
 ];
+
+/** Map a `labelKey`-carrying option list into the `{value, label}`
+ *  shape `CyclingSelect` consumes, resolving each label from the
+ *  panels locale. Call at row-construction time (post wasm-init). */
+function localizeOptions<T extends string>(
+  opts: readonly { value: T; labelKey: string }[],
+): { value: T; label: string }[] {
+  return opts.map(o => ({ value: o.value, label: pp(o.labelKey) }));
+}
 
 export class PanelSettingsPopup {
   private readonly panel: DomPanel;
@@ -220,7 +242,7 @@ export class PanelSettingsPopup {
 
   constructor() {
     this.panel = new DomPanel({
-      title: "Panel Settings",
+      title: panelTitle(POPUP),
       storageKey: "panelSettingsPopup",
       defaultRect: { right: "12px", top: "44px", width: "260px" },
       resizable: false,
@@ -231,16 +253,16 @@ export class PanelSettingsPopup {
     });
 
     const body = document.createElement("div");
-    const titleRow  = this.addToggleRow(body, "Title bar", "▣", () => this.boundPanel?.toggleTitleBarHidden());
+    const titleRow  = this.addToggleRow(body, pp("titleBar"), "▣", () => this.boundPanel?.toggleTitleBarHidden());
     this.titleBarBtn = titleRow.btn;
     this.rowsByKey.set("titleBar", titleRow.row);
-    const gridRow   = this.addToggleRow(body, "Grid snap", "▣", () => this.boundPanel?.toggleGridSnap());
+    const gridRow   = this.addToggleRow(body, pp("gridSnap"), "▣", () => this.boundPanel?.toggleGridSnap());
     this.gridSnapBtn = gridRow.btn;
     this.rowsByKey.set("gridSnap", gridRow.row);
     const anchorRow = this.addAnchorRow(body);
     this.anchorSelect = anchorRow.select;
     this.rowsByKey.set("anchor", anchorRow.row);
-    const draggableRow = this.addToggleRow(body, "Draggable", "▣", () => {
+    const draggableRow = this.addToggleRow(body, pp("draggable"), "▣", () => {
       const p = this.boundPanel;
       // Snap-forces-drag-off — no-op the click so the user
       // doesn't get a confusing "I pressed it but nothing
@@ -267,16 +289,16 @@ export class PanelSettingsPopup {
     this.titleSuffixRow  = titleSuffixRow.row;
     this.titleSuffixWrap = titleSuffixRow.wrap;
     this.rowsByKey.set("titleSuffix", titleSuffixRow.row);
-    const minRow = this.addToggleRow(body, "Minimize", "▣", () => this.boundPanel?.toggleMinimizable());
+    const minRow = this.addToggleRow(body, pp("minimize"), "▣", () => this.boundPanel?.toggleMinimizable());
     this.minimizableBtn = minRow.btn;
     this.rowsByKey.set("minimize", minRow.row);
-    const hideMinRow = this.addToggleRow(body, "Hide Minimize", "▢", () => this.boundPanel?.toggleHideMinimizeBtn());
+    const hideMinRow = this.addToggleRow(body, pp("hideMinimize"), "▢", () => this.boundPanel?.toggleHideMinimizeBtn());
     this.hideMinimizeBtnBtn = hideMinRow.btn;
     this.rowsByKey.set("hideMinimize", hideMinRow.row);
-    const resXRow = this.addToggleRow(body, "Resize Horizontal", "▣", () => this.boundPanel?.toggleResizableX());
+    const resXRow = this.addToggleRow(body, pp("resizeHorizontal"), "▣", () => this.boundPanel?.toggleResizableX());
     this.resizableXBtn = resXRow.btn;
     this.rowsByKey.set("resizeX", resXRow.row);
-    const resYRow = this.addToggleRow(body, "Resize Vertical",   "▣", () => {
+    const resYRow = this.addToggleRow(body, pp("resizeVertical"),   "▣", () => {
       const p = this.boundPanel;
       // Height-lock-forces-Y-off — same no-op pattern as the
       // Draggable row above.
@@ -285,10 +307,10 @@ export class PanelSettingsPopup {
     });
     this.resizableYBtn = resYRow.btn;
     this.rowsByKey.set("resizeY", resYRow.row);
-    const closeRow = this.addToggleRow(body, "Close",  "▣", () => this.boundPanel?.toggleClosable());
+    const closeRow = this.addToggleRow(body, pp("close"),  "▣", () => this.boundPanel?.toggleClosable());
     this.closableBtn = closeRow.btn;
     this.rowsByKey.set("close", closeRow.row);
-    const hideCloseRow = this.addToggleRow(body, "Hide Close", "▢", () => this.boundPanel?.toggleHideCloseBtn());
+    const hideCloseRow = this.addToggleRow(body, pp("hideClose"), "▢", () => this.boundPanel?.toggleHideCloseBtn());
     this.hideCloseBtnBtn = hideCloseRow.btn;
     this.rowsByKey.set("hideClose", hideCloseRow.row);
     // Mask: stencil-clip the panel body's Pixi content to the body
@@ -297,7 +319,7 @@ export class PanelSettingsPopup {
     // claw those drawcalls back. Default-hidden on non-Pixi panels
     // — `DomPanel` adds `"mask"` to `_hiddenSettings` for the base
     // class; `PixiPanel` removes it.
-    const maskRow = this.addToggleRow(body, "Mask", "▣", () => this.boundPanel?.toggleMasked());
+    const maskRow = this.addToggleRow(body, pp("mask"), "▣", () => this.boundPanel?.toggleMasked());
     this.maskBtn = maskRow.btn;
     this.rowsByKey.set("mask", maskRow.row);
     const layerRow = this.addLayerRow(body);
@@ -306,7 +328,7 @@ export class PanelSettingsPopup {
     this.rowsByKey.set("layer", layerRow.row);
     // Reset is a one-shot action, not a toggle — uses the same
     // row shape but the button is ↺ and doesn't reflect any state.
-    const resetRow = this.addToggleRow(body, "Reset", "↺", () => {
+    const resetRow = this.addToggleRow(body, pp("reset"), "↺", () => {
       this.boundPanel?.resetToDefaults();
     });
     this.rowsByKey.set("reset", resetRow.row);
@@ -319,7 +341,7 @@ export class PanelSettingsPopup {
     // Falls back to a textarea-select copy when the async
     // Clipboard API is unavailable (older browsers, non-secure
     // contexts). Button glyph briefly flips to ✓ / ⚠ for feedback.
-    const copyRow = this.addToggleRow(body, "Copy JSON", "📋", () => {
+    const copyRow = this.addToggleRow(body, pp("copyJson"), "📋", () => {
       const p = this.boundPanel;
       if (!p) return;
       const key = p.defaultsKey ?? p.storageKey;
@@ -341,7 +363,7 @@ export class PanelSettingsPopup {
     // user has tweaked several panels and wants one paste covering
     // the whole layout. Panels without either key are skipped (no
     // way to address them in the defaults file).
-    const copyAllRow = this.addToggleRow(body, "Copy All JSON", "📋📋", () => {
+    const copyAllRow = this.addToggleRow(body, pp("copyAllJson"), "📋📋", () => {
       const all = DomPanel.collectAllPanelStates();
       const payload = JSON.stringify(all, null, 2);
       void this.writeClipboard(payload).then(
@@ -406,7 +428,7 @@ export class PanelSettingsPopup {
    *  suffix flips / external `setTitle` calls live. */
   private updatePopupHeading(panel: DomPanel, title: string): void {
     const titleEl = this.panel.panel.querySelector("span");
-    if (titleEl) titleEl.textContent = `${title} — Settings`;
+    if (titleEl) titleEl.textContent = `${title} — ${pp("settingsHeadingSuffix")}`;
     void panel;
   }
 
@@ -581,13 +603,13 @@ export class PanelSettingsPopup {
     Object.assign(row.style, ROW_CSS);
     const labelEl = document.createElement("span");
     Object.assign(labelEl.style, LABEL_CSS);
-    labelEl.textContent = "Anchor";
+    labelEl.textContent = pp("anchor");
     row.appendChild(labelEl);
 
     const wrap = document.createElement("div");
     Object.assign(wrap.style, CYCLER_WRAP_CSS);
     const select = new CyclingSelect<AnchorMode>({
-      options: ANCHOR_OPTIONS,
+      options: localizeOptions(ANCHOR_OPTIONS),
       // Fits the longest option ("Bottom Right") so the cycler
       // doesn't visibly jitter in width as the user clicks
       // through values.
@@ -610,13 +632,13 @@ export class PanelSettingsPopup {
     Object.assign(row.style, ROW_CSS);
     const labelEl = document.createElement("span");
     Object.assign(labelEl.style, LABEL_CSS);
-    labelEl.textContent = "Snapping";
+    labelEl.textContent = pp("snapping");
     row.appendChild(labelEl);
 
     const wrap = document.createElement("div");
     Object.assign(wrap.style, CYCLER_WRAP_CSS);
     const select = new CyclingSelect<SnapMode>({
-      options: SNAP_OPTIONS,
+      options: localizeOptions(SNAP_OPTIONS),
       labelMinWidth: "92px",
       onChange: (value) => this.boundPanel?.setSnap(value),
     });
@@ -634,13 +656,13 @@ export class PanelSettingsPopup {
     Object.assign(row.style, ROW_CSS);
     const labelEl = document.createElement("span");
     Object.assign(labelEl.style, LABEL_CSS);
-    labelEl.textContent = "Height";
+    labelEl.textContent = pp("height");
     row.appendChild(labelEl);
 
     const wrap = document.createElement("div");
     Object.assign(wrap.style, CYCLER_WRAP_CSS);
     const select = new CyclingSelect<HeightMode>({
-      options: HEIGHT_OPTIONS,
+      options: localizeOptions(HEIGHT_OPTIONS),
       // Fits the longest option ("Quarter") so the cycler doesn't
       // visibly jitter in width as the user clicks through values.
       labelMinWidth: "92px",
@@ -661,13 +683,13 @@ export class PanelSettingsPopup {
     Object.assign(row.style, ROW_CSS);
     const labelEl = document.createElement("span");
     Object.assign(labelEl.style, LABEL_CSS);
-    labelEl.textContent = "Taskbar Pin";
+    labelEl.textContent = pp("taskbarPin");
     row.appendChild(labelEl);
 
     const wrap = document.createElement("div");
     Object.assign(wrap.style, CYCLER_WRAP_CSS);
     const select = new CyclingSelect<PinMode>({
-      options: PIN_OPTIONS,
+      options: localizeOptions(PIN_OPTIONS),
       // Fits the longest option ("Bottom Center") so the cycler
       // doesn't visibly jitter in width as the user clicks
       // through values.
@@ -691,7 +713,7 @@ export class PanelSettingsPopup {
     Object.assign(row.style, ROW_CSS);
     const labelEl = document.createElement("span");
     Object.assign(labelEl.style, LABEL_CSS);
-    labelEl.textContent = "Title Suffix";
+    labelEl.textContent = pp("titleSuffix");
     row.appendChild(labelEl);
     const wrap = document.createElement("div");
     Object.assign(wrap.style, CYCLER_WRAP_CSS);
@@ -717,7 +739,7 @@ export class PanelSettingsPopup {
       this.titleSuffixSelect = null;
       return;
     }
-    const options = available.map(v => ({ value: v, label: TITLE_SUFFIX_LABELS[v] }));
+    const options = available.map(v => ({ value: v, label: pp(TITLE_SUFFIX_KEYS[v]) }));
     const select = new CyclingSelect<TitleSuffix>({
       options,
       labelMinWidth: "92px",
@@ -740,7 +762,7 @@ export class PanelSettingsPopup {
     Object.assign(row.style, ROW_CSS);
     const labelEl = document.createElement("span");
     Object.assign(labelEl.style, LABEL_CSS);
-    labelEl.textContent = "Taskbar Icon";
+    labelEl.textContent = pp("taskbarIcon");
     row.appendChild(labelEl);
 
     const wrap = document.createElement("div");
@@ -748,7 +770,7 @@ export class PanelSettingsPopup {
     const input = document.createElement("input");
     input.type = "text";
     input.maxLength = 4;
-    input.placeholder = "(text)";
+    input.placeholder = pp("taskbarIconPlaceholder");
     Object.assign(input.style, {
       background: "rgba(20, 22, 30, 0.96)",
       border: "1px solid #3a3a4a",
@@ -781,7 +803,7 @@ export class PanelSettingsPopup {
     Object.assign(row.style, ROW_CSS);
     const labelEl = document.createElement("span");
     Object.assign(labelEl.style, LABEL_CSS);
-    labelEl.textContent = "Layer";
+    labelEl.textContent = pp("layer");
     row.appendChild(labelEl);
 
     const group = document.createElement("div");

@@ -38,12 +38,6 @@ export const PlayerProfile = __t.object("PlayerProfile", {
 });
 export type PlayerProfile = __Infer<typeof PlayerProfile>;
 
-export const PlayerSession = __t.object("PlayerSession", {
-  identity: __t.identity(),
-  playerId: __t.u32(),
-});
-export type PlayerSession = __Infer<typeof PlayerSession>;
-
 export const SequenceCounter = __t.object("SequenceCounter", {
   id: __t.u8(),
   next: __t.u16(),

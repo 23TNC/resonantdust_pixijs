@@ -9,10 +9,17 @@
 const config: readonly (readonly [string, number])[] = [
   ["actions",     5],
   ["spacetime",   3],
-  // Gateway client tracing. `0` = print everything while we bring the relay
-  // up; raise to `3` to keep lifecycle (connect/subscribe/applied) but drop
-  // the per-message / per-row chatter (level 2).
-  ["gate",        0],
+  // Gateway client tracing, tiered by altitude:
+  //   4 — high-level lifecycle (connect/close/init) + all warnings & errors.
+  //       Infrequent; the monitoring floor.
+  //   3 — top-level gate I/O: a logical subscribe, a frame sent/received,
+  //       `applied`, call_ok/call_err. One line per transaction.
+  //   2 — steps within those: handler registration, already-active skips.
+  //   1 — per-row flood: row op, fanOut, raw wire payloads. Useful for deep
+  //       debugging, useless for monitoring.
+  // Default `3` = readable transaction-level view. Drop to `1` to trace every
+  // row; raise to `4` for lifecycle-only; `5` silences everything.
+  ["gate",        3],
   ["zone",        5],
   ["vite",        5],
   ["definitions", 5],

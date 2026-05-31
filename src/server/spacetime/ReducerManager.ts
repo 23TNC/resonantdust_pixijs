@@ -1,6 +1,5 @@
 import { debug } from "../../debug";
 import { sharedGate } from "../gate/GateConnection";
-import type { ConnectionRegistry } from "./ConnectionRegistry";
 
 /** Recursively shape a reducer's named args for SpacetimeDB's HTTP `/call`:
  *  camelCase keys → snake_case, and `bigint` → `number` (u64 args must be JSON
@@ -69,10 +68,11 @@ function toCallArgs(value: unknown): unknown {
  *      client adapts freely within `[1500, 5000]` without telling
  *      the server anything.
  *
- * Routing: gameplay/world reducers go through the gate (`gateCall`); login
- * (`claimOrLogin` / `setLastLogin`) targets `registry.players` and
- * `sendChatMessage` targets `registry.chat` — the two DBs the client still
- * connects to directly.
+ * Routing: every reducer — gameplay, world, chat, and login
+ * (`claimOrLogin` / `setLastLogin`) — goes through the gate (`gateCall`).
+ * No direct SpacetimeDB module connection remains; the gate is the sole
+ * server transport. The clock window is fed by the gate's `time` heartbeat
+ * (`noteServerTime`), not by SDK reducer events.
  */
 export class ReducerManager {
   /** Sliding window of recent reducer-event captures. Each entry pairs
@@ -244,7 +244,7 @@ export class ReducerManager {
    *  needs more than this we're outside the regime this design targets. */
   private static readonly CLIENT_DELAY_MAX_MS = 5_000;
 
-  constructor(private readonly registry: ConnectionRegistry) {}
+  constructor() {}
 
   /** The logged-in player_id, set by `PlayerManager` after login. Forwarded
    *  to the gate as `caller_player_id` for the shard reducers that authenticate
@@ -760,22 +760,21 @@ export class ReducerManager {
       `[spacetime] claimOrLogin name=${args.name} clientTimeMs=${clientTimeMs}`,
       4,
     );
-    // Canonical login → `players` (auth DB). This row write is the one
-    // PlayerManager waits on and the session's clock-sync primitive, so
-    // it's the call we bookend for drift/RTT.
-    const playersConn = await this.registry.players.connect();
+    // Login → the gate, which relays to the `players` auth DB AND establishes
+    // the WS → player_id session (it reads the new player row by name). The
+    // player-row write is what `PlayerManager` waits on via its `players`
+    // subscription; clock-sync is now the gate's `time` heartbeat.
     const start = performance.now();
     try {
-      await playersConn.reducers.claimOrLogin({ ...args, clientTimeMs });
+      await this.gateCall("claim_or_login", { ...args, clientTimeMs });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
     } finally {
       this.recordRtt(performance.now() - start);
     }
-    // Login is `players`-only now; the world's gameplay reducers run through
-    // the gate, which supplies `caller_player_id` (no shard `player_sessions`
-    // binding). Soul spawn is driven client-side via `spawnSoul`.
+    // Soul spawn is driven client-side via `spawnSoul` after the client sees it
+    // owns no soul on its assigned card shard.
   }
 
   /** Spawn the local player's `player_soul` (via the gate → cards shard).
@@ -845,17 +844,16 @@ export class ReducerManager {
   async setLastLogin(): Promise<void> {
     const clientTimeMs = BigInt(Math.round(this.serverNowMs()));
     debug.log(
-      ["spacetime", "chat"],
+      ["spacetime"],
       `[spacetime] setLastLogin clientTimeMs=${clientTimeMs}`,
       4,
     );
-    // Canonical → `players`. Its player-row update is the `Reducer`-tagged
-    // write that re-seeds the clock window on a mid-session reconnect, so
-    // it's the bookended call.
-    const playersConn = await this.registry.players.connect();
+    // Through the gate — the gate injects `player_id` from the session (it owns
+    // the session, so the client never supplies it). The clock window is now
+    // seeded by the gate's `time` heartbeat, not this reducer's row write.
     const start = performance.now();
     try {
-      await playersConn.reducers.setLastLogin({ clientTimeMs });
+      await this.gateCall("set_last_login", { clientTimeMs });
     } catch (err) {
       this.correctFromDrift(err, Number(clientTimeMs), start);
       throw err;
@@ -913,15 +911,11 @@ export class ReducerManager {
   }
 
 
-  /** Routes to the chat module (`registry.chat`). The chat module has no
-   *  players table, so the caller must supply `senderPlayerId` and `senderName`
-   *  explicitly (resolved from `PlayerManager.getPlayer()`).
-   *
-   *  RTT samples from this reducer aren't bookended: it uses a different
-   *  WebSocket (`registry.chat` vs `registry.shard`), so its latency
-   *  characteristics aren't representative of the shard RTT that drives
-   *  the time-discipline math. Mixing the two would muddy the
-   *  `bestRttMs` estimate the panel reports. */
+  /** Relayed through the gate to the chat module. The chat module has no
+   *  players table, so the caller supplies `senderPlayerId` / `senderName`
+   *  explicitly (resolved from `PlayerManager.getPlayer()`); `gateCall`
+   *  snake-cases them for the `/call`. (RTT isn't bookended here — chat isn't on
+   *  the shard-RTT critical path that drives the time-discipline math.) */
   async sendChatMessage(args: {
     senderPlayerId: number;
     senderName: string;
@@ -932,7 +926,6 @@ export class ReducerManager {
       `[spacetime] sendChatMessage len=${args.body.length}`,
       0,
     );
-    const conn = await this.registry.chat.connect();
-    await conn.reducers.sendChatMessage(args);
+    await this.gateCall("send_chat_message", args);
   }
 }
