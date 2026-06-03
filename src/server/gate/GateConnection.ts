@@ -137,11 +137,15 @@ export class GateConnection {
     if (msg.t === "call_ok") {
       this.pending.get(msg.cid)?.resolve();
       this.pending.delete(msg.cid);
+      // Piggybacked server-time sample: replay through the normal `time` path so
+      // the clock discipline treats a call round-trip like an idle heartbeat.
+      if (msg.server_micros) this.dispatch({ t: "time", server_micros: msg.server_micros });
       return;
     }
     if (msg.t === "call_err") {
       this.pending.get(msg.cid)?.reject(new Error(msg.error));
       this.pending.delete(msg.cid);
+      if (msg.server_micros) this.dispatch({ t: "time", server_micros: msg.server_micros });
       return;
     }
     this.dispatch(msg);

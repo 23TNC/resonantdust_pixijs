@@ -29,8 +29,12 @@ export type GateMsg =
       old?: RawRow;
       row: RawRow;
     }
-  | { t: "call_ok"; cid: number }
-  | { t: "call_err"; cid: number; error: string }
+  // `server_micros` (gate wall clock at reply time) piggybacks the client's
+  // round-trip so it gets a server-time sample for free on every call — the
+  // "spacetime way" (the SDK rode the timestamp on reducer events). Optional so a
+  // pre-piggyback gate still parses. `GateConnection` replays it as a `time`.
+  | { t: "call_ok"; cid: number; server_micros?: string }
+  | { t: "call_err"; cid: number; error: string; server_micros?: string }
   | { t: "error"; error: string }
   // Server-clock heartbeat: the gate's wall clock in microseconds since epoch
   // (string — exceeds JS safe-integer range). Fed to `noteServerTime` so
