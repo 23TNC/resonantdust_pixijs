@@ -35,6 +35,7 @@ import {
 
 // Import all reducer arg schemas
 import AcquireHoldReducer from "./acquire_hold_reducer";
+import AcquireLeaseReducer from "./acquire_lease_reducer";
 import AddCardReducer from "./add_card_reducer";
 import ClaimPendingReducer from "./claim_pending_reducer";
 import CreateCardReducer from "./create_card_reducer";
@@ -46,6 +47,7 @@ import PlaceCardReducer from "./place_card_reducer";
 import ReleaseHoldReducer from "./release_hold_reducer";
 import ReleasePendingReducer from "./release_pending_reducer";
 import RequestBlueprintReducer from "./request_blueprint_reducer";
+import SetSoulStatReducer from "./set_soul_stat_reducer";
 import SpawnSoulReducer from "./spawn_soul_reducer";
 import StackCardReducer from "./stack_card_reducer";
 import UnlockBlueprintReducer from "./unlock_blueprint_reducer";
@@ -117,6 +119,7 @@ const tablesSchema = __schema({
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
   __reducerSchema("acquire_hold", AcquireHoldReducer),
+  __reducerSchema("acquire_lease", AcquireLeaseReducer),
   __reducerSchema("add_card", AddCardReducer),
   __reducerSchema("claim_pending", ClaimPendingReducer),
   __reducerSchema("create_card", CreateCardReducer),
@@ -128,6 +131,7 @@ const reducersSchema = __reducers(
   __reducerSchema("release_hold", ReleaseHoldReducer),
   __reducerSchema("release_pending", ReleasePendingReducer),
   __reducerSchema("request_blueprint", RequestBlueprintReducer),
+  __reducerSchema("set_soul_stat", SetSoulStatReducer),
   __reducerSchema("spawn_soul", SpawnSoulReducer),
   __reducerSchema("stack_card", StackCardReducer),
   __reducerSchema("unlock_blueprint", UnlockBlueprintReducer),

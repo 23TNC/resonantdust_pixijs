@@ -13,5 +13,5 @@ import {
 export default {
   clientTimeMs: __t.u64(),
   soulCardId: __t.u32(),
-  cardKey: __t.string(),
+  packedDefinition: __t.u16(),
 };

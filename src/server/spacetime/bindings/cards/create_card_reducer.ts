@@ -12,7 +12,7 @@ import {
 
 export default {
   timeMs: __t.u64(),
-  defKey: __t.string(),
+  packedDef: __t.u16(),
   surface: __t.u8(),
   macroZone: __t.u64(),
   ownerId: __t.u32(),

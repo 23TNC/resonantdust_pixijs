@@ -46,11 +46,10 @@ export class PlayerManager {
       );
     }
 
-    // Listener BEFORE subscribe: `data.players.subscribe` fires from
-    // inside `promote(now)`, which runs on the per-frame tick — not
-    // synchronously when the subscription applies. Setting up the
-    // listener first guarantees we don't miss the row's first
-    // appearance in `current` after the next promote tick.
+    // Arm the arrival wait BEFORE subscribing/calling so we can't miss the
+    // row's first appearance in the raw `server` mirror. `waitForPlayer`
+    // resolves on raw arrival (not buffered promotion), so it is immune to
+    // the presentation-clock lag that would otherwise delay login.
     const arrived = this.waitForPlayer(name);
 
     // Subscribe BEFORE the reducer call so the row's first appearance
@@ -89,9 +88,29 @@ export class PlayerManager {
 
   private waitForPlayer(name: string): Promise<Player> {
     return new Promise<Player>((resolve, reject) => {
-      const unsub = this.data.players.subscribe((change) => {
-        if (change.kind === "removed") return;
-        const row = change.kind === "added" ? change.row : change.newRow;
+      // Login identity is a control fact, not a render-timed view: resolve
+      // the instant the players row EXISTS in the raw `server` mirror,
+      // WITHOUT waiting for `promote(now)` to surface it through the
+      // presentation buffer. That buffer runs up to `clientDelay` behind
+      // server time (1.5–5s), while the row is stamped only
+      // `TIME_DRIFT_BUFFER_MS` (2s) in the past — so a freshly-claimed row
+      // can sit in the buffered future and never promote within the login
+      // timeout. `observeServer` fires on raw arrival; a synchronous
+      // presence scan first covers the row already being present (re-login,
+      // or arrival before this listener attached).
+      const present = (): Player | undefined => {
+        for (const row of this.data.players.current.values())
+          if (row.name === name) return row;
+        for (const row of this.data.players.server.values())
+          if (row.name === name) return row;
+        return undefined;
+      };
+      const existing = present();
+      if (existing) {
+        resolve(existing);
+        return;
+      }
+      const unsub = this.data.players.observeServer((row) => {
         if (row.name !== name) return;
         unsub();
         clearTimeout(timer);

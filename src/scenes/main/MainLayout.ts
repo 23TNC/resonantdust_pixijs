@@ -269,6 +269,12 @@ export class MainLayout extends LayoutNode {
     // beneath.
     this.container.sortableChildren = true;
     this.overlay.zIndex = 1000;
+    // Carried stack runs reparent here during a drag; sort them by the same
+    // signed stack-z the resting stack hosts use so a bottom-carry keeps the
+    // inner card in front mid-drag. Only one drag gesture populates the overlay
+    // at a time (a carried run or a single soul ghost), so this never reorders
+    // unrelated previews.
+    this.overlay.container.sortableChildren = true;
   }
 
   // ── PanelManager-routed open helpers ─────────────────────────────

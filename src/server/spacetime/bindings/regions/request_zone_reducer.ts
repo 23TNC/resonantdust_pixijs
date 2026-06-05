@@ -13,4 +13,5 @@ import {
 export default {
   clientTimeMs: __t.u64(),
   macroZone: __t.u64(),
+  tiles: __t.array(__t.u64()),
 };

@@ -544,8 +544,7 @@ export class ActionManager {
     // are typically on-create / lifecycle triggers (`fleeting`,
     // `corpus-`, `despair_failure`, `strike_failure`). Sitting on
     // a 5-second debounce timer just delays inevitable execution.
-    const delayMs =
-      match.recipe.input.length <= 1 ? 0 : this.delayMs;
+    const delayMs = match.inputCount <= 1 ? 0 : this.delayMs;
 
     const entry: QueuedAction = {
       looseRootId: rootRow.cardId,
@@ -792,11 +791,11 @@ export class ActionManager {
    *  `spacetime/server/modules/shard/src/actions.rs` so the client
    *  prediction matches the server's eventual flag writes. */
   private applyPredictedHolds(action: QueuedAction): void {
-    const recipe = this.ctx.definitions.recipeById(action.recipeId);
+    const recipe = this.ctx.definitions.recipeMetaById(action.recipeId);
     if (recipe === null) return;
 
-    let rootSlot = recipe.anchors.root && recipe.rootSlotHold;
-    let rootPos = recipe.anchors.root && recipe.rootPositionHold;
+    let rootSlot = recipe.root && recipe.rootSlotHold;
+    let rootPos = recipe.root && recipe.rootPositionHold;
     const rootId = action.looseRootId;
     recipe.iterators.forEach((it, i) => {
       const row = action.bindings[i];

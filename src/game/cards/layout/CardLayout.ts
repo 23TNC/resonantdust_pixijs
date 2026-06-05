@@ -12,11 +12,30 @@ import { findWorldView, type WorldViewServices } from "../../viewport/WorldViewS
  * region or other siblings catch the click instead).
  */
 class StackHost extends LayoutNode {
+  constructor() {
+    super();
+    // Stacked children sort by an explicit per-card zIndex (set in
+    // `LayoutCard.setBounds` from the card's stack step + direction — see
+    // `LayoutRectCard.applyData`) rather than insertion/attach order, which the
+    // flat-root re-rooting churns. A "bottom" stack needs the inner (lower-step)
+    // card in front so its bottom-edge title isn't hidden by the card stacked
+    // below it; a "top" stack needs the outer (higher-step) card in front. The
+    // signed zIndex encodes both.
+    this.container.sortableChildren = true;
+  }
+
   override hitTestLayout(parentX: number, parentY: number): LayoutNode | null {
     const localX = parentX - this.x;
     const localY = parentY - this.y;
-    for (let i = this.children.length - 1; i >= 0; i--) {
-      const hit = this.children[i].hitTestLayout(localX, localY);
+    // Hit-test in render order — highest zIndex draws on top, so it should be
+    // hit first. `this.children` stays in insertion order (sortableChildren
+    // only reorders the Pixi container), so sort a copy by zIndex here to keep
+    // clicks on peeking titles consistent with what's drawn on top.
+    const ordered = [...this.children].sort(
+      (a, b) => b.container.zIndex - a.container.zIndex,
+    );
+    for (const child of ordered) {
+      const hit = child.hitTestLayout(localX, localY);
       if (hit) return hit;
     }
     return null;
@@ -63,6 +82,13 @@ export abstract class LayoutCard extends LayoutNode {
    * overlap. Both hosts sit behind the card's own visual layers so
    * stacked children peek out from behind the parent.
    */
+  /**
+   * Host for the stack-0 member — the hex/tile that sits UNDER this card when
+   * it's the root (generalized from the old `hexMount`). Added first in the
+   * constructor so it renders behind the card's own visual + the top/bottom
+   * stacks. Capacity-1 by convention (one tile/hex per root).
+   */
+  readonly stackHexHost: LayoutNode = new StackHost();
   readonly stackTopHost: LayoutNode = new StackHost();
   /**
    * Host for bottom-stacked children (`STACKED_ON_ROOT` with
@@ -89,6 +115,14 @@ export abstract class LayoutCard extends LayoutNode {
   protected targetX = 0;
   protected targetY = 0;
   private hasTarget = false;
+
+  /** Explicit z-order for stacked members, overriding the default
+   *  depth-by-screen-y (`y + height`) sort. Set by the subclass `applyData`
+   *  to a signed function of the card's stack step + direction (positive for
+   *  "top" chains, negative for "bottom") so a stack host's `sortableChildren`
+   *  renders inner/outer cards in the right order regardless of attach order.
+   *  `null` for loose / world cards, which keep the screen-y depth sort. */
+  protected stackZ: number | null = null;
 
   /** Unsubscribe for a deferred-attach wait: set when `attach(zoneId)`
    *  found no surface for that zone yet and is waiting for the
@@ -127,6 +161,9 @@ export abstract class LayoutCard extends LayoutNode {
     this.setContext(ctx);
     // Both stack hosts draw *behind* whatever the subclass paints
     // (bg/title/overlay). Bottom host first so top-stack always wins z-order.
+    // Hex host first → renders behind the card's own visual (a tile under the
+    // root). Then bottom, then top (top-stack always wins z-order).
+    this.addChild(this.stackHexHost);
     this.addChild(this.stackBottomHost);
     this.addChild(this.stackTopHost);
   }
@@ -243,8 +280,9 @@ export abstract class LayoutCard extends LayoutNode {
    * Self-attach to a parent card's top or bottom stack host. The parent's
    * transform carries this card for drag/tween automatically.
    */
-  attachToStack(parent: LayoutCard, direction: "top" | "bottom"): void {
-    if (direction === "bottom") parent.stackBottomHost.addChild(this);
+  attachToStack(parent: LayoutCard, direction: "top" | "bottom" | "hex"): void {
+    if (direction === "hex") parent.stackHexHost.addChild(this);
+    else if (direction === "bottom") parent.stackBottomHost.addChild(this);
     else parent.stackTopHost.addChild(this);
   }
 
@@ -334,7 +372,9 @@ export abstract class LayoutCard extends LayoutNode {
 
   override setBounds(x: number, y: number, width: number, height: number): void {
     super.setBounds(x, y, width, height);
-    this.zIndex = Math.round(y + height);
+    // Stacked members carry an explicit signed z (see `stackZ`); everyone else
+    // depth-sorts by screen y so lower cards on a surface draw in front.
+    this.zIndex = this.stackZ ?? Math.round(y + height);
   }
 
   /** Resize without disturbing the tween target / display. */

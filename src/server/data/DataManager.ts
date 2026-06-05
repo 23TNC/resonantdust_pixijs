@@ -1,4 +1,5 @@
 import { debug } from "../../debug";
+import { reloadContent } from "../../game/definitions/contentBoot";
 import type { CardDefinition, DefinitionManager } from "../../game/definitions/DefinitionManager";
 import type { Card, ChatMessage, Player, Region, Soul, SoulPrivate, Zone } from "../spacetime/bindings/types";
 // PlayerProfile is canonically the `players` (auth DB) shape now — keyed by
@@ -269,6 +270,15 @@ export class DataManager {
     // server's timeline.
     this.subscriptions = new GateSubscriptionManager({
       onReducerEvent: (micros) => this.reducers.noteServerTime(micros),
+      // Gate pushed a runtime add/modify: re-fetch + rebuild the content
+      // runtimes. `DefinitionManager` drops its caches via `onContentReloaded`;
+      // existing instances keep their version's def (lineage), so no re-render is
+      // forced — new content shows when new instances decode against it.
+      onContentChanged: () => {
+        reloadContent().catch((err) =>
+          debug.warn(["gate"], `content reload failed: ${String(err)}`, 4),
+        );
+      },
     });
     // players/player_profiles now flow through the gate too; the clock-sync
     // re-baseline rides the gate's `time` heartbeat via `this.subscriptions`'

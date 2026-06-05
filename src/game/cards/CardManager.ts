@@ -9,6 +9,7 @@ import {
   type ZoneId,
 } from "../../server/data/packing";
 import { owningSoul } from "../permissions";
+import { isPositionHeld } from "../actions/chainState";
 import { Card, type CardPositionState, type StackDirection } from "./Card";
 import { GameHexCard } from "./layout/hexagon/HexCard";
 import {
@@ -771,6 +772,44 @@ export class CardManager {
     }
     direct.sort((a, b) => a.idx - b.idx);
     return direct.map((d) => d.card);
+  }
+
+  /**
+   * The run of cards to carry when `cardId` is dragged off its stack: the
+   * grabbed card plus every card stacked *outward* from it (away from root —
+   * higher `stack_index` in the same branch), contiguously, stopping before
+   * the first position-held card or the end of the chain. Cards *toward* the
+   * root are never carried — you lift what rests on the grabbed card, not
+   * what it rests on. Returns `[grabbed, ...followers]` in outward chain
+   * order; the followers are re-rooted onto the leader on a successful drop.
+   *
+   * A loose card, a chain root, or a still-deferred member returns just
+   * `[grabbed]`: there's nothing stacked outward in this list (a root drag
+   * carries its members visually via the Pixi stack-host hierarchy, which is
+   * a separate mechanism). Empty only if `cardId` has no live `Card`.
+   */
+  carriedRun(cardId: number): Card[] {
+    const grabbed = this.cards.get(cardId);
+    if (!grabbed) return [];
+    const row = this.ctx.data.cardsLocal.get(cardId);
+    if (!row || !microIsCard(row.flagsBk)) return [grabbed];
+    const branch = stackBranch(row.flagsBk);
+    if (branch === STACK_STATE_DEFERRED) return [grabbed];
+    const chain = this.buildChain(row.microLocation, branch);
+    const start = chain.findIndex((c) => c.cardId === cardId);
+    if (start < 0) return [grabbed];
+    const run: Card[] = [];
+    for (let i = start; i < chain.length; i++) {
+      const member = chain[i];
+      // The grabbed card itself is already pickup-gated by DragManager; only
+      // the cards *after* it terminate the run on a position hold.
+      if (i > start) {
+        const r = this.ctx.data.cardsLocal.get(member.cardId);
+        if (r && isPositionHeld(this.ctx, member.cardId, r.flagsState, r.flagsBk)) break;
+      }
+      run.push(member);
+    }
+    return run;
   }
 
   /**

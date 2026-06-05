@@ -43,14 +43,10 @@ export class CardView {
       const parent = this.cardManager.get(parentId);
       if (parent) {
         const parentLayout = parent.view.layoutCard;
-        if (direction === "hex" && parentLayout.hexMount) {
-          parentLayout.hexMount.addChild(this.layoutCard);
-        } else {
-          this.layoutCard.attachToStack(
-            parentLayout,
-            direction === "bottom" ? "bottom" : "top",
-          );
-        }
+        // Unified: stack 0 (hex/under-root), top, bottom all route through
+        // attachToStack → the matching stack host on the root. No hexMount
+        // special-case — a hex/tile member uses the root's stackHexHost.
+        this.layoutCard.attachToStack(parentLayout, direction ?? "top");
         return;
       }
       // Defensive: parent vanished between routing and attach. Fall through

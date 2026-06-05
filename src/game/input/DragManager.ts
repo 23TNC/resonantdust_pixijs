@@ -1,4 +1,5 @@
-import type { Card } from "../cards/Card";
+import type { Card, StackDirection } from "../cards/Card";
+import { decodeMicro, directionForBranch } from "../cards/cardData";
 import { GameHexCard } from "../cards/layout/hexagon/HexCard";
 import { LayoutCard } from "../cards/layout/CardLayout";
 import { GameRectCard } from "../cards/layout/rectangle/RectCard";
@@ -11,7 +12,6 @@ import { DragHoldStore } from "./DragHoldStore";
 import {
   applySourceGate,
   executeDrop,
-  resolveHexDrop,
   resolveRectDrop,
   type DropContext,
 } from "./dropResolver";
@@ -48,7 +48,17 @@ const SOUL_CARD_TYPE = 6;
 type DragState =
   | {
       kind: "card";
+      /** Leader — the grabbed card. Drives drop resolution. */
       card: Card;
+      /** Cards carried with the leader: the contiguous run stacked outward
+       *  from it, minus position-held terminators (see
+       *  `CardManager.carriedRun`). Each is set `dragging` with its own grab
+       *  offset so the group translates rigidly. On a successful drop they're
+       *  re-rooted onto the leader; on reject they snap back with it. */
+      followers: Card[];
+      /** Branch direction the carried run had on its original root — used to
+       *  continue the run when the leader lands as a fresh root. */
+      runDirection: StackDirection;
       /** Cursor → card top-left in canvas coords, captured at drag start. */
       offsetX: number;
       offsetY: number;
@@ -110,8 +120,10 @@ export class DragManager {
   dispose(): void {
     if (this.state) {
       if (this.state.kind === "card") {
-        this.state.card.setDragging(false);
-        this.dragHoldStore.clear(this.state.card.cardId, this.ctx);
+        for (const c of [this.state.card, ...this.state.followers]) {
+          c.setDragging(false);
+          this.dragHoldStore.clear(c.cardId, this.ctx);
+        }
       } else {
         // Ghost variant (souls) carries a `DragGhost` to dispose.
         this.state.ghost.destroy();
@@ -180,14 +192,34 @@ export class DragManager {
       return;
     }
 
-    this.state = { kind: "card", card, offsetX, offsetY };
-    card.setDragging(true, offsetX, offsetY);
-    // Mark the source card as mid-drag locally so drop-target
-    // resolution rejects any concurrent drop attempts that would
-    // target this card. The server has no concept of drags, so this
-    // is purely client-side state (separate from any server-side
-    // `drop_hold_count`).
-    this.dragHoldStore.mark(card.cardId, this.ctx);
+    // Carry the contiguous run of unheld cards stacked outward from the
+    // grabbed card; a position-held card (e.g. dust) terminates the run and
+    // stays behind. For a single, top, or root card this is just `[card]` and
+    // behaves exactly as the old single-card drag.
+    const carried = this.ctx.cards?.carriedRun(card.cardId) ?? [card];
+    const followers = carried.slice(1);
+    const micro = decodeMicro(row?.microLocation ?? 0, row?.flagsBk ?? 0);
+    const runDirection: StackDirection =
+      micro.kind === "stacked" ? directionForBranch(micro.branch) ?? "top" : "top";
+
+    // Capture every carried card's cursor→top-left offset BEFORE any
+    // setDragging re-parents/collapses the chain, so the group keeps its
+    // relative spacing — each member then cursor-follows at its own offset
+    // and the run translates rigidly.
+    const grabs = carried.map((c) => {
+      const g = c.layoutCard.container.getGlobalPosition();
+      return { card: c, ox: data.x - g.x, oy: data.y - g.y };
+    });
+
+    this.state = { kind: "card", card, followers, runDirection, offsetX, offsetY };
+    for (const { card: c, ox, oy } of grabs) {
+      c.setDragging(true, ox, oy);
+      // Mark each carried card as mid-drag locally so drop-target resolution
+      // rejects concurrent drop attempts that would target it. The server has
+      // no concept of drags, so this is purely client-side state (separate
+      // from any server-side `drop_hold_count`).
+      this.dragHoldStore.mark(c.cardId, this.ctx);
+    }
   }
 
   private handleDragStop(_down: PointerEventData, up: PointerEventData): void {
@@ -200,16 +232,20 @@ export class DragManager {
       return;
     }
 
-    const { card, offsetX, offsetY } = state;
+    const { card, followers, runDirection, offsetX, offsetY } = state;
 
-    // Clear drag state first so the card re-parents back to whichever
-    // surface its current data implies (zone surface for loose, parent's
-    // stackHost for stacked). Display position is preserved across the
-    // re-parent, so the visual stays put while we resolve the drop.
-    card.setDragging(false);
-    // Mirror: this card is no longer mid-drag locally. Drop-target
-    // gates may now accept it again as a target.
-    this.dragHoldStore.clear(card.cardId, this.ctx);
+    // Clear drag state first, leader then followers, so each re-parents back
+    // to whichever surface its current (unchanged) data implies — the
+    // original root's stack host. Display position is preserved across the
+    // re-parent, so a rejected drop simply leaves the whole run snapped back
+    // where it was, and an accepted drop's data writes below overwrite the
+    // targets before the next frame renders (no rubber-band).
+    for (const c of [card, ...followers]) {
+      c.setDragging(false);
+      // Mirror: no longer mid-drag locally. Drop-target gates may accept
+      // these as targets again.
+      this.dragHoldStore.clear(c.cardId, this.ctx);
+    }
 
     const sourceRow = this.ctx.data.cardsLocal.get(card.cardId);
     if (!sourceRow) return;
@@ -224,14 +260,46 @@ export class DragManager {
       dragHoldStore: this.dragHoldStore,
     };
 
-    const raw = card.gameCard instanceof GameRectCard
-      ? resolveRectDrop(dropCtx)
-      : resolveHexDrop(dropCtx);
+    // Single resolution path for every shape — stacking eligibility is data
+    // (stack_hosts/stack_joins), so a hex-dragged card resolves the same way.
+    const raw = resolveRectDrop(dropCtx);
     const gated = applySourceGate(raw, sourceRow, this.ctx);
     if (gated.kind === "rejected") {
       debug.log(["drag"], `[drag] drop card=${card.cardId} rejected — ${gated.reason}`, 3);
+      return; // whole run already snapped back to its original root
     }
     executeDrop(dropCtx, gated);
+
+    // Re-root the carried followers onto the leader, in outward order. When
+    // the leader stacked onto a target we continue the run in that same
+    // direction; when it landed as a fresh root (world / inventory / loose)
+    // we keep the run's original direction. A purely-local leader move
+    // (`loose`, same surface — never synced) keeps the followers local too,
+    // so we don't half-sync a same-surface nudge.
+    if (followers.length > 0) {
+      const followerDir: StackDirection =
+        gated.kind === "stack" && gated.direction !== "hex" ? gated.direction : runDirection;
+      for (const follower of followers) {
+        const followerRow = this.ctx.data.cardsLocal.get(follower.cardId);
+        if (!followerRow) continue;
+        if (gated.kind === "loose") {
+          this.ctx.cards?.stack(follower.cardId, card.cardId, followerDir);
+        } else {
+          executeDrop(
+            {
+              ctx: this.ctx,
+              card: follower,
+              sourceRow: followerRow,
+              up,
+              offsetX: 0,
+              offsetY: 0,
+              dragHoldStore: this.dragHoldStore,
+            },
+            { kind: "stack", target: card, direction: followerDir },
+          );
+        }
+      }
+    }
   }
 
   /** Ghost-drag drop resolution. Destroys the ghost regardless of

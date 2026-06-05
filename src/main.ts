@@ -1,5 +1,5 @@
 import { Application } from "pixi.js";
-import { installPixiWarnInterceptor } from "./debug";
+import { debug, installPixiWarnInterceptor } from "./debug";
 
 // Route PixiJS' internal `console.warn` chatter through `debug` so
 // the `"pixi"` tag in `debug/config` gates visibility. Has to run
@@ -12,6 +12,7 @@ import { LodTextureManager } from "./assets/textures/LodTextureManager";
 import { ObjectManager } from "./assets/ObjectManager";
 import { smallestLodUrls } from "./assets/lodUrls";
 import { initTextures } from "./game/definitions/TextureRegistry";
+import { initGlobals } from "./game/definitions/globals";
 import { loadFonts } from "./assets/fonts";
 import { DefinitionManager, initDefinitions } from "./game/definitions/DefinitionManager";
 import { LifecycleResolutionManager } from "./game/lifecycle/LifecycleResolutionManager";
@@ -178,6 +179,7 @@ async function main(): Promise<Runtime> {
   // must be initialised after initDefinitions resolves. Sync — just a
   // Map build.
   initTextures();
+  initGlobals();
 
   // Content-shipped panel defaults — first-launch layout for every
   // panel that opts in via `defaultsKey`. Loaded once here so the
@@ -363,6 +365,28 @@ async function main(): Promise<Runtime> {
     logs: null,
   };
   scenes.setContext(ctx);
+
+  // DEV-only runtime content-authoring console. Once logged in as a
+  // content-author player, drive the gate's `add_content` / `modify_content`
+  // from devtools — paste a `.rd` body as a template literal:
+  //   await rdContent.add("mycard", `<cards>\n  ::mycard> …`)
+  //   await rdContent.modify("apple", `<cards>\n  ::apple> …`)   // gate assigns the version
+  // Success is silent here; the gate broadcasts `content_changed`, and
+  // `DataManager.onContentChanged` reloads the corpus live. Errors (not
+  // authorized / lineage exists / peer gate / validation) reject the promise.
+  // Stripped from production builds.
+  if (import.meta.env.DEV) {
+    (globalThis as Record<string, unknown>).rdContent = {
+      add: (name: string, text: string) => reducers.addContent({ name, text }),
+      modify: (lineage: string, text: string) =>
+        reducers.modifyContent({ lineage, text }),
+    };
+    debug.log(
+      ["gate"],
+      "[gate] content console ready: rdContent.add(name,text) / rdContent.modify(lineage,text)",
+      4,
+    );
+  }
 
   await scenes.change(new LoginScene());
 

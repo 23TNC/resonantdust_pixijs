@@ -3,8 +3,10 @@ import { debug } from "../../debug";
 import type { Card, StackDirection } from "../cards/Card";
 import {
   STACK_DIRECTION_DOWN,
+  STACK_DIRECTION_HEX,
   STACK_DIRECTION_UP,
 } from "../cards/cardData";
+import { resolveStackDrop, stackBits, type StackBits } from "../cards/stacking";
 import { GameHexCard } from "../cards/layout/hexagon/HexCard";
 import { GameRectCard } from "../cards/layout/rectangle/RectCard";
 import { LayoutCard } from "../cards/layout/CardLayout";
@@ -64,7 +66,11 @@ export type DropIntent =
    *  surface)` come from that viewport (`LayoutWorld`): world is `(0,
    *  WORLD_LAYER)`, an inventory `(soulCardId, INVENTORY_LAYER)`. Grid shape is
    *  irrelevant — any viewport resolves the same way. */
-  | { kind: "world";     q: number;      r: number; surface: number; owner: number; offsetX?: number; offsetY?: number }
+  | { kind: "world";     q: number;      r: number; surface: number; owner: number; offsetX?: number; offsetY?: number;
+      /** Card-onto-tile absorb: after rooting the dragged card at this cell,
+       *  push this member (the tile/occupant) into the dragged card's stack —
+       *  the dragged card becomes root, the tile a stack-0 member under it. */
+      absorb?: { memberId: number; direction: StackDirection } }
   | { kind: "loose";     x: number;      y: number }
   /** `soulCardId` is the inventory bucket's macro_zone — the owning soul's
    *  `card_id` (`surface == INVENTORY_LAYER`). Distinct from `c.card`'s current
@@ -139,9 +145,38 @@ export function resolveRectDrop(c: DropContext): DropIntent {
     if (occupant) {
       const occupantIntent = intentForCardTarget(c, occupant);
       if (occupantIntent !== null) return occupantIntent;
-      // Occupant exists but can't be stacked on (chain overflow,
-      // full hex mount). Fall through to fallback — do NOT place on
-      // the cell, since it isn't empty.
+      // Absorb: the occupant joins the DRAGGED card's stack (e.g. a tile → the
+      // dragged card's stack 0). The dragged card roots at this cell and the
+      // occupant is pushed under it. Uses `coord` so the root lands on the cell.
+      const occRow = c.ctx.data.cardsLocal.get(occupant.cardId);
+      if (occRow) {
+        const dropDir =
+          directionFromCursor(c.up, occupant) === "bottom"
+            ? STACK_DIRECTION_DOWN
+            : STACK_DIRECTION_UP;
+        const res = resolveStackDrop(
+          cardStackBits(c.ctx, c.sourceRow),
+          cardStackBits(c.ctx, occRow),
+          dropDir,
+        );
+        if (res && !res.draggedIsMember) {
+          // Same 4-bit depth cap — the occupant joins the dragged card's stack.
+          if (!wouldExceedChainDepth(c.ctx, occupant, c.card, stackDirName(res.stack))) {
+            return {
+              kind: "world",
+              q: coord.q,
+              r: coord.r,
+              surface: coord.surface,
+              owner: coord.owner,
+              offsetX: coord.offsetX,
+              offsetY: coord.offsetY,
+              absorb: { memberId: occupant.cardId, direction: stackDirName(res.stack) },
+            };
+          }
+        }
+      }
+      // Occupant exists but can't be stacked either way — don't place on the
+      // occupied cell; fall through to fallback.
       return resolveFallback(c);
     }
     return {
@@ -169,17 +204,6 @@ export function resolveRectDrop(c: DropContext): DropIntent {
   }
   // 4. No viewport hit at all (cursor over chrome — chat / details panel). The
   //    fallback's `isDroppableHit` check handles the rejection cleanly there.
-  return resolveFallback(c);
-}
-
-/**
- * Hex shape drop. Today hex cards have no stack semantics and no
- * world-placement semantics — they live in inventory only. Mirrors the
- * rect fallback path: world-source → inventory return, otherwise loose.
- * Defensive: hex cards on world today are position-locked and wouldn't
- * reach this code path; the symmetry costs nothing.
- */
-export function resolveHexDrop(c: DropContext): DropIntent {
   return resolveFallback(c);
 }
 
@@ -255,6 +279,25 @@ export function executeDrop(c: DropContext, intent: DropIntent): void {
         offsetX: intent.offsetX,
         offsetY: intent.offsetY,
       });
+      if (intent.absorb) {
+        // Push the occupant (e.g. a tile) into the now-rooted dragged card's
+        // stack. `stack()` re-roots the occupant + any members locally; the
+        // reducer syncs the occupant's new stacked position.
+        c.ctx.cards?.stack(intent.absorb.memberId, c.card.cardId, intent.absorb.direction);
+        void c.ctx.reducers.placeCard({
+          cardId: intent.absorb.memberId,
+          placement: {
+            kind: PLACEMENT_STACK,
+            parentId: c.card.cardId,
+            direction: stackDirNum(intent.absorb.direction),
+            surface: 0,
+            macroZone: 0n,
+            q: 0,
+            r: 0,
+            xy: 0,
+          },
+        });
+      }
       break;
     case "loose":
       c.card.setPosition({ kind: "loose", x: intent.x, y: intent.y });
@@ -287,21 +330,54 @@ function intentForCardTarget(c: DropContext, target: Card): DropIntent | null {
       reason: `target card=${target.cardId} has drop_hold or drop_locked`,
     };
   }
-  if (target.gameCard instanceof GameRectCard) {
-    const direction = directionFromCursor(c.up, target);
+  // Generalized stacking: eligibility is data (stack_hosts/stack_joins bit-
+  // fields), not card class. No rect/hex special-case — a hex card and a tile
+  // are both stack-0 joiners under a card root, resolved identically.
+  const targetRow = c.ctx.data.cardsLocal.get(target.cardId);
+  if (!targetRow) return null;
+  const dropDir =
+    directionFromCursor(c.up, target) === "bottom"
+      ? STACK_DIRECTION_DOWN
+      : STACK_DIRECTION_UP;
+  const res = resolveStackDrop(
+    cardStackBits(c.ctx, c.sourceRow),
+    cardStackBits(c.ctx, targetRow),
+    dropDir,
+  );
+  if (!res) return null;
+  if (res.draggedIsMember) {
+    const direction = stackDirName(res.stack);
     if (wouldExceedChainDepth(c.ctx, c.card, target, direction)) {
       return null;
     }
     return { kind: "stack", target, direction };
   }
-  if (target.gameCard instanceof GameHexCard) {
-    if (target.stackedHex === 0) {
-      return { kind: "stack", target, direction: "hex" };
-    }
-    // Hex mount taken — fall through to caller's fallback.
-    return null;
-  }
+  // Absorb (target joins the dragged card's stack — the dragged card is the
+  // root, the target e.g. a tile is pushed into its stack) is handled by the
+  // caller, which has the drop cell to root the dragged card at. Fall through.
   return null;
+}
+
+/** A card's stacking bit-fields, read from its local row's definition. */
+function cardStackBits(ctx: GameContext, row: CardRow): StackBits {
+  const def = ctx.definitions.decode(row.packedDefinition);
+  return def ? stackBits(ctx.definitions, def) : { hosts: 0b111, joins: 0b110 };
+}
+
+function stackDirName(stack: number): StackDirection {
+  return stack === STACK_DIRECTION_HEX
+    ? "hex"
+    : stack === STACK_DIRECTION_DOWN
+      ? "bottom"
+      : "top";
+}
+
+function stackDirNum(direction: StackDirection): number {
+  return direction === "top"
+    ? STACK_DIRECTION_UP
+    : direction === "bottom"
+      ? STACK_DIRECTION_DOWN
+      : STACK_DIRECTION_HEX;
 }
 
 /** Fallback intent shared by every "no usable target" path: a card with
@@ -447,12 +523,14 @@ function wouldExceedChainDepth(
   const cards = ctx.cards;
   if (!cards) return false;
   const targetRoot = cards.rootOf(target.cardId);
-  const dirNum = direction === "top" ? STACK_DIRECTION_UP : STACK_DIRECTION_DOWN;
-  const existing = cards.buildChain(targetRoot, dirNum).length;
+  // Every branch (hex/top/bottom) shares the same 4-bit `stack_index` cap, so
+  // the depth guard is direction-agnostic.
+  const existing = cards.buildChain(targetRoot, stackDirNum(direction)).length;
   const draggedSize =
     1
     + cards.buildChain(dragged.cardId, STACK_DIRECTION_UP).length
-    + cards.buildChain(dragged.cardId, STACK_DIRECTION_DOWN).length;
+    + cards.buildChain(dragged.cardId, STACK_DIRECTION_DOWN).length
+    + cards.buildChain(dragged.cardId, STACK_DIRECTION_HEX).length;
   return existing + draggedSize > MAX_CHAIN_DEPTH;
 }
 

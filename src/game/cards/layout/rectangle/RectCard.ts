@@ -298,6 +298,10 @@ export class LayoutRectCard extends LayoutCard {
 
     const micro = decodeMicro(row.microLocation, row.flagsBk);
 
+    // Default to screen-y depth sort; the stacked branch below overrides with
+    // a signed step-based z so stack hosts render inner/outer correctly.
+    this.stackZ = null;
+
     if (micro.kind === "loose") {
       this.setTitlePosition("top");
       // Loose position is decided by the OWNING VIEWPORT'S GRID, not the
@@ -364,25 +368,40 @@ export class LayoutRectCard extends LayoutCard {
         return;
       }
       const parentIsHex = parentCard?.gameCard instanceof GameHexCard;
-      // Step count from the root for this member (1-indexed visual depth).
-      const step = micro.index + 1;
       if (parentIsHex) {
+        this.stackZ = 0;
         this.setTitlePosition("top");
         this.setTarget(
           (LayoutHexCard.WIDTH - RECT_CARD_WIDTH) / 2,
           (LayoutHexCard.HEIGHT - RECT_CARD_HEIGHT) / 2,
         );
         this.overlay.setChainDelta(0, 0);
-      } else if (micro.branch === STACK_DIR_UP) {
-        const off = step * RECT_CARD_TITLE_HEIGHT;
-        this.setTitlePosition("top");
-        this.setTarget(0, -off);
-        this.overlay.setChainDelta(0, off);
       } else {
+        // Visual depth (1-indexed) is derived from the *current* chain, not
+        // the raw stack_index: members being dragged out are skipped, so a
+        // data gap (corpus→blank→corpus) renders contiguously and the cards
+        // after a dragged-out member slide down into its slot. The dragged
+        // card's own position is overridden below (cursor-follow), so it skips
+        // the O(n) chain walk and uses the cheap raw index.
+        const step = this.state.dragging
+          ? micro.index + 1
+          : this.chainStep(parentId, micro.branch, micro.index);
         const off = step * RECT_CARD_TITLE_HEIGHT;
-        this.setTitlePosition("bottom");
-        this.setTarget(0, +off);
-        this.overlay.setChainDelta(0, -off);
+        // Inner (lower-step) card renders in front so its title strip isn't
+        // covered by the next card out — true for BOTH fan directions: a "top"
+        // chain's top-edge title and a "bottom" chain's bottom-edge title are
+        // each overlapped by the next card's body otherwise. Higher zIndex =
+        // Pixi front, so negate the step.
+        this.stackZ = -step;
+        if (micro.branch === STACK_DIR_UP) {
+          this.setTitlePosition("top");
+          this.setTarget(0, -off);
+          this.overlay.setChainDelta(0, off);
+        } else {
+          this.setTitlePosition("bottom");
+          this.setTarget(0, +off);
+          this.overlay.setChainDelta(0, -off);
+        }
       }
       // Pull parent's current overlay state so we have something to
       // show before the next time the parent re-bakes.
@@ -609,6 +628,26 @@ export class LayoutRectCard extends LayoutCard {
     this.overlay.inheritFrom(parentQ, parentR, parentOffsetX, parentOffsetY);
     // `overlay.onStateChange` cascades to stacked children — wired
     // in the constructor.
+  }
+
+  /**
+   * Visual depth (1-indexed) of this member within its root's `branch`,
+   * counting only cards currently *present* in the chain — a member being
+   * dragged out is skipped, so survivors collapse contiguously: no hole is
+   * left behind and the cards after it shift down one slot. Sibling re-layout
+   * on drag start/stop is driven by `Card.setDragging`. Falls back to
+   * `rawIndex + 1` if this card isn't found in the chain (shouldn't happen).
+   */
+  private chainStep(rootId: number, branch: number, rawIndex: number): number {
+    const chain = this.ctx.cards?.buildChain(rootId, branch);
+    if (!chain) return rawIndex + 1;
+    let rank = 0;
+    for (const member of chain) {
+      if (member.cardId !== this.cardId && member.isDragging()) continue;
+      rank++;
+      if (member.cardId === this.cardId) return rank;
+    }
+    return rawIndex + 1;
   }
 
   /** Cascade our overlay state to any rect children stacked on us.

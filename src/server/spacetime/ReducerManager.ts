@@ -928,4 +928,29 @@ export class ReducerManager {
     );
     await this.gateCall("send_chat_message", args);
   }
+
+  // ---- runtime content authoring -------------------------------------
+  //
+  // `add_content` / `modify_content` are NOT shard reducers — the gate handles
+  // them directly (no SpacetimeDB backing; the `.rd` corpus lives on the gate
+  // FS). They're authorized against this WS session's `content-author`
+  // capability (established at login) and rejected on peer gates. On success the
+  // gate broadcasts `content_changed`; the live reload is driven by
+  // `DataManager.onContentChanged` → `reloadContent`, not by this call.
+
+  /** Add a NEW `.rd` source to the live corpus (content-author only). `name` is
+   *  a filename hint; `text` is the DSL body. Rejected if the lineage already
+   *  exists — use {@link modifyContent} to version it. */
+  async addContent(args: { name: string; text: string }): Promise<void> {
+    debug.log(["gate"], `[gate] addContent ${args.name} (${args.text.length} chars)`, 3);
+    await this.gateCall("add_content", args);
+  }
+
+  /** Append a new VERSION of an existing card `lineage` (content-author only);
+   *  the gate assigns the version number. Old instances keep their version and
+   *  drain as recipes consume them. */
+  async modifyContent(args: { lineage: string; text: string }): Promise<void> {
+    debug.log(["gate"], `[gate] modifyContent ${args.lineage} (${args.text.length} chars)`, 3);
+    await this.gateCall("modify_content", args);
+  }
 }

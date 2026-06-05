@@ -7,6 +7,7 @@ import type { Card as CardRow } from "../../server/spacetime/bindings/types";
 import { WORLD_LAYER, type ZoneId } from "../../server/data/packing";
 import type { TableChange } from "../../server/data/ValidAtTable";
 import {
+  branchForDirection,
   decodeMicro,
   directionForBranch,
   microIsCard,
@@ -19,6 +20,7 @@ import type { GameCard } from "./game/CardGame";
 import { GameHexCard, LayoutHexCard } from "./layout/hexagon/HexCard";
 import type { LayoutCard } from "./layout/CardLayout";
 import { GameRectCard, LayoutRectCard } from "./layout/rectangle/RectCard";
+import { LayoutGenericCard } from "./generic/LayoutGenericCard";
 
 const INVENTORY_LAYER = 1;
 
@@ -177,8 +179,26 @@ export class Card {
       debug.warn(["cards"], `[Card] no row for card ${cardId}, skipping spawn`);
       return null;
     }
+    // Per-card shape from the DSL `&shape` (not the type-level hex/rect guess):
+    // a card crosses to the generic PrimList path by emitting `$shape.generic`,
+    // no engine opt-in. Fall back to the type's shape if the def won't decode.
     const { typeId } = DefinitionManager.unpack(row.packedDefinition);
-    const shape = ctx.definitions.shape(typeId) ?? "rect";
+    const shape =
+      ctx.definitions.decode(row.packedDefinition)?.shape ??
+      ctx.definitions.shape(typeId) ??
+      "rect";
+    if (shape === "generic") {
+      // DSL-driven generic card (PrimList reconciler). Data-driven dispatch:
+      // a card crosses over by what its DSL emits for `shape`. Reuses the rect
+      // data half (GameRectCard) for the simulation side.
+      return new Card(
+        cardId,
+        ctx,
+        cardManager,
+        new GameRectCard(cardId, ctx),
+        new LayoutGenericCard(cardId, ctx),
+      );
+    }
     if (shape === "hex") {
       return new Card(
         cardId,
@@ -244,12 +264,20 @@ export class Card {
         this.currentMicroLocation = row.microLocation;
       }
       this.gameCard.applyData(row);
-      this.view.applyData(row);
+      // Attach to the layout tree BEFORE applying data: a loose card resolves
+      // its target through `worldView` (a parent-chain walk to the owning
+      // surface — see `LayoutCard.worldView`). If we applyData while still
+      // detached, that walk finds nothing, `setTarget` falls back to the raw
+      // un-centered within-cell offset, and the snap burns on that wrong
+      // value — so the next mirror pass tweens the card into place from a
+      // half-card down-right offset. Attaching first means the first
+      // `setTarget` sees the real centered cell and snaps in place.
       this.view.attachToCurrent(
         this.currentParentId,
         this.currentStackDirection,
         this.currentZoneId,
       );
+      this.view.applyData(row);
       // Best-effort back-pointer: if our parent already exists, claim our
       // slot on it. If the parent hasn't spawned yet, CardManager's
       // post-init repair pass picks it up.
@@ -405,10 +433,36 @@ export class Card {
       this.currentStackDirection,
       this.currentZoneId,
     );
+    // Chain members derive their visual offset from the *present* chain
+    // (cards mid-drag are skipped — see `LayoutRectCard.chainStep`), so
+    // leaving or rejoining the chain must re-layout our siblings to slide
+    // into / back out of our slot. The data write hasn't happened yet, so we
+    // still appear in `buildChain` here; skip self and invalidate the rest.
+    if (this.currentParentId !== 0 && this.currentStackDirection) {
+      const branch = branchForDirection(this.currentStackDirection);
+      for (const member of this.cardManager.buildChain(this.currentParentId, branch)) {
+        if (member.cardId !== this.cardId) member.restackFromCurrentRow();
+      }
+    }
   }
 
   isDragging(): boolean {
     return this.gameCard.isDragging();
+  }
+
+  /**
+   * Re-run the layout half's offset/visual computation against our *current*
+   * local row, without a data change of our own. A stacked card's visual depth
+   * is derived from the present chain (see `LayoutRectCard.chainStep`), so when
+   * a *sibling* enters or leaves the chain our offset must recompute — but our
+   * own row is unchanged, so `onDataChange` (and thus `applyData`) won't fire
+   * for us. A bare `invalidate()` only re-runs `layout()` (tween + visuals
+   * toward the existing target); the offset itself is set in `applyData`, so we
+   * re-invoke that. Idempotent for an unchanged row.
+   */
+  restackFromCurrentRow(): void {
+    const row = this.layoutCard.ctx.data.cardsLocal.get(this.cardId);
+    if (row) this.layoutCard.applyData(row);
   }
 
   destroy(): void {
@@ -491,6 +545,19 @@ export class Card {
         this.currentStackDirection = newStackDirection;
         if (newParentId !== 0 && newStackDirection) {
           this.setBackPointerOn(newParentId, newStackDirection);
+        }
+        // Collapse the chain we just left: survivors derive their visual
+        // offset from the present chain (see `LayoutRectCard.chainStep`), so
+        // they must re-layout to close the gap we leave behind. The row is
+        // already committed to cardsLocal, so `buildChain` no longer returns
+        // us. (`setDragging`'s invalidation fires before this data write —
+        // while we're still in the chain — so it can't collapse a committed
+        // drop on its own.)
+        if (oldParentId !== 0 && oldDirection) {
+          const oldBranch = branchForDirection(oldDirection);
+          for (const member of this.cardManager.buildChain(oldParentId, oldBranch)) {
+            member.restackFromCurrentRow();
+          }
         }
       }
 

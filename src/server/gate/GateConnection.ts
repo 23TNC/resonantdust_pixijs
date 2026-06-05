@@ -189,6 +189,8 @@ function summarizeIn(msg: GateMsg, reducer?: string): string {
       return "error";
     case "time":
       return `time ${msg.server_micros}`;
+    case "content_changed":
+      return `content_changed v=${msg.version}`;
   }
 }
 

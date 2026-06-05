@@ -10,7 +10,7 @@
  *  an aspect of the same name (e.g. `pine`) auto-pairs to the
  *  same-named object. */
 
-import { allTextures as wasmAllTextures } from "../../content/pkg/resonantdust_content";
+import { sharedContent } from "./contentBoot";
 
 export interface TextureScale {
   min: number;
@@ -85,7 +85,7 @@ let registry: TextureRegistry | null = null;
 /** Build the client-side texture registry from the wasm module.
  *  Call synchronously after `initDefinitions()` resolves. */
 export function initTextures(): void {
-  const raw = wasmAllTextures() as TextureDefinition[];
+  const raw = JSON.parse(sharedContent().allTextures()) as TextureDefinition[];
   registry = new TextureRegistry(raw);
 }
 

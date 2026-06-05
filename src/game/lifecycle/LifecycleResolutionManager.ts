@@ -191,7 +191,7 @@ export class LifecycleResolutionManager {
 
   private async tryResolveSuccess(card: Card, def: CardDefinition): Promise<void> {
     if (!def.lifecycleRecipeKey) return;
-    const expectedRecipe = this.ctx.definitions.recipeByKey(def.lifecycleRecipeKey);
+    const expectedRecipe = this.ctx.definitions.recipeMetaByKey(def.lifecycleRecipeKey);
     if (expectedRecipe === null) {
       debug.log(
         ["magnetic"],
@@ -205,20 +205,20 @@ export class LifecycleResolutionManager {
     // Walk every input statement, find slot refs on top-level
     // iterators, and track the max offset per branch — the binding
     // for that branch needs at least `max_offset + 1` cards.
-    const branchCounts = computeBranchCounts(expectedRecipe);
+    const branchCounts = expectedRecipe.branchCounts;
 
     // Currently support recipes that need branch 1 only (the
     // standard magnetic-success shape — `despair_success` /
     // `strike_success`). Recipes drawing from branch 2 / hex
     // weren't a magnetic pattern under the legacy model and
     // aren't a target for this combo iteration today.
-    const count1 = branchCounts.get(1) ?? 0;
+    const count1 = branchCounts[1] ?? 0;
     if (count1 === 0) {
       // Root-only magnetic recipe — no inventory needed. Try the
       // matcher with empty branches; if it hits the expected
       // recipe, submit.
       const match = this.runMatcher(card, []);
-      if (match !== null && match.recipe.id === def.lifecycleRecipeKey) {
+      if (match !== null && match.recipeKey === def.lifecycleRecipeKey) {
         await this.submitProposeAction(card, match.recipeId, match.bindings);
         return;
       }
@@ -271,7 +271,7 @@ export class LifecycleResolutionManager {
       counter.value++;
       const branch1 = chosen.map((c) => c.cardId);
       const match = this.runMatcher(card, branch1);
-      if (match !== null && match.recipe.id === expectedKey) {
+      if (match !== null && match.recipeKey === expectedKey) {
         return { recipeId: match.recipeId, bindings: match.bindings };
       }
       return null;
@@ -300,7 +300,7 @@ export class LifecycleResolutionManager {
   private runMatcher(
     card: Card,
     branch1: number[],
-  ): { recipe: { id: string }; recipeId: number; bindings: number[][] } | null {
+  ): { recipeKey: string; recipeId: number; bindings: number[][] } | null {
     const cardsLocal = this.ctx.data.cardsLocal;
     return this.ctx.definitions.findRecipeMatch({
       root: card.cardId,
@@ -456,26 +456,3 @@ export class LifecycleResolutionManager {
  *  inventory cards to pull into branch 1 when trying combos.
  *  Nested iterators (parent !== []) don't count — their card
  *  pool isn't inventory. */
-function computeBranchCounts(recipe: {
-  input: Array<{ segments: Array<{ type: string; value: unknown }> }>;
-  iterators: Array<{ parent: unknown[]; branch: number }>;
-}): Map<number, number> {
-  const maxOffset = new Map<number, number>();
-  for (const stmt of recipe.input) {
-    for (const seg of stmt.segments) {
-      if (seg.type !== "slot") continue;
-      const slotValue = seg.value as { iteratorId: number; offset: number };
-      const it = recipe.iterators[slotValue.iteratorId];
-      if (!it || it.parent.length !== 0) continue;
-      const prev = maxOffset.get(it.branch);
-      if (prev === undefined || slotValue.offset > prev) {
-        maxOffset.set(it.branch, slotValue.offset);
-      }
-    }
-  }
-  const counts = new Map<number, number>();
-  for (const [branch, max] of maxOffset) {
-    counts.set(branch, max + 1);
-  }
-  return counts;
-}

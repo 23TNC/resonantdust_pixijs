@@ -93,7 +93,9 @@ function coerce<K extends GateTable>(table: K, raw: RawRow): GateTableRowMap[K] 
     else if (str?.has(k)) out[k] = raw[k];
     else out[k] = Number(raw[k]);
   }
-  return out as GateTableRowMap[K];
+  // `out` is built dynamically from wire columns; the field-by-field coercion
+  // above produces the row shape, but TS can't see that, so hop through unknown.
+  return out as unknown as GateTableRowMap[K];
 }
 
 /** One installed subscription — its scope and the gate sids it owns. */
@@ -127,9 +129,16 @@ export class GateSubscriptionManager {
   private readonly pendingApplied = new Map<number, () => void>();
   /** Kept for API parity; the gate read path delivers no reducer events. */
   protected readonly onReducerEvent?: (microsSinceUnixEpoch: bigint) => void;
+  /** Fired when the gate broadcasts a `content_changed` push (runtime
+   *  add/modify content). The handler re-fetches `/content` and rebuilds. */
+  protected readonly onContentChanged?: (version: string) => void;
 
-  constructor(options?: { onReducerEvent?: (microsSinceUnixEpoch: bigint) => void }) {
+  constructor(options?: {
+    onReducerEvent?: (microsSinceUnixEpoch: bigint) => void;
+    onContentChanged?: (version: string) => void;
+  }) {
     this.onReducerEvent = options?.onReducerEvent;
+    this.onContentChanged = options?.onContentChanged;
     this.conn.setDispatch((msg) => this.dispatch(msg));
     debug.log(["gate"], "GateSubscriptionManager init (connect deferred to first use)", 4);
   }
@@ -269,6 +278,10 @@ export class GateSubscriptionManager {
         return;
       case "error":
         debug.warn(["gate"], msg.error, 4);
+        return;
+      case "content_changed":
+        debug.log(["gate"], `content_changed → version ${msg.version}`, 3);
+        this.onContentChanged?.(msg.version);
         return;
     }
   }

@@ -17,32 +17,26 @@
  *  initialised (`initDefinitions()`) before these are called — same
  *  precondition as every other content lookup. */
 
-import {
-  localeLabel as wasmLocaleLabel,
-  localeVariant as wasmLocaleVariant,
-} from "../../content/pkg/resonantdust_content";
-
-/** Active UI language. Single chokepoint — swap or make reactive when
- *  a language selector lands; every panel string flows through here. */
-const LANG = "en";
+import { sharedLocales } from "../definitions/contentBoot";
 
 const DOMAIN = "panels";
 
 /** Title-bar text for `panelKey` (its `defaults.json` key). Falls back
- *  to `panelKey` if the locale has no entry. */
+ *  to `panelKey` if the locale has no entry. Key: `panels.<panelKey>.label`. */
 export function panelTitle(panelKey: string): string {
   try {
-    return wasmLocaleLabel(DOMAIN, panelKey, LANG) ?? panelKey;
+    return sharedLocales().string(`${DOMAIN}.${panelKey}.label`) ?? panelKey;
   } catch {
     return panelKey;
   }
 }
 
 /** A non-title string (`key`) declared on `panelKey`'s entry — button
- *  captions, row labels, placeholders. Falls back to `key` on a miss. */
+ *  captions, row labels, placeholders. Falls back to `key` on a miss.
+ *  Key: `panels.<panelKey>.<key>`. */
 export function panelText(panelKey: string, key: string): string {
   try {
-    return wasmLocaleVariant(DOMAIN, panelKey, key, LANG) ?? key;
+    return sharedLocales().string(`${DOMAIN}.${panelKey}.${key}`) ?? key;
   } catch {
     return key;
   }

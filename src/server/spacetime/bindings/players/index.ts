@@ -37,6 +37,7 @@ import {
 import ClaimOrLoginReducer from "./claim_or_login_reducer";
 import SetLastLoginReducer from "./set_last_login_reducer";
 import SetPlayerFactionReducer from "./set_player_faction_reducer";
+import SetPlayerPermissionsReducer from "./set_player_permissions_reducer";
 
 // Import all procedure arg schemas
 
@@ -83,6 +84,7 @@ const reducersSchema = __reducers(
   __reducerSchema("claim_or_login", ClaimOrLoginReducer),
   __reducerSchema("set_last_login", SetLastLoginReducer),
   __reducerSchema("set_player_faction", SetPlayerFactionReducer),
+  __reducerSchema("set_player_permissions", SetPlayerPermissionsReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

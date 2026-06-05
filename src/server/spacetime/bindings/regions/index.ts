@@ -36,8 +36,8 @@ import {
 // Import all reducer arg schemas
 import AcquireCardShardReducer from "./acquire_card_shard_reducer";
 import AcquireTileHoldReducer from "./acquire_tile_hold_reducer";
+import AcquireTileLeaseReducer from "./acquire_tile_lease_reducer";
 import EnsureRegionReducer from "./ensure_region_reducer";
-import GenerateForestTerrainReducer from "./generate_forest_terrain_reducer";
 import PromoteTileReducer from "./promote_tile_reducer";
 import ReleaseCardShardReducer from "./release_card_shard_reducer";
 import ReleaseTileHoldReducer from "./release_tile_hold_reducer";
@@ -134,8 +134,8 @@ const tablesSchema = __schema({
 const reducersSchema = __reducers(
   __reducerSchema("acquire_card_shard", AcquireCardShardReducer),
   __reducerSchema("acquire_tile_hold", AcquireTileHoldReducer),
+  __reducerSchema("acquire_tile_lease", AcquireTileLeaseReducer),
   __reducerSchema("ensure_region", EnsureRegionReducer),
-  __reducerSchema("generate_forest_terrain", GenerateForestTerrainReducer),
   __reducerSchema("promote_tile", PromoteTileReducer),
   __reducerSchema("release_card_shard", ReleaseCardShardReducer),
   __reducerSchema("release_tile_hold", ReleaseTileHoldReducer),

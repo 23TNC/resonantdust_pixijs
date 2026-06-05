@@ -8,8 +8,8 @@ import { type Infer as __Infer } from "spacetimedb";
 // Import all reducer arg schemas
 import AcquireCardShardReducer from "../acquire_card_shard_reducer";
 import AcquireTileHoldReducer from "../acquire_tile_hold_reducer";
+import AcquireTileLeaseReducer from "../acquire_tile_lease_reducer";
 import EnsureRegionReducer from "../ensure_region_reducer";
-import GenerateForestTerrainReducer from "../generate_forest_terrain_reducer";
 import PromoteTileReducer from "../promote_tile_reducer";
 import ReleaseCardShardReducer from "../release_card_shard_reducer";
 import ReleaseTileHoldReducer from "../release_tile_hold_reducer";
@@ -19,8 +19,8 @@ import SetTileStockReducer from "../set_tile_stock_reducer";
 
 export type AcquireCardShardParams = __Infer<typeof AcquireCardShardReducer>;
 export type AcquireTileHoldParams = __Infer<typeof AcquireTileHoldReducer>;
+export type AcquireTileLeaseParams = __Infer<typeof AcquireTileLeaseReducer>;
 export type EnsureRegionParams = __Infer<typeof EnsureRegionReducer>;
-export type GenerateForestTerrainParams = __Infer<typeof GenerateForestTerrainReducer>;
 export type PromoteTileParams = __Infer<typeof PromoteTileReducer>;
 export type ReleaseCardShardParams = __Infer<typeof ReleaseCardShardReducer>;
 export type ReleaseTileHoldParams = __Infer<typeof ReleaseTileHoldReducer>;

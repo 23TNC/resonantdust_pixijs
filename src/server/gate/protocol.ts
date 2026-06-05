@@ -40,4 +40,7 @@ export type GateMsg =
   // (string — exceeds JS safe-integer range). Fed to `noteServerTime` so
   // `serverNowMs()` tracks the gate's future-stamp timeline (the players SDK
   // reducer-event anchor is gone once players move to the gate).
-  | { t: "time"; server_micros: string };
+  | { t: "time"; server_micros: string }
+  // The served DSL content changed (runtime add/modify on the gate). Carries the
+  // new corpus version (hex). The client re-fetches `/content` and rebuilds.
+  | { t: "content_changed"; version: string };

@@ -12,5 +12,5 @@ import {
 
 export default {
   targetCardId: __t.u32(),
-  blueprintKey: __t.string(),
+  blueprintId: __t.u16(),
 };

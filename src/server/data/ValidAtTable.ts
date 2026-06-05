@@ -26,6 +26,7 @@ export class ValidAtTable<T> {
 
   private readonly tableListeners = new Set<TableListener<T>>();
   private readonly keyListeners = new Map<number, Set<TableListener<T>>>();
+  private readonly serverListeners = new Set<(row: T) => void>();
 
   /** `keyOf(row)` returns the packed-u64 key for a row. For tables whose
    *  rows already carry the packed key, pass `(r) => r.validAt`. `idOf(row)`
@@ -40,6 +41,7 @@ export class ValidAtTable<T> {
 
   insert = (row: T): void => {
     this.server.set(this.keyOf(row), row);
+    this.fireServer(row);
   };
 
   update = (oldRow: T, newRow: T): void => {
@@ -47,6 +49,7 @@ export class ValidAtTable<T> {
     const newKey = this.keyOf(newRow);
     if (oldKey !== newKey) this.server.delete(oldKey);
     this.server.set(newKey, newRow);
+    this.fireServer(newRow);
   };
 
   delete = (row: T): void => {
@@ -81,6 +84,19 @@ export class ValidAtTable<T> {
       if (!s) return;
       s.delete(listener);
       if (s.size === 0) this.keyListeners.delete(key);
+    };
+  }
+
+  /** Observe raw arrivals into the `server` mirror (insert / update),
+   *  BEFORE promotion. Use for control facts that must not wait on the
+   *  presentation buffer — e.g. resolving login identity the instant the
+   *  player row arrives, independent of `promote(now)` (which runs up to
+   *  `clientDelay` behind server time and can exceed the login timeout for
+   *  a freshly-stamped row). Returns an unsubscribe fn. */
+  observeServer(listener: (row: T) => void): () => void {
+    this.serverListeners.add(listener);
+    return () => {
+      this.serverListeners.delete(listener);
     };
   }
 
@@ -147,6 +163,21 @@ export class ValidAtTable<T> {
     this.current.clear();
     this.tableListeners.clear();
     this.keyListeners.clear();
+    this.serverListeners.clear();
+  }
+
+  /** Fire raw-arrival observers. Per-listener try/catch so one bad
+   *  listener can't stop the others, and snapshot the set so a listener
+   *  that unsubscribes during firing doesn't break the loop. */
+  private fireServer(row: T): void {
+    if (this.serverListeners.size === 0) return;
+    for (const l of [...this.serverListeners]) {
+      try {
+        l(row);
+      } catch (err) {
+        console.error("[ValidAtTable] server listener threw", err);
+      }
+    }
   }
 
   /** Snapshot listener sets before iterating so a listener that

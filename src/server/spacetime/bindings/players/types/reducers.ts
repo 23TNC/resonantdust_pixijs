@@ -9,8 +9,10 @@ import { type Infer as __Infer } from "spacetimedb";
 import ClaimOrLoginReducer from "../claim_or_login_reducer";
 import SetLastLoginReducer from "../set_last_login_reducer";
 import SetPlayerFactionReducer from "../set_player_faction_reducer";
+import SetPlayerPermissionsReducer from "../set_player_permissions_reducer";
 
 export type ClaimOrLoginParams = __Infer<typeof ClaimOrLoginReducer>;
 export type SetLastLoginParams = __Infer<typeof SetLastLoginReducer>;
 export type SetPlayerFactionParams = __Infer<typeof SetPlayerFactionReducer>;
+export type SetPlayerPermissionsParams = __Infer<typeof SetPlayerPermissionsReducer>;
 

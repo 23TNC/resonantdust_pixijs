@@ -10,6 +10,10 @@ import { ZoneTileCache, type TileView } from "./ZoneTileCache";
 import { WORLD_LAYER } from "./worldCoords";
 import { decodeMacroZone, type ZoneId } from "../../server/data/packing";
 import { localPlayerFactionFolder } from "../../server/player/playerFlags";
+import { PrimitiveLayer } from "../cards/generic/PrimitiveLayer";
+import { cardBox } from "../cards/generic/cardBox";
+import { atlasWhite, atlasHex } from "../cards/generic/atlasFills";
+import { tilePrims } from "../cards/generic/drawVisuals";
 
 const BG_COLOR = "#0d1218";
 
@@ -136,7 +140,16 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
    *  source) changes. `cardSourced` drives the debug ring. */
   private readonly retained = new Map<
     string,
-    { q: number; r: number; tileSprite: Sprite; sig: string; cardSourced: boolean }
+    {
+      q: number;
+      r: number;
+      /** Legacy bake path (hex/rect body). Mutually exclusive with `primLayer`. */
+      tileSprite?: Sprite;
+      /** Generic path: the tile (body + objects) rendered as a DSL `PrimList`. */
+      primLayer?: PrimitiveLayer;
+      sig: string;
+      cardSourced: boolean;
+    }
   >();
 
   /** Keys currently inside the active rect (visible + margin). The
@@ -596,8 +609,56 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
     const entry = this.tileViewAt(q, r);
     const def = entry !== null ? (this.ctx.definitions.decode(entry.packed) ?? null) : null;
     const tileFaction = localPlayerFactionFolder(this.ctx) ?? undefined;
+    const prev = this.retained.get(key);
 
-    const sprite = this.retained.get(key)?.tileSprite ?? this.acquireTileSprite();
+    // Generic path: a tile whose `:visuals` builds a `PrimList` (e.g. forest)
+    // renders the whole tile — body + objects — through one per-tile
+    // PrimitiveLayer, replacing the hex bake + decorator. Non-generic tiles
+    // return no prims and fall through to the legacy path below.
+    const prims = entry !== null ? tilePrims(entry.packed, entry.stock0, entry.stock1) : [];
+    if (prims.length > 0) {
+      if (prev?.tileSprite) {
+        prev.tileSprite.visible = false;
+        this.tileLayer.removeChild(prev.tileSprite);
+        this.spritePool.push(prev.tileSprite);
+      }
+      this.decorator?.dropTile(key); // prims own the objects now
+      const box = cardBox(this.grid.cellWidth, this.grid.cellHeight);
+      let layer = prev?.primLayer;
+      if (!layer) {
+        layer = new PrimitiveLayer(box, {
+          lod: this.ctx.lodTextures,
+          whiteTexture: atlasWhite(this.ctx.textures, this.ctx.app.renderer),
+          hexTexture: atlasHex(this.ctx.textures, this.ctx.app.renderer),
+          seed: tileSeed(q, r),
+          faction: tileFaction,
+        });
+        this.tileLayer.addChild(layer);
+      } else {
+        layer.setBox(box);
+      }
+      layer.draw(prims);
+      const pc = this.worldPixel(q, r);
+      layer.position.set(
+        Math.round(pc.x - this.grid.cellWidth / 2),
+        Math.round(pc.y - this.grid.cellHeight / 2),
+      );
+      this.retained.set(key, {
+        q,
+        r,
+        primLayer: layer,
+        sig: tileSig(entry),
+        cardSourced: entry?.source === "card",
+      });
+      return;
+    }
+
+    // Legacy bake path. Drop any prim layer from a prior generic build.
+    if (prev?.primLayer) {
+      this.tileLayer.removeChild(prev.primLayer);
+      prev.primLayer.destroy();
+    }
+    const sprite = prev?.tileSprite ?? this.acquireTileSprite();
 
     // Hex body. `def.texture` (when set) fills the body via the LOD
     // pipeline; faction recursion to neutral happens inside
@@ -652,9 +713,15 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
   private dropTile(key: string): void {
     const e = this.retained.get(key);
     if (!e) return;
-    e.tileSprite.visible = false;
-    this.tileLayer.removeChild(e.tileSprite);
-    this.spritePool.push(e.tileSprite);
+    if (e.tileSprite) {
+      e.tileSprite.visible = false;
+      this.tileLayer.removeChild(e.tileSprite);
+      this.spritePool.push(e.tileSprite);
+    }
+    if (e.primLayer) {
+      this.tileLayer.removeChild(e.primLayer);
+      e.primLayer.destroy();
+    }
     this.decorator?.dropTile(key);
     this.retained.delete(key);
   }
@@ -784,9 +851,12 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
     this.tileChangeListeners.clear();
     this.cache?.dispose();
     this.decorator?.destroy();
-    // Destroy retained tile sprites + the pool. ObjectManager already
-    // destroyed every object sprite via the decorator's destroy above.
-    for (const e of this.retained.values()) e.tileSprite.destroy();
+    // Destroy retained tile sprites / prim layers + the pool. ObjectManager
+    // already destroyed every object sprite via the decorator's destroy above.
+    for (const e of this.retained.values()) {
+      e.tileSprite?.destroy();
+      e.primLayer?.destroy();
+    }
     this.retained.clear();
     for (const s of this.spritePool) s.destroy();
     this.spritePool.length = 0;

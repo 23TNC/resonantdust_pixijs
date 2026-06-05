@@ -18,4 +18,6 @@ export default {
   surface: __t.u8(),
   macroZone: __t.u64(),
   microLocation: __t.u32(),
+  maxActive: __t.i32(),
+  blueprintPackedDef: __t.u16(),
 };
