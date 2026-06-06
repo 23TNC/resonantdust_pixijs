@@ -110,8 +110,8 @@ The "server is forcing this position" signal lives in `flags` as the `pos_need` 
 
 ### Dead-card extension (`LocalCard.dead`)
 `LocalCard = Card & { dead?: 1 | 2 }`. The `dead` field is a client-only marker, not part of the SDK row:
-- `dead: 1` — set by `mirrorCard` when the incoming server row carries `flags & FLAG_ACTION_DEAD` (bit 7). This is the signal `RectCard.applyData` watches to start the death animation.
-- `dead: 2` — written back to local by `RectCard` once the visual finish step has run, so a second mirror push of the same dead row doesn't replay the animation.
+- `dead: 1` — set by `mirrorCard` when the incoming server row carries `flags & FLAG_ACTION_DEAD` (bit 7). This is the signal `LayoutGenericCard.applyData` watches to run the def's `:visuals @destroy` exit hook.
+- `dead: 2` — written back to local by `LayoutGenericCard.finalizeDestroy` once the exit prims settle, so a second mirror push of the same dead row doesn't replay the exit.
 - Cleared implicitly when the server eventually DELETEs the row and `mirrorCard` fires `removed`.
 
 Because the server marks death via UPDATE (not DELETE) so the row carries `valid_at`, the row **lingers in `cardsLocal` for the full reap delay**, still at its old position. Live-world consumers (inventory layout's overlap-push, recipe matcher, anything else that iterates "cards in play") must skip rows where `dead` is truthy or the dying card collides with its own just-orphaned children. The DELETE that finally evicts the row is what triggers `CardManager.destroy`.

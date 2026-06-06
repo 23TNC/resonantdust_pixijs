@@ -1,4 +1,4 @@
-import { BitmapText, Container, Sprite, Texture } from "pixi.js";
+import { BitmapText, Container, Graphics, Sprite, Texture } from "pixi.js";
 import { TEXT_BAKE_PX, TEXT_FONT } from "../../../assets/fonts";
 import type { LodTextureManager } from "../../../assets/textures/LodTextureManager";
 import { footprintPx, pxX, pxY, type CardBox } from "./cardBox";
@@ -321,6 +321,31 @@ export class ProgressPrim extends BasePrim {
   }
 }
 
+/** `mask` — a clip rect, NOT drawn. The `PrimitiveLayer` sets it as its own
+ *  `.mask`, so easing the rect's `h` (height) clips the rest of the card's prims:
+ *  a roll-up exit when `h` eases full → 0. Seed the open height via `enter.h`
+ *  (the target `size.y` is the rolled-up height, typically 0). Top-anchored, so
+ *  the bottom of the card vanishes first — a window-blind roll-up. A rect
+ *  Graphics (cheap axis-aligned stencil), redrawn each step from the eased box.
+ *  Only meaningful on a self-mounted (card) layer; tiles never author one. */
+export class MaskPrim extends BasePrim {
+  readonly kind = "mask" as const;
+  readonly node = new Graphics();
+
+  protected applyDiscrete(_n: VisualNode, _box: CardBox): void {
+    // A mask is pure geometry — no texture/anchor/text to apply.
+  }
+
+  protected writeNode(): void {
+    const c = this.cur;
+    this.node.position.set(this.originX + c.x, this.originY + c.y);
+    this.node
+      .clear()
+      .rect(0, 0, Math.max(0, c.w * c.scale), Math.max(0, c.h * c.scale))
+      .fill(0xffffff);
+  }
+}
+
 function setAnchor(node: Sprite | BitmapText, n: VisualNode): void {
   const ax = (n.anchor?.x ?? 0) / 100;
   const ay = (n.anchor?.y ?? 0) / 100;
@@ -349,5 +374,7 @@ export function makePrimitive(kind: PrimKind, deps: PrimDeps): Primitive {
       return new TextPrim();
     case "progress":
       return new ProgressPrim(deps);
+    case "mask":
+      return new MaskPrim();
   }
 }

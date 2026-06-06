@@ -13,7 +13,8 @@ import { localPlayerFactionFolder } from "../../server/player/playerFlags";
 import { PrimitiveLayer } from "../cards/generic/PrimitiveLayer";
 import { cardBox } from "../cards/generic/cardBox";
 import { atlasWhite, atlasHex } from "../cards/generic/atlasFills";
-import { tilePrims } from "../cards/generic/drawVisuals";
+import { tilePrims, tilePrimsBatch, type TileReq } from "../cards/generic/drawVisuals";
+import type { PrimList } from "../cards/generic/visualSpec";
 
 const BG_COLOR = "#0d1218";
 
@@ -194,10 +195,15 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
    *  choice → full rebuild. */
   private lastTileFaction: string | undefined = undefined;
 
-  /** Set when a LOD pack lands (`lodTextures.onLoad`); the next pass
-   *  re-resolves textures for the active tiles (bounded) instead of a
-   *  full grid rebuild. */
-  private texturesDirty = false;
+  /** Retained tiles awaiting a texture re-resolve after a LOD pack landed
+   *  (`lodTextures.onLoad`). Drained under the shared `BUILD_BUDGET` per
+   *  pass — same in-place `buildTile` rebuild as a full refresh, just
+   *  spread across frames so a pan into fresh territory doesn't re-run
+   *  `tilePrims` for every active tile in one synchronous burst.
+   *  `refreshQueued` dedups against repeated `onLoad` fires before the
+   *  queue drains. */
+  private refreshQueue: { q: number; r: number; key: string }[] = [];
+  private refreshQueued = new Set<string>();
 
   /** Set when the retained set must be torn down and rebuilt wholesale
    *  (surface swap, faction change). Honoured at the top of `layout()`. */
@@ -387,11 +393,16 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
     // first sync after a fresh `get` returns null until the pack lands
     // in the atlas; this hook ensures we run a second sync once it's
     // ready instead of waiting for a pan to invalidate us.
-    // A LOD pack landed. Don't rebuild the grid — flag a coalesced
-    // texture re-resolve for the active tiles, handled once on the
-    // next pass however many loads fired between frames.
+    // A LOD pack landed. Don't rebuild the grid — queue the active tiles
+    // for a budgeted texture re-resolve, drained over the next few passes
+    // alongside the build queue. `refreshQueued` keeps repeated `onLoad`
+    // fires (one per landed pack during a pan) from re-enqueuing a tile.
     this.unsubObjectLoad = ctx.lodTextures.onLoad(() => {
-      this.texturesDirty = true;
+      for (const [key, e] of this.retained) {
+        if (this.refreshQueued.has(key)) continue;
+        this.refreshQueued.add(key);
+        this.refreshQueue.push({ q: e.q, r: e.r, key });
+      }
       this.invalidate();
     });
 
@@ -543,30 +554,60 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
       structureChanged = true;
     }
 
-    // Coalesced texture-load refresh: a LOD pack landed since last
-    // pass, so re-resolve textures for the (bounded) active tiles.
-    if (this.texturesDirty) {
-      this.texturesDirty = false;
-      for (const e of [...this.retained.values()]) this.buildTile(e.q, e.r);
-      structureChanged = true;
-    }
-
-    // Drain the build queue with a per-frame budget — spreads a big
-    // fill or a fresh margin edge across frames.
-    let built = 0;
-    while (this.buildQueue.length > 0 && built < BUILD_BUDGET) {
+    // Collect this frame's victims under one shared budget, then resolve all
+    // their prims in a SINGLE wasm batch before rendering — one boundary
+    // crossing + one parse for the whole frame instead of one per tile.
+    //
+    //  - Build queue first (a tile entering view beats re-resolving a visible
+    //    one's LOD); the refresh queue takes whatever budget is left.
+    //  - The active/retained guards skip dead entries WITHOUT consuming budget
+    //    (same as the old per-loop `continue`).
+    const victims: { q: number; r: number; entry: TileView | null }[] = [];
+    while (this.buildQueue.length > 0 && victims.length < BUILD_BUDGET) {
       const next = this.buildQueue.shift()!;
       if (!this.activeKeys.has(next.key)) continue; // left the rect first
       if (this.retained.has(next.key)) continue;    // already built
-      this.buildTile(next.q, next.r);
-      built++;
+      victims.push({ q: next.q, r: next.r, entry: this.tileViewAt(next.q, next.r) });
     }
-    if (built > 0) structureChanged = true;
+    while (this.refreshQueue.length > 0 && victims.length < BUILD_BUDGET) {
+      const next = this.refreshQueue.shift()!;
+      this.refreshQueued.delete(next.key);
+      if (!this.retained.has(next.key)) continue;   // dropped before refresh
+      victims.push({ q: next.q, r: next.r, entry: this.tileViewAt(next.q, next.r) });
+    }
+
+    if (victims.length > 0) {
+      // Batch the wasm prim resolve for every victim with loaded data. A null
+      // entry (zone not loaded yet) makes no VM call — it renders the empty /
+      // legacy path with no prims. `reqSlot` maps each victim to its slice of
+      // the batched result (or -1 for the null-entry tiles).
+      const reqs: TileReq[] = [];
+      const reqSlot: number[] = [];
+      for (const v of victims) {
+        if (v.entry === null) {
+          reqSlot.push(-1);
+          continue;
+        }
+        reqSlot.push(reqs.length);
+        reqs.push({
+          packed: v.entry.packed,
+          stock0: v.entry.stock0,
+          stock1: v.entry.stock1,
+          seed: tileSeed(v.q, v.r),
+        });
+      }
+      const batched = tilePrimsBatch(reqs);
+      for (let i = 0; i < victims.length; i++) {
+        const v = victims[i];
+        this.renderTile(v.q, v.r, v.entry, reqSlot[i] >= 0 ? batched[reqSlot[i]] : []);
+      }
+      structureChanged = true;
+    }
 
     if (structureChanged) this.repaintDebugOverlay();
 
-    // Stay dirty while tiles remain to build so `layout()` re-runs.
-    return this.buildQueue.length > 0 ? true : undefined;
+    // Stay dirty while tiles remain to build or refresh so `layout()` re-runs.
+    return this.buildQueue.length > 0 || this.refreshQueue.length > 0 ? true : undefined;
   }
 
   /** Diff the active rect (visible + `marginRings`) against the
@@ -615,12 +656,24 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
     return cells.map(({ q, r }) => ({ q, r, key: `${q},${r}` }));
   }
 
-  /** Build (or rebuild in place) one tile's hex body + object sprites
-   *  and record its render signature. Reuses the tile's pooled sprite
-   *  when it's already retained (texture refresh / data change). */
+  /** Build (or rebuild in place) one tile, resolving its prims via a
+   *  single-tile wasm call. The drain loop in `layout()` builds in bulk
+   *  via `renderTile` + a batched prim resolve instead; this stays the
+   *  entry point for the one-off callers (data-change reconcile). */
   private buildTile(q: number, r: number): void {
-    const key = `${q},${r}`;
     const entry = this.tileViewAt(q, r);
+    const prims = entry !== null ? tilePrims(entry.packed, entry.stock0, entry.stock1, tileSeed(q, r)) : [];
+    this.renderTile(q, r, entry, prims);
+  }
+
+  /** Render one tile from already-resolved `prims` — the half of the build
+   *  that touches the scene graph (sprite pool, PrimitiveLayer reconcile,
+   *  decorator, retained signature). Split from the wasm prim resolve so the
+   *  per-frame drain can batch the boundary crossing across many tiles and
+   *  feed each tile's slice in here. Reuses the tile's pooled sprite /
+   *  prim layer when it's already retained (texture refresh / data change). */
+  private renderTile(q: number, r: number, entry: TileView | null, prims: PrimList): void {
+    const key = `${q},${r}`;
     const def = entry !== null ? (this.ctx.definitions.decode(entry.packed) ?? null) : null;
     const tileFaction = localPlayerFactionFolder(this.ctx) ?? undefined;
     const prev = this.retained.get(key);
@@ -629,7 +682,6 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
     // renders the whole tile — body + objects — through one per-tile
     // PrimitiveLayer, replacing the hex bake + decorator. Non-generic tiles
     // return no prims and fall through to the legacy path below.
-    const prims = entry !== null ? tilePrims(entry.packed, entry.stock0, entry.stock1, tileSeed(q, r)) : [];
     if (prims.length > 0) {
       if (prev?.tileSprite) {
         prev.tileSprite.visible = false;
@@ -759,6 +811,8 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
   private dropAllTiles(): void {
     for (const key of [...this.retained.keys()]) this.dropTile(key);
     this.buildQueue = [];
+    this.refreshQueue = [];
+    this.refreshQueued.clear();
     this.activeKeys = new Set();
   }
 

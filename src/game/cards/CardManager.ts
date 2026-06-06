@@ -12,7 +12,6 @@ import { owningSoul } from "../permissions";
 import { onContentReloaded } from "../definitions/contentBoot";
 import { isPositionHeld } from "../actions/chainState";
 import { Card, type CardPositionState, type StackDirection } from "./Card";
-import { GameHexCard } from "./layout/hexagon/HexCard";
 import {
   applyMicro,
   branchForDirection,

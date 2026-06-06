@@ -18,8 +18,8 @@
 //! (the gate connection queues pre-open sends, so initial connect is covered).
 
 import { type ZoneId } from "../data/packing";
-import type { Card, Soul, SoulPrivate } from "../spacetime/bindings/cards/types";
-import type { Region, Zone } from "../spacetime/bindings/regions/types";
+import type { Card, Soul, SoulPrivate } from "../spacetime/bindings/shard/types";
+import type { Region, Zone } from "../spacetime/bindings/shard/types";
 import type { ChatMessage } from "../spacetime/bindings/chat/types";
 import type { Player, PlayerProfile } from "../spacetime/bindings/players/types";
 import { debug } from "../../debug";

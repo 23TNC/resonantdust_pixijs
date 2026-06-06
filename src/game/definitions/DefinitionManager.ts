@@ -8,7 +8,7 @@
  *     build a stable client-local id space from `Content.aspectNames()` (ids
  *     never cross the wire now). `aspectInfo(id)` maps id→name→record and
  *     approximates the legacy single `parent` as `satisfies[0]`.
- *   - **Visuals** are `shape`/`color.{bg,title,text}`/`objects[]`/`texture`;
+ *   - **Visuals** are `color.{bg,title,text}`/`objects[]`/`texture`;
  *     `decode()` adapts them into the legacy `CardDefinition` (`style[3]` from
  *     the colors, `object` from `objects[0]`).
  *   - **Recipes** are VM bytecode, so matching runs on the VM via
@@ -32,7 +32,6 @@ import {
   cardFlagFieldValueIn as wasmCardFlagFieldValueIn,
   hasCardFlag as wasmHasCardFlag,
   cardTypeId as wasmCardTypeId,
-  isHexType as wasmIsHexType,
 } from "../../wasm/pkg/resonantdust_wasm";
 import {
   findRecipeMatch as findRecipeMatchInternal,
@@ -80,9 +79,6 @@ export interface CardDefinition {
   cardType: number;
   definitionId: number;
   key: string;
-  /** `&shape` from the DSL — `"rect"` | `"hex"` | `"generic"`. Drives which
-   *  Layout half `Card.spawn` builds (generic → the PrimList reconciler). */
-  shape: string;
   /** `[bg, title, text]` CSS hex strings (from the DSL `color.*`). */
   style: readonly string[];
   object?: { name: string; index?: number; scale?: { min: number; max: number } } | null;
@@ -110,7 +106,6 @@ interface DslCardDef {
   def_id: number;
   key: string;
   type_name: string;
-  shape: string;
   color_bg: number;
   color_title: number;
   color_text: number;
@@ -221,7 +216,6 @@ export class DefinitionManager {
       cardType: dsl.card_type,
       definitionId: dsl.def_id,
       key: dsl.key,
-      shape: dsl.shape,
       style: [hex(dsl.color_bg), hex(dsl.color_title), hex(dsl.color_text)],
       object: dsl.objects.length > 0 ? { name: dsl.objects[0] } : null,
       texture: dsl.texture !== null ? { name: dsl.texture } : null,
@@ -254,18 +248,6 @@ export class DefinitionManager {
 
   findPackedByKey(key: string): number | undefined {
     return sharedContent().packedDef(key) ?? undefined;
-  }
-
-  shape(typeId: number): "rect" | "hex" | "generic" | undefined {
-    try {
-      // "generic" routes a card to the DSL-driven PrimList renderer
-      // (LayoutGenericCard). The signal is content-side — when the DSL marks a
-      // card's shape as generic, return "generic" here. Until that's wired, the
-      // value is never produced, so the generic path stays inert.
-      return wasmIsHexType(typeId) ? "hex" : "rect";
-    } catch {
-      return undefined;
-    }
   }
 
   cardFlagBit(name: string): number | undefined {

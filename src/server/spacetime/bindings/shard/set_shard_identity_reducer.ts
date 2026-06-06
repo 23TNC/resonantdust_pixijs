@@ -11,9 +11,6 @@ import {
 } from "spacetimedb";
 
 export default {
-  timeMs: __t.u64(),
-  surface: __t.u8(),
-  macroZone: __t.u64(),
-  q: __t.u8(),
-  r: __t.u8(),
+  cardDb: __t.u8(),
+  shard: __t.u16(),
 };

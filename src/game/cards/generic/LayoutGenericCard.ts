@@ -14,6 +14,7 @@ import { PrimitiveLayer } from "./PrimitiveLayer";
 import type { PrimDeps } from "./primitives";
 import { drawVisuals, type VisualHost, type HostValue } from "./drawVisuals";
 import type { PrimList } from "./visualSpec";
+import { debug } from "../../../debug";
 
 /**
  * The DSL-driven card, slotting into the existing `Card` lifecycle as the
@@ -286,6 +287,17 @@ export class LayoutGenericCard extends LayoutCard {
     if (faction) host.faction = faction;
     host.card_data = this.buildCardData();
     this.spec = drawVisuals(this.currentPackedDefinition, host, hook);
+    if (hook === "destroy") {
+      // Diagnostic for the roll-up: no `mask` entry → stale CONTENT (the gate
+      // hasn't served the new card_death/@destroy); a `mask` with `enter:
+      // undefined` → stale WASM pkg (the `enter` serializer isn't loaded).
+      const mask = this.spec.find((p) => p.kind === "mask");
+      debug.log(
+        ["cards"],
+        `[generic] card ${this.cardId} @destroy prims=${this.spec.length} mask=${mask ? `enter=${JSON.stringify(mask.enter)}` : "MISSING"}`,
+        5,
+      );
+    }
     this.drawn = true;
     this.layer.setBox(cardBox(this.width, this.height));
     this.layer.draw(this.spec);

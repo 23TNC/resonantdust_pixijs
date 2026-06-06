@@ -1,8 +1,6 @@
 import type { Card, StackDirection } from "../cards/Card";
 import { decodeMicro, directionForBranch } from "../cards/cardData";
-import { GameHexCard } from "../cards/layout/hexagon/HexCard";
 import { LayoutCard } from "../cards/layout/CardLayout";
-import { GameRectCard } from "../cards/layout/rectangle/RectCard";
 import type { GameContext } from "../../GameContext";
 import { debug } from "../../debug";
 import { canPickUpCard } from "../permissions";
@@ -142,7 +140,6 @@ export class DragManager {
 
     const card = this.ctx.cards?.get(data.hit.cardId);
     if (!card) return;
-    if (!(card.gameCard instanceof GameRectCard) && !(card.gameCard instanceof GameHexCard)) return;
 
     // Source flag check: position_hold (temporary, e.g. mid-animation /
     // server-held while a magnetic action is using the card) or

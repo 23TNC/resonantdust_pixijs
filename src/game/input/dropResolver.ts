@@ -7,8 +7,6 @@ import {
   STACK_DIRECTION_UP,
 } from "../cards/cardData";
 import { resolveStackDrop, stackBits, type StackBits } from "../cards/stacking";
-import { GameHexCard } from "../cards/layout/hexagon/HexCard";
-import { GameRectCard } from "../cards/layout/rectangle/RectCard";
 import { LayoutCard } from "../cards/layout/CardLayout";
 import { LayoutWorld } from "../viewport/LayoutWorld";
 import type { GameContext } from "../../GameContext";
@@ -668,8 +666,7 @@ function findCardAtTile(
   // `macroZone.packed` on rows in that zone exactly.
   const targetMacroZone = makeMacroZone(owner, surface, zoneQ, zoneR).packed;
 
-  let hexCard: Card | null = null;
-  let rectCard: Card | null = null;
+  let found: Card | null = null;
   for (const [id, row] of ctx.data.cardsLocal) {
     if (id === excludeId) continue;
     if (row.macroZone.surface !== surface) continue;
@@ -685,13 +682,9 @@ function findCardAtTile(
     if (otherLocalQ !== localQ || otherLocalR !== localR) continue;
     const card = cards.get(id);
     if (!card) continue;
-    if (card.gameCard instanceof GameRectCard) {
-      rectCard = card;
-    } else if (card.gameCard instanceof GameHexCard) {
-      hexCard = card;
-    }
+    found = card;
   }
-  return rectCard ?? hexCard;
+  return found;
 }
 
 // ============================================================

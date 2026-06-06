@@ -1,8 +1,6 @@
 import { Container } from "pixi.js";
 import type { GameContext } from "../../GameContext";
-import type { CardDefinition } from "../../game/definitions/DefinitionManager";
-import { CardFace } from "../cards/CardFace";
-import { getTextureRegistry } from "../definitions/TextureRegistry";
+import { GenericCardFace } from "../cards/generic/GenericCardFace";
 import { localPlayerFactionFolder } from "../../server/player/playerFlags";
 
 const GHOST_ALPHA = 0.6;
@@ -23,41 +21,31 @@ const GHOST_ALPHA = 0.6;
  * resolution needs to see the world tile / target card beneath the
  * ghost, not the ghost itself.
  *
- * Today: rect-only (souls have `shape: "rect"` per `cards/types.json`).
- * If a future card type with `shape: "hex"` needs ghost-drag, swap in
- * a hex visual based on `ctx.definitions.shape(typeId)`.
+ * Shape-agnostic: the ghost renders the def's `:visuals` through the same
+ * generic PrimList pipeline as a live card (`GenericCardFace`), so it looks
+ * identical to what drops, whatever the card's geometry.
  */
 export class DragGhost {
   readonly container = new Container();
-  private readonly face = new CardFace();
+  private readonly face: GenericCardFace;
   private readonly tickerCallback: () => void;
   private readonly unsubArtLoad: () => void;
-  private readonly def: CardDefinition | null;
-  private readonly label: string | undefined;
+  private readonly faction: string | null;
   private destroyed = false;
 
   constructor(
     private readonly ctx: GameContext,
-    packedDefinition: number,
+    private readonly packedDefinition: number,
     private readonly offsetX: number,
     private readonly offsetY: number,
   ) {
-    this.def = ctx.definitions.decode(packedDefinition) ?? null;
-    this.label = ctx.definitions.label(packedDefinition);
-    // Resolve card art via the unified resolver. Seed =
-    // `packedDefinition` (a stable per-def integer; ghost is a
-    // preview, not tied to a specific card row). For packs with
-    // multiple variants the user sees one consistent ghost per
-    // def; the actual card on drop may show a different sprite
-    // because the real card seeds on `card_id`.
-    const art = {
-      lodTextures: this.ctx.lodTextures,
-      textureRegistry: getTextureRegistry(),
-      seed: packedDefinition,
-      faction: localPlayerFactionFolder(this.ctx),
-      definitions: this.ctx.definitions,
-    };
-    this.face.draw(this.def, "top", this.label, art);
+    // Seed = `packedDefinition` (a stable per-def integer; the ghost is a
+    // preview, not tied to a card row). For packs with multiple variants the
+    // user sees one consistent ghost per def; the real card on drop may show a
+    // different sprite because it seeds on `card_id`.
+    this.face = new GenericCardFace(ctx, packedDefinition);
+    this.faction = localPlayerFactionFolder(this.ctx);
+    this.face.draw(packedDefinition, this.faction);
     this.container.addChild(this.face);
     this.container.alpha = GHOST_ALPHA;
     this.container.eventMode = "none";
@@ -71,7 +59,7 @@ export class DragGhost {
     // to release and re-grab.
     this.unsubArtLoad = ctx.lodTextures.onLoad(() => {
       if (this.destroyed) return;
-      this.face.draw(this.def, "top", this.label, art);
+      this.face.draw(this.packedDefinition, this.faction);
     });
 
     // Pin to the cursor every frame. InputManager exposes

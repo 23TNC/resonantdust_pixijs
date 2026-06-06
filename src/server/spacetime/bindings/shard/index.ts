@@ -34,35 +34,49 @@ import {
 } from "spacetimedb";
 
 // Import all reducer arg schemas
-import AcquireHoldReducer from "./acquire_hold_reducer";
-import AcquireLeaseReducer from "./acquire_lease_reducer";
+import AcquireCardShardReducer from "./acquire_card_shard_reducer";
 import AddCardReducer from "./add_card_reducer";
+import ApplyActionReducer from "./apply_action_reducer";
+import ApplyActionTileReducer from "./apply_action_tile_reducer";
 import ClaimPendingReducer from "./claim_pending_reducer";
-import CreateCardReducer from "./create_card_reducer";
-import DestroyCardReducer from "./destroy_card_reducer";
-import FinalizeCardReducer from "./finalize_card_reducer";
-import MoveCardReducer from "./move_card_reducer";
+import EnsureRegionReducer from "./ensure_region_reducer";
 import MoveSoulReducer from "./move_soul_reducer";
 import PlaceCardReducer from "./place_card_reducer";
-import ReleaseHoldReducer from "./release_hold_reducer";
+import ReleaseCardShardReducer from "./release_card_shard_reducer";
 import ReleasePendingReducer from "./release_pending_reducer";
 import RequestBlueprintReducer from "./request_blueprint_reducer";
-import SetSoulStatReducer from "./set_soul_stat_reducer";
+import RequestZoneReducer from "./request_zone_reducer";
+import SetShardIdentityReducer from "./set_shard_identity_reducer";
 import SpawnSoulReducer from "./spawn_soul_reducer";
-import StackCardReducer from "./stack_card_reducer";
-import UnlockBlueprintReducer from "./unlock_blueprint_reducer";
 
 // Import all procedure arg schemas
 
 // Import all table schema definitions
+import CardShardsRow from "./card_shards_table";
 import CardsRow from "./cards_table";
+import RegionsRow from "./regions_table";
 import SoulPrivatesRow from "./soul_privates_table";
 import SoulsRow from "./souls_table";
+import ZonesRow from "./zones_table";
 
 /** Type-only namespace exports for generated type groups. */
 
 /** The schema information for all tables in this module. This is defined the same was as the tables would have been defined in the server. */
 const tablesSchema = __schema({
+  card_shards: __table({
+    name: 'card_shards',
+    indexes: [
+      { accessor: 'data_shard', name: 'card_shards_data_shard_idx_btree', algorithm: 'btree', columns: [
+        'dataShard',
+      ] },
+      { accessor: 'valid_at', name: 'card_shards_valid_at_idx_btree', algorithm: 'btree', columns: [
+        'validAt',
+      ] },
+    ],
+    constraints: [
+      { name: 'card_shards_valid_at_key', constraint: 'unique', columns: ['validAt'] },
+    ],
+  }, CardShardsRow),
   cards: __table({
     name: 'cards',
     indexes: [
@@ -86,6 +100,20 @@ const tablesSchema = __schema({
       { name: 'cards_valid_at_key', constraint: 'unique', columns: ['validAt'] },
     ],
   }, CardsRow),
+  regions: __table({
+    name: 'regions',
+    indexes: [
+      { accessor: 'macro_region', name: 'regions_macro_region_idx_btree', algorithm: 'btree', columns: [
+        'macroRegion',
+      ] },
+      { accessor: 'valid_at', name: 'regions_valid_at_idx_btree', algorithm: 'btree', columns: [
+        'validAt',
+      ] },
+    ],
+    constraints: [
+      { name: 'regions_valid_at_key', constraint: 'unique', columns: ['validAt'] },
+    ],
+  }, RegionsRow),
   soul_privates: __table({
     name: 'soul_privates',
     indexes: [
@@ -114,27 +142,44 @@ const tablesSchema = __schema({
       { name: 'souls_valid_at_key', constraint: 'unique', columns: ['validAt'] },
     ],
   }, SoulsRow),
+  zones: __table({
+    name: 'zones',
+    indexes: [
+      { accessor: 'macro_zone', name: 'zones_macro_zone_idx_btree', algorithm: 'btree', columns: [
+        'macroZone',
+      ] },
+      { accessor: 'owner_id', name: 'zones_owner_id_idx_btree', algorithm: 'btree', columns: [
+        'ownerId',
+      ] },
+      { accessor: 'valid_at', name: 'zones_valid_at_idx_btree', algorithm: 'btree', columns: [
+        'validAt',
+      ] },
+      { accessor: 'zone_id', name: 'zones_zone_id_idx_btree', algorithm: 'btree', columns: [
+        'zoneId',
+      ] },
+    ],
+    constraints: [
+      { name: 'zones_valid_at_key', constraint: 'unique', columns: ['validAt'] },
+    ],
+  }, ZonesRow),
 });
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
-  __reducerSchema("acquire_hold", AcquireHoldReducer),
-  __reducerSchema("acquire_lease", AcquireLeaseReducer),
+  __reducerSchema("acquire_card_shard", AcquireCardShardReducer),
   __reducerSchema("add_card", AddCardReducer),
+  __reducerSchema("apply_action", ApplyActionReducer),
+  __reducerSchema("apply_action_tile", ApplyActionTileReducer),
   __reducerSchema("claim_pending", ClaimPendingReducer),
-  __reducerSchema("create_card", CreateCardReducer),
-  __reducerSchema("destroy_card", DestroyCardReducer),
-  __reducerSchema("finalize_card", FinalizeCardReducer),
-  __reducerSchema("move_card", MoveCardReducer),
+  __reducerSchema("ensure_region", EnsureRegionReducer),
   __reducerSchema("move_soul", MoveSoulReducer),
   __reducerSchema("place_card", PlaceCardReducer),
-  __reducerSchema("release_hold", ReleaseHoldReducer),
+  __reducerSchema("release_card_shard", ReleaseCardShardReducer),
   __reducerSchema("release_pending", ReleasePendingReducer),
   __reducerSchema("request_blueprint", RequestBlueprintReducer),
-  __reducerSchema("set_soul_stat", SetSoulStatReducer),
+  __reducerSchema("request_zone", RequestZoneReducer),
+  __reducerSchema("set_shard_identity", SetShardIdentityReducer),
   __reducerSchema("spawn_soul", SpawnSoulReducer),
-  __reducerSchema("stack_card", StackCardReducer),
-  __reducerSchema("unlock_blueprint", UnlockBlueprintReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

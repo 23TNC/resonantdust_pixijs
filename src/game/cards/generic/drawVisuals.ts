@@ -1,5 +1,5 @@
 import { sharedContent, sharedLocales } from "../../definitions/contentBoot";
-import type { PrimKind, PrimList, Vec2 } from "./visualSpec";
+import type { AnimatableFields, PrimKind, PrimList, Vec2 } from "./visualSpec";
 
 /**
  * Client entry to the VM's `:visuals` render. Calls the wasm
@@ -45,6 +45,10 @@ interface PrimNodeJson {
   /** `progress` fill source: unset/0 = a progress row (`target`), 1 = the action
    *  queue/debounce fraction. */
   source?: number;
+  /** Seed for `current` on first creation (`&h.enter.<field>`), so the prim eases
+   *  in from this state instead of snapping to target (e.g. a `^mask` rolling up
+   *  from full height). Partial of the animatable set. */
+  enter?: Partial<AnimatableFields>;
 }
 
 /** Map the wasm `PrimNode` JSON onto the client `VisualNode[]` — wrap texture
@@ -66,6 +70,7 @@ function mapPrims(nodes: PrimNodeJson[]): PrimList {
     style: n.style,
     z: n.z,
     source: n.source,
+    enter: n.enter,
   }));
 }
 
@@ -82,4 +87,34 @@ export function drawVisuals(packed: number, host: VisualHost, hook: "init" | "up
  */
 export function tilePrims(packed: number, stock0: number, stock1: number, seed: number): PrimList {
   return mapPrims(JSON.parse(sharedContent().tilePrims(packed, stock0, stock1, seed)) as PrimNodeJson[]);
+}
+
+/** One tile's inputs for {@link tilePrimsBatch}. */
+export interface TileReq {
+  packed: number;
+  stock0: number;
+  stock1: number;
+  seed: number;
+}
+
+/**
+ * Batched {@link tilePrims}: resolve a whole set of tiles in ONE wasm crossing
+ * + one `JSON.parse`, instead of one round-trip per tile. Inputs are packed
+ * into a flat `Int32Array` (`[packed, stock0, stock1, seed]` per tile — all
+ * fit in i32, `packed` is a u16) so the call itself allocates no per-tile
+ * strings; only the result (the prim lists) crosses back as JSON. Results are
+ * returned in request order.
+ */
+export function tilePrimsBatch(reqs: readonly TileReq[]): PrimList[] {
+  if (reqs.length === 0) return [];
+  const flat = new Int32Array(reqs.length * 4);
+  for (let i = 0; i < reqs.length; i++) {
+    const r = reqs[i];
+    flat[i * 4] = r.packed;
+    flat[i * 4 + 1] = r.stock0;
+    flat[i * 4 + 2] = r.stock1;
+    flat[i * 4 + 3] = r.seed;
+  }
+  const out = JSON.parse(sharedContent().tilePrimsBatch(flat)) as PrimNodeJson[][];
+  return out.map(mapPrims);
 }

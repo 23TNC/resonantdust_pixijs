@@ -93,6 +93,11 @@ export class PrimitiveLayer extends Container {
         // Intra-tile order uses the prim's `z` (DSL `&h.z`), falling back to the
         // spec index so unset prims keep push order.
         this.prims[i].node.zIndex = Math.round(worldY * Z_SCALE) + (node.z ?? i) + (fill ? FLOOR_BAND : 0);
+        // A `mask` prim is meaningless here (there's no container to clip — prims
+        // live loose in the shared sort layer). Keep its rect from drawing as a
+        // stray white block. Masks are a card (self-mount) feature; tiles never
+        // author one, so this is just a guard against misuse.
+        if (this.prims[i].kind === "mask") this.prims[i].node.renderable = false;
       }
     } else {
       // Self-mounted: paint order is the prim's `z` (DSL `&h.z`), falling back to
@@ -103,6 +108,17 @@ export class PrimitiveLayer extends Container {
       for (let i = 0; i < this.prims.length; i++) {
         this.prims[i].node.zIndex = list[i].z ?? i;
       }
+    }
+    // Mask wiring (self-mount only): a `mask` prim CLIPS the rest of the layer
+    // rather than drawing — set it as this container's `.mask` so easing its
+    // height rolls the card up. The mask node stays a child of the layer (added
+    // in the reconcile loop above) so it shares the prims' coordinate space;
+    // Pixi excludes a `.mask` object from normal rendering. Cleared when no mask
+    // prim is present. Externally-mounted (tile) layers don't mask — their prims
+    // live in the shared sort container, not here; tiles never author `^mask`.
+    if (!this.mountTarget) {
+      const maskPrim = this.prims.find((p) => p.kind === "mask");
+      this.mask = maskPrim ? maskPrim.node : null;
     }
     this.animating = true;
   }
@@ -127,6 +143,9 @@ export class PrimitiveLayer extends Container {
   }
 
   destroy(): void {
+    // Drop the mask reference before destroying its node, so Pixi isn't left
+    // pointing at a destroyed mask mid-teardown.
+    this.mask = null;
     for (const p of this.prims) p.destroy();
     this.prims.length = 0;
     super.destroy();

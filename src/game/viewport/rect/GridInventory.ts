@@ -1,20 +1,22 @@
 import type { Card } from "../../cards/Card";
 import { decodeMicro, microIsCard } from "../../cards/cardData";
-import { GameHexCard } from "../../cards/layout/hexagon/HexCard";
-import {
-  GameRectCard,
-  RECT_CARD_HEIGHT,
-  RECT_CARD_WIDTH,
-} from "../../cards/layout/rectangle/RectCard";
+import { CARD_HEIGHT, CARD_WIDTH } from "../../cards/layout/cardMetrics";
 import type { GameContext } from "../../../GameContext";
 import type { ZoneId } from "../../../server/data/packing";
 
-const GRID_PAD = 8;
-/** Cell footprint of the inventory rect grid (card + padding). Shared with the
- *  `RectGrid` the inventory `LayoutWorld` is constructed with, so on-screen
- *  cells and occupancy cells line up exactly. */
-export const GRID_W = RECT_CARD_WIDTH + GRID_PAD;
-export const GRID_H = RECT_CARD_HEIGHT + GRID_PAD;
+/** Visible border around each card inside its slot, on every side. The cell is
+ *  the full card face (CARD_WIDTH × CARD_HEIGHT — body + title) plus this margin
+ *  on all four sides, so cards snap with a uniform gutter and the slot tiles meet
+ *  edge-to-edge. MUST match `cell_margin` in `content/data/functions/01.rd`
+ *  (the slot tile derives its size from that global). */
+const GRID_MARGIN = 8;
+/** Cell footprint of the inventory rect grid = card face + margin on each side.
+ *  Drives BOTH the snap spacing (the `RectGrid` the inventory `LayoutWorld` is
+ *  built with) and occupancy here, so on-screen cells and occupancy cells line
+ *  up exactly — and equals the DSL `cell_width`/`cell_height` so the slot tile
+ *  fills the cell. */
+export const GRID_W = CARD_WIDTH + 2 * GRID_MARGIN;
+export const GRID_H = CARD_HEIGHT + 2 * GRID_MARGIN;
 
 /** `micro.localQ/localR` are 3-bit fields → cells 0..7 on each axis. */
 const MAX_CELLS = 8;
@@ -48,12 +50,9 @@ export class GridInventory {
   ) {
     if (!ctx.cards) throw new Error("[GridInventory] ctx.cards is null");
     for (const card of ctx.cards.cardsInZone(zoneId)) {
-      if (card.gameCard instanceof GameRectCard || card.gameCard instanceof GameHexCard) {
-        this.cards.add(card);
-      }
+      this.cards.add(card);
     }
     this.unsubscribe = ctx.cards.subscribe(zoneId, (kind, card) => {
-      if (!(card.gameCard instanceof GameRectCard) && !(card.gameCard instanceof GameHexCard)) return;
       if (kind === "added") this.cards.add(card);
       else this.cards.delete(card);
     });

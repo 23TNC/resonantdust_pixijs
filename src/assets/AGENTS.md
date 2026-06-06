@@ -1,76 +1,50 @@
 # AGENTS.md
 
 ## Purpose
-GPU-side asset management. `TextureManager` bakes card visuals into
-shared atlas pages so every card of a given definition draws from the
-same texture region (one GPU texture, many `Sprite`s). `ParticleManager`
-hosts particle emitters spawned from JSON-configured effects.
-Bootstrap-scoped — both live on `GameContext` and survive scene
-changes.
+GPU-side asset management — bake/resolve visuals into shared atlas pages so
+many `Sprite`s share one GPU texture. Bootstrap-scoped: these managers live on
+`GameContext` and survive scene changes. **Cards no longer bake here** — every
+card renders through the generic `PrimList` pipeline (`game/cards/generic/`),
+resolving LOD art via `LodTextureManager` and solid/hex fills via the generic
+`atlasFills`. What still bakes through `CardTextureManager` is **world-grid tile
+bodies**.
 
 ## Important files
-- `TextureManager.ts`: per-card-shape atlases keyed by packed
-  definition + orientation. Public API: `getRectTexture(definition,
-  packed, titlePosition)`, `getHexTexture(definition, packed)`.
-  Internally manages `RenderTexture` atlas pages sized to
-  `gl.MAX_TEXTURE_SIZE` (capped at 2048 if the context isn't WebGL);
-  on first request for a definition, renders a `RectCardVisual` /
-  `HexCardVisual` into the next free slot and returns a sub-texture
-  for that region. Subsequent requests are pure cache hits.
-- `ParticleManager.ts`: scene-scoped (constructed in `MainScene.onEnter`,
-  destroyed in `onExit`). Eagerly loads every JSON config in
-  `effects/json/*.json` via `import.meta.glob`; `spawn(name, opts)`
-  builds an `@spd789562/particle-emitter` `Emitter` from the named
-  config and returns a `ParticleHandle` for follow-the-cursor /
-  stop-emitting use. Particles render into a single shared
-  `ParticleContainer` so the whole effect layer costs ~one draw call
-  regardless of emitter count.
+- `textures/TextureManager.ts`: the atlas pager. `pack(source)` copies a
+  `RenderTexture` into the next free slot of a shared atlas page (pages sized to
+  `gl.MAX_TEXTURE_SIZE`, capped at 2048 off-WebGL) and returns a sub-`Texture`;
+  `stats()` reports page/slot counts. Knows nothing about cards or tiles — just
+  packs pixels.
+- `textures/CardTextureManager.ts`: bakes **world-grid tile bodies** into the
+  atlas and caches them. `getHex(def, bodyTexture?)` draws a `HexTileVisual`
+  (hex polygon fill, optional cover-fit body texture); `getRectTile(def,
+  bodyTexture?)` draws the rect-cell analogue with a `Graphics`. Both are
+  consumed by `LayoutWorld.buildTile`. A `null` def bakes a neutral fallback.
+- `textures/LodTextureManager.ts`: resolves per-asset art at the right LOD
+  bucket (the generic pipeline's sprite source); lazily loads packs and fires
+  `onLoad` so previews/ghosts upgrade in place.
+- `textures/coverFit.ts`: `coverMatrix(tex, w, h)` — the cover-fit transform
+  used when filling a tile/card body with a source texture.
 - `fonts.ts`: `loadFonts()` — registers all NotoEmoji font faces via the `FontFace` API before first render, awaited once at bootstrap in `main.ts`. Exports `NOTO_EMOJI_FAMILY` (the CSS family name) for use in Pixi `Text.style.fontFamily`. Without this, Pixi rasterises text with the OS fallback font and never re-renders the same `Text` object when the real font loads.
-- `effects/`: per-effect JSON configs (`json/`) + textures
-  (`images/`). New effects: drop a JSON file in `json/` — no code
-  change needed.
 
 ## Conventions
-- **Cards never draw their own visuals on the main scene.** Every
-  `RectangleCard` / `HexagonCard` instance ultimately renders a
-  `Sprite` whose texture comes from `TextureManager`. The visual
-  classes (`RectCardVisual`, `HexCardVisual`) are used only inside
-  the atlas baking step. Don't add a card path that draws a
-  `Graphics` directly into the scene tree — it defeats the
-  draw-call savings.
-- **Atlas slots are forever.** Once a definition is rendered into
-  an atlas page, that slot is never reused. New definitions append;
-  removed/renamed ones leave dead slots until the next page is
-  exhausted. Acceptable trade-off for card counts in the low
-  hundreds; if it ever bites, switch to a slab allocator.
-- **Two rect orientations are pre-baked together.** When either
-  `"top"` or `"bottom"` is first requested for a definition, both
-  orientations bake in the same call so the second orientation is
-  always a cache hit. Don't optimize this away — the cost is two
-  Graphics renders instead of one, paid once.
-- **Particle effects are tickered manually.** `ParticleManager.tick`
-  is called from `MainScene.update`. Don't hook the Pixi ticker
-  directly — the manual tick lets the scene own pause/resume and
-  HMR teardown.
+- **Don't reintroduce a per-card atlas bake.** Cards are generic now: their
+  geometry comes from the def's `:visuals` DSL, reconciled by `PrimitiveLayer`.
+  Offline card previews (the drag ghost) use `GenericCardFace`, the same
+  pipeline rendered without a live row — not a baked card sprite.
+- **Atlas slots are forever.** Once packed into an atlas page, a slot is never
+  reused. New entries append; removed/renamed ones leave dead slots until the
+  next page is exhausted. Acceptable for the low hundreds of tile/art entries;
+  if it ever bites, switch to a slab allocator.
+- **Tile bakes are keyed by `(packedDef, bodyTexture.uid)`.** A def with a
+  faction-resolved body texture bakes one entry per faction (the URL → atlas
+  `uid` differs); defs without one key on `uid 0` and bake once.
 
 ## Pitfalls
-- **`TextureManager` is bootstrap-scoped, particles are not.** The
-  texture atlases survive scene changes (cards in different scenes
-  reuse the same atlas), but `ParticleManager` is recreated on
-  every `MainScene.onEnter`. Don't cache `ctx.particles` outside a
-  scene's lifetime.
-- **Atlas page allocation can fail late.** If a definition exhausts
-  the current page's slot count, a new page is allocated lazily.
-  This is fine but means the *first* card to overflow takes a
-  noticeable hitch (RenderTexture creation). Mitigate by ensuring
-  warm-up renders all known definitions at boot if smoothness
-  matters.
-- **Definition lookup is best-effort.** `getRectTexture(null, …)` /
-  `getHexTexture(null, …)` are valid — they bake a fallback visual
-  with the neutral `FALLBACK_STYLE` and `"?"` name. Cards whose
-  packed definition doesn't decode still render, just visually
-  generic.
-- **`EMPTY_TILE_PACKED` and `CUSTOM_PACKED` use sentinels above
-  `0xFFFF`.** Real packed definitions are 16-bit; values above are
-  out-of-range, so they never collide. If the card type/category
-  scheme ever exceeds 16 bits, these sentinels need to move.
+- **Atlas page allocation can fail late.** If a bake exhausts the current
+  page's slots, a new page is allocated lazily — the first overflow takes a
+  noticeable hitch (RenderTexture creation). Warm-up baking known tiles at boot
+  mitigates it if smoothness matters.
+- **Tile lookup is best-effort.** `getHex(null, …)` / `getRectTile(null, …)`
+  are valid — they bake a fallback body with the neutral `FALLBACK_STYLE`, so a
+  tile whose packed def doesn't decode still renders, just visually generic.

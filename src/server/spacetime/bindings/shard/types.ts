@@ -28,6 +28,13 @@ export const CardIdCounter = __t.object("CardIdCounter", {
 });
 export type CardIdCounter = __Infer<typeof CardIdCounter>;
 
+export const CardShard = __t.object("CardShard", {
+  validAt: __t.u64(),
+  dataShard: __t.u16(),
+  refCount: __t.u32(),
+});
+export type CardShard = __Infer<typeof CardShard>;
+
 export const GcSchedule = __t.object("GcSchedule", {
   id: __t.u64(),
   scheduledAt: __t.scheduleAt(),
@@ -52,11 +59,26 @@ export const Placement = __t.object("Placement", {
 });
 export type Placement = __Infer<typeof Placement>;
 
+export const Region = __t.object("Region", {
+  validAt: __t.u64(),
+  macroRegion: __t.u64(),
+  zonePresence: __t.u64(),
+  zoneAvailable: __t.u64(),
+});
+export type Region = __Infer<typeof Region>;
+
 export const SequenceCounter = __t.object("SequenceCounter", {
   id: __t.u8(),
   next: __t.u16(),
 });
 export type SequenceCounter = __Infer<typeof SequenceCounter>;
+
+export const ShardIdentity = __t.object("ShardIdentity", {
+  id: __t.u8(),
+  cardDb: __t.u8(),
+  shard: __t.u16(),
+});
+export type ShardIdentity = __Infer<typeof ShardIdentity>;
 
 export const Soul = __t.object("Soul", {
   validAt: __t.u64(),
@@ -83,4 +105,29 @@ export const TilePoint = __t.object("TilePoint", {
   microLocation: __t.u32(),
 });
 export type TilePoint = __Infer<typeof TilePoint>;
+
+export const Zone = __t.object("Zone", {
+  validAt: __t.u64(),
+  zoneId: __t.u32(),
+  macroZone: __t.u64(),
+  packedDefinition: __t.u8(),
+  ownerId: __t.u32(),
+  t0: __t.u64(),
+  t1: __t.u64(),
+  t2: __t.u64(),
+  t3: __t.u64(),
+  t4: __t.u64(),
+  t5: __t.u64(),
+  t6: __t.u64(),
+  t7: __t.u64(),
+  t8: __t.u64(),
+  t9: __t.u64(),
+  t10: __t.u64(),
+  t11: __t.u64(),
+  t12: __t.u64(),
+  t13: __t.u64(),
+  t14: __t.u64(),
+  t15: __t.u64(),
+});
+export type Zone = __Infer<typeof Zone>;
 

@@ -913,12 +913,32 @@ export class DataManager {
     // tracking a progress entry pointing at the same future event
     // (same `endSecs` + `style`), keep that entry's `startSecs` so
     // the bar's fraction grows monotonically across row transitions.
-    if (progress && prev?.progress) {
+    if (progress) {
+      const now = this.reducers.serverNowMs();
       for (const p of progress) {
-        const carried = prev.progress.find(
+        const carried = prev?.progress?.find(
           (pp) => pp.endSecs === p.endSecs && pp.style === p.style,
         );
-        if (carried) p.startSecs = carried.startSecs;
+        if (carried) {
+          // Continuity: keep the original anchor so the fraction grows
+          // monotonically across intermediate row promotions (no reset/flicker).
+          p.startSecs = carried.startSecs;
+        } else if (p.startSecs < now && now < p.endSecs) {
+          // First appearance: anchor `startSecs` to the observation time so the
+          // bar starts EMPTY and still completes exactly at `endSecs`. The row's
+          // own `startSecs` (the bound card's `now_ms` hold-row validAt) predates
+          // observation by the client's buffered-clock offset (~clientDelay, sec
+          // scale) + round-trip, which otherwise rendered the bar pre-filled by
+          // `(now-start)/dur`. Lifecycle/magnetic bars are built below with their
+          // own carry and are intentionally NOT re-anchored (a card observed
+          // mid-decay should show its true partial progress).
+          debug.log(
+            ["cards"],
+            `[progress] card ${change.key} new bar raw start=${p.startSecs} end=${p.endSecs} now=${Math.round(now)} rawFrac=${((now - p.startSecs) / (p.endSecs - p.startSecs)).toFixed(3)} → anchored to now`,
+            5,
+          );
+          p.startSecs = now;
+        }
       }
     }
     // Reuse the cached def when `packedDefinition` is unchanged

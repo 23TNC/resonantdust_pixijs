@@ -1,16 +1,16 @@
 // Compatibility barrel — SpacetimeDB codegen writes per-module bindings under
-// `bindings/{cards,regions,players,chat}/`. The legacy top-level paths here are
-// kept as re-exports so existing userland imports
+// `bindings/{shard,players,chat,regionindex}/`. The legacy top-level paths here
+// are kept as re-exports so existing userland imports
 // (`import type { Card } from ".../bindings/types"`) keep working without
-// per-file edits. The world is split across modules now (cards / regions /
-// players); this barrel hides that from the game code.
+// per-file edits. Card+soul+zone+region+tile data now all live in the unified
+// `shard` module; this barrel hides that from the game code.
 //
 // Add to this file when a new module-side type needs the legacy path. Types
 // with cross-module name conflicts must be re-exported explicitly, not via
 // `export *`.
 
-import type { Card as GenCard, Soul as GenSoul } from "./cards/types";
-import type { Zone as GenZone } from "./regions/types";
+import type { Card as GenCard, Soul as GenSoul } from "./shard/types";
+import type { Zone as GenZone } from "./shard/types";
 import type { MacroZone } from "../../data/packing";
 
 // `macro_zone` is the complete packed location key
@@ -29,6 +29,6 @@ export type Soul = Omit<GenSoul, "macroZone"> & { macroZone: MacroZone };
 export type Zone = Omit<GenZone, "macroZone"> & { macroZone: MacroZone };
 
 export type { Player, PlayerProfile } from "./players/types";
-export type { Region } from "./regions/types";
-export type { SoulPrivate } from "./cards/types";
+export type { Region } from "./shard/types";
+export type { SoulPrivate } from "./shard/types";
 export type { ChatMessage } from "./chat/types";

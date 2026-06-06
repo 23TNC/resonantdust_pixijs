@@ -16,13 +16,8 @@ import {
 import type { LocalCard } from "../../server/data/DataManager";
 import type { CardManager } from "./CardManager";
 import { CardView } from "./CardView";
-import type { GameCard } from "./game/CardGame";
-// DISABLED non-generic render halves — marked for cleanup once the generic
-// pipeline is fully stable (see the disabled dispatch in `create`):
-// import { GameHexCard, LayoutHexCard } from "./layout/hexagon/HexCard";
-// import { LayoutRectCard } from "./layout/rectangle/RectCard";
+import { GameCard } from "./game/CardGame";
 import type { LayoutCard } from "./layout/CardLayout";
-import { GameRectCard } from "./layout/rectangle/RectCard";
 import { LayoutGenericCard } from "./generic/LayoutGenericCard";
 
 const INVENTORY_LAYER = 1;
@@ -183,32 +178,15 @@ export class Card {
       return null;
     }
     // EVERY card renders through the generic PrimList pipeline now (its
-    // `:visuals` builds `&prims` via the `^`-prim builders). The legacy
-    // shape-based dispatch to LayoutRectCard / LayoutHexCard is DISABLED below
-    // and kept commented for reference — MARKED FOR CLEANUP once the generic
-    // pipeline is fully stable (then this whole shape branch + the legacy Layout
-    // classes can be deleted). `GameRectCard` stays as the shared data/sim half.
+    // `:visuals` builds `&prims` via the `^`-prim builders). `GameCard` is the
+    // shared, shape-agnostic data/sim half.
     return new Card(
       cardId,
       ctx,
       cardManager,
-      new GameRectCard(cardId, ctx),
+      new GameCard(cardId, ctx),
       new LayoutGenericCard(cardId, ctx),
     );
-    // --- DISABLED: non-generic render dispatch (marked for cleanup) ----------
-    // const { typeId } = DefinitionManager.unpack(row.packedDefinition);
-    // const shape =
-    //   ctx.definitions.decode(row.packedDefinition)?.shape ??
-    //   ctx.definitions.shape(typeId) ??
-    //   "rect";
-    // if (shape === "hex") {
-    //   return new Card(cardId, ctx, cardManager,
-    //     new GameHexCard(cardId, ctx), new LayoutHexCard(cardId, ctx));
-    // }
-    // if (shape !== "generic") {
-    //   return new Card(cardId, ctx, cardManager,
-    //     new GameRectCard(cardId, ctx), new LayoutRectCard(cardId, ctx));
-    // }
   }
 
   constructor(

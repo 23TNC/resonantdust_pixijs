@@ -24,7 +24,6 @@ const config: readonly (readonly [string, number])[] = [
   ["vite",        5],
   ["definitions", 5],
   ["layout",      5],
-  ["particles",   5],
   ["cards",       5],
   ["splice",      5],
   ["drag",        0],

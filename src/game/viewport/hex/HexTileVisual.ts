@@ -1,12 +1,6 @@
-// ════════════════════════════════════════════════════════════════════════
-// LEGACY — non-generic render pipeline. DISABLED: no longer instantiated now
-// that every card renders through the generic PrimList pipeline (LayoutGenericCard
-// + the `^`-prim DSL builders). Kept for reference; MARKED FOR CLEANUP — delete
-// once the generic pipeline is fully stable.
-// ════════════════════════════════════════════════════════════════════════
 import { Container, Graphics, type Texture } from "pixi.js";
-import type { CardDefinition } from "../../../definitions/DefinitionManager";
-import { coverMatrix } from "../../../../assets/textures/coverFit";
+import type { CardDefinition } from "../../definitions/DefinitionManager";
+import { coverMatrix } from "../../../assets/textures/coverFit";
 
 const FALLBACK_STYLE = ["#3a3a4a", "#7a7a8a", "#0b1426"] as const;
 
@@ -21,19 +15,18 @@ export function hexPoints(cx: number, cy: number, radius: number): number[] {
 }
 
 /**
- * Lightweight reusable hex-card *background*: fill only. No outline,
- * no art / portrait. Hover / pending / death feedback layers on top
- * via `LayoutHexCard.stateOverlay`; per-instance art via
- * `CardTextureManager.getCardArt`. See [docs/AGENTS.md] in
- * `assets/textures/` for the two-tier card-texture cache rationale.
+ * Hex *tile* background — fill only, no outline / art. Baked by
+ * `CardTextureManager.getHex` into the atlas and stamped per world hex tile;
+ * hover / pending feedback layers on top elsewhere. (Cards no longer use this —
+ * they render through the generic PrimList pipeline; this is world-grid tile
+ * rendering, the hex analogue of the rect tile bake.)
  *
- * Width = sqrt(3) * radius, Height = 2 * radius. The origin is the top-
- * left corner of the bounding box, matching PixiJS Container
- * convention. Radius is passed by the caller so this class doesn't
- * depend on a global hex size — TextureManager owns the bake size and
- * supplies it here.
+ * Width = sqrt(3) * radius, Height = 2 * radius. The origin is the top-left
+ * corner of the bounding box, matching PixiJS Container convention. Radius is
+ * passed by the caller so this class doesn't depend on a global hex size —
+ * `CardTextureManager` owns the bake size and supplies it here.
  */
-export class HexCardVisual extends Container {
+export class HexTileVisual extends Container {
   private readonly radius: number;
   private readonly hexWidth: number;
   private readonly hexHeight: number;

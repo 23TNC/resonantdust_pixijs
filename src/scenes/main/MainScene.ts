@@ -1,5 +1,4 @@
 import { ActionManager } from "../../game/actions/ActionManager";
-import { ParticleManager } from "../../assets/ParticleManager";
 import { CardManager } from "../../game/cards/CardManager";
 import { ChatPanel } from "../../game/panels/chat/ChatPanel";
 import { LogManager } from "../../game/panels/chat/LogManager";
@@ -36,8 +35,7 @@ const SOUL_CARD_TYPE = 6;
  *     `InventoryPanel` / `GameViewPanel` are opened on demand via
  *     PanelManager.
  *   - `InputManager`, `DragManager`, `ActionManager`.
- *   - `MainManager` (30Hz tick), `ParticleManager`, `LogManager`,
- *     `ChatPanel`.
+ *   - `MainManager` (30Hz tick), `LogManager`, `ChatPanel`.
  *
  * Always-on key handlers (installed once in `onEnter`):
  *
@@ -63,7 +61,6 @@ export class MainScene extends Scene {
   private inputManager!: InputManager;
   private dragManager!: DragManager;
   private actionManager!: ActionManager;
-  private particleManager!: ParticleManager;
   private logManager!: LogManager;
   private chatPanel!: ChatPanel;
   private ctxRef: GameContext | null = null;
@@ -133,9 +130,6 @@ export class MainScene extends Scene {
 
     this.chatPanel = new ChatPanel(ctx);
     this.chatPanel.open();
-
-    this.particleManager = new ParticleManager();
-    void this.particleManager.init();
 
     // Subscribe to the player's owned cards (their soul rows) and, once
     // the initial set has synced, spawn a soul if they own none yet.
@@ -299,7 +293,6 @@ export class MainScene extends Scene {
     this.ctxRef?.panels?.closeAll();
 
     this.chatPanel.destroy();
-    this.particleManager.destroy();
     this.actionManager.dispose();
     this.dragManager.dispose();
     this.inputManager.dispose();
@@ -328,7 +321,6 @@ export class MainScene extends Scene {
 
   update(deltaMS: number): void {
     this.mainManager.tick(deltaMS);
-    this.particleManager.tick(deltaMS);
     // Drive every open viewport's per-frame tick (drag-pan anchor updates,
     // recenter tweens). Each panel's `PanController` self-gates on
     // `data.hit !== this.worldView`, so iterating all of them is safe; a

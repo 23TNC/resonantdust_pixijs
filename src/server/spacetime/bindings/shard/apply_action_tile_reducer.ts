@@ -11,11 +11,14 @@ import {
 } from "spacetimedb";
 
 export default {
+  nowMs: __t.u64(),
+  completionMs: __t.u64(),
   surface: __t.u8(),
   macroZone: __t.u64(),
   q: __t.u8(),
   r: __t.u8(),
-  kind: __t.u8(),
-  acquireMs: __t.u64(),
-  releaseMs: __t.u64(),
+  holdMask: __t.u8(),
+  stockSlots: __t.byteArray(),
+  stockOps: __t.byteArray(),
+  stockDeltas: __t.byteArray(),
 };

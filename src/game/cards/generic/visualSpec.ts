@@ -19,7 +19,7 @@
  * reconciler a cheap by-index diff).
  */
 
-export type PrimKind = "rect" | "hex" | "text" | "sprite" | "progress";
+export type PrimKind = "rect" | "hex" | "text" | "sprite" | "progress" | "mask";
 
 export interface Vec2 {
   x: number;

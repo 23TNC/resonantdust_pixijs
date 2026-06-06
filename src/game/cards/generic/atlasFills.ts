@@ -1,6 +1,6 @@
 import { Graphics, Rectangle, RenderTexture, Texture, type Renderer } from "pixi.js";
 import type { TextureManager } from "../../../assets/textures/TextureManager";
-import { hexPoints } from "../layout/hexagon/HexVisual";
+import { hexPoints } from "../../viewport/hex/HexTileVisual";
 import { WORLD_HEX_RADIUS } from "../../viewport/hex/hexSize";
 
 /**

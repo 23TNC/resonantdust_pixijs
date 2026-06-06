@@ -3,8 +3,8 @@ import { STACK_DIR_DOWN, STACK_DIR_HEX, STACK_DIR_UP } from "./cardData";
 
 /**
  * Generalized stacking eligibility — two bit-fields over stack indices
- * (bit i = stack i: 0 hex/under-root, 1 top, 2 bottom), replacing the
- * `instanceof GameRectCard / GameHexCard` shape gating in `dropResolver`.
+ * (bit i = stack i: 0 hex/under-root, 1 top, 2 bottom). This is the sole
+ * stacking-legality mechanism; the old per-shape gating it replaced is gone.
  *
  *   stack_hosts — stacks this card SOURCES as a root (slots others attach to)
  *   stack_joins — stacks this card can OCCUPY as a member

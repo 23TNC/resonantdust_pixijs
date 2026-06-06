@@ -1,12 +1,7 @@
 import { Container, Graphics, Rectangle, RenderTexture, Texture, type Renderer } from "pixi.js";
 import type { TextureManager } from "./TextureManager";
-import { RectCardVisual } from "../../game/cards/layout/rectangle/RectVisual";
-import { HexCardVisual } from "../../game/cards/layout/hexagon/HexVisual";
-import {
-  RECT_CARD_HEIGHT,
-  RECT_CARD_WIDTH,
-  type RectCardTitlePosition,
-} from "../../game/cards/layout/rectangle/RectCard";
+import { HexTileVisual } from "../../game/viewport/hex/HexTileVisual";
+import { CARD_HEIGHT, CARD_WIDTH } from "../../game/cards/layout/cardMetrics";
 import { WORLD_HEX_RADIUS } from "../../game/viewport/hex/hexSize";
 import type { CardDefinition } from "../../game/definitions/DefinitionManager";
 
@@ -41,7 +36,7 @@ const BAKE_PADDING = 2;
  * changes the rendered output. Hex cards are keyed by definition only.
  *
  * The manager owns the bake dimensions (via HEX_BAKE_RADIUS and the
- * existing RECT_CARD_WIDTH/HEIGHT constants). Display-time scaling is
+ * existing CARD_WIDTH/HEIGHT constants). Display-time scaling is
  * the caller's responsibility — these textures are baked once at a
  * fixed size and re-used wherever the same definition is drawn.
  */
@@ -49,7 +44,6 @@ export class CardTextureManager {
   private readonly renderer: Renderer;
   private readonly textures: TextureManager;
 
-  private readonly rectCache = new Map<number, Texture>();
   /** Hex bakes keyed by `(packedDef, bodyTextureUid)`. The body-
    *  texture id participates so a card def with `def.texture` set
    *  bakes one entry per resolved source texture — typically one per
@@ -60,49 +54,17 @@ export class CardTextureManager {
   /** Cache for rect-shaped tile bodies (`getRectTile`), keyed by packed def +
    *  body-texture uid — the rect analogue of `hexCache`. */
   private readonly rectTileCache = new Map<string, Texture>();
-  /** Single-entry cache for the blank-rect texture — a rect card body
-   *  with outline but no title bar and no label. Used by callers
-   *  (today: `WrenchPanel`) that want the rect-card silhouette as a
-   *  placeholder for slots without a resolved card definition. */
-  private blankRectCache: Texture | null = null;
 
-  private readonly rectVisual = new RectCardVisual();
-  private readonly hexVisual  = new HexCardVisual(HEX_BAKE_RADIUS);
+  private readonly hexVisual  = new HexTileVisual(HEX_BAKE_RADIUS);
 
   constructor(renderer: Renderer, textures: TextureManager) {
     this.renderer = renderer;
     this.textures = textures;
   }
 
-  /** Packed atlas texture for a rect card definition + title position.
-   *  Bakes on first request; top/bottom are cached separately. A
-   *  `null` definition produces a fallback-styled card (handled by
-   *  RectCardVisual).
-   *
-   *  `label` is the display string baked into the title bar. Pass the
-   *  locale-resolved string here (e.g. via
-   *  `DefinitionManager.label(packed)`); when omitted, `RectCardVisual`
-   *  falls back to `def.key`, which is the dev-side identifier and
-   *  rarely the right thing to render. The label does not participate
-   *  in the cache key — first bake for a given `(def, pos)` wins —
-   *  so callers shouldn't mix label values for the same def. */
-  getRect(
-    definition: CardDefinition | null,
-    titlePosition: RectCardTitlePosition,
-    label?: string,
-  ): Texture {
-    const key = rectKey(definition, titlePosition);
-    let tex = this.rectCache.get(key);
-    if (!tex) {
-      tex = this.bakeRect(definition, titlePosition, label);
-      this.rectCache.set(key, tex);
-    }
-    return tex;
-  }
-
   /** Packed atlas texture for a hex card definition. Bakes on first
    *  request and caches. A `null` definition produces a fallback-styled
-   *  hex (handled by HexCardVisual) — used for empty world tiles.
+   *  hex (handled by HexTileVisual) — used for empty world tiles.
    *
    *  The bake includes only the hex *background* (fill + outline); per-
    *  definition art is fetched separately via [`getCardArt`] and
@@ -136,36 +98,8 @@ export class CardTextureManager {
     return tex;
   }
 
-  /** Atlas-packed texture for a rect-card-shaped placeholder — body
-   *  fill + outline, no title bar, no label. Baked once on first call
-   *  and cached. Caller-visible dimensions are `RECT_CARD_WIDTH ×
-   *  RECT_CARD_HEIGHT` so it drops into the same Sprite slot as the
-   *  per-def `getRect` textures.
-   *
-   *  Used by `WrenchPanel` to render blueprint slots whose bit is
-   *  clear in the local soul's `blueprints_0` — unlocked slots swap
-   *  to a per-def texture from `getRect(def, "top")` instead, which
-   *  bakes the title bar + label. The visual contrast (presence vs
-   *  absence of a title) is the "discovered?" cue. */
-  getRectBlank(): Texture {
-    if (this.blankRectCache !== null) return this.blankRectCache;
-    // Body + outline only. Colors match the `FALLBACK_STYLE` background
-    // in `RectVisual` so a blank slot reads as a darker `?`-less
-    // variant of the fallback card.
-    const visual = new Graphics();
-    visual
-      .rect(0, 0, RECT_CARD_WIDTH, RECT_CARD_HEIGHT)
-      .fill({ color: 0x2a3340 });
-    visual
-      .rect(0, 0, RECT_CARD_WIDTH, RECT_CARD_HEIGHT)
-      .stroke({ color: 0x4a5566, width: 2 });
-    this.blankRectCache = this.renderAndPack(visual, RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
-    visual.destroy();
-    return this.blankRectCache;
-  }
-
   /** Rect-shaped tile body — the rectangle analogue of `getHex`. Body fill +
-   *  outline, no title bar / label, sized `RECT_CARD_WIDTH × RECT_CARD_HEIGHT`
+   *  outline, no title bar / label, sized `CARD_WIDTH × CARD_HEIGHT`
    *  so it scales into a rect-grid cell the same way `getHex` fills a hex cell.
    *  Used by `LayoutWorld.buildTile` when the viewport's grid is rectangular
    *  (e.g. an inventory's "empty" tiles). `bodyTexture` cover-fills the rect
@@ -176,7 +110,7 @@ export class CardTextureManager {
     let tex = this.rectTileCache.get(key);
     if (!tex) {
       const g = new Graphics();
-      g.rect(0, 0, RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
+      g.rect(0, 0, CARD_WIDTH, CARD_HEIGHT);
       if (bodyTexture) {
         g.fill({ texture: bodyTexture });
       } else {
@@ -184,8 +118,8 @@ export class CardTextureManager {
       }
       // Visible cell outline — the "empty" tile fill (#0b1426) matches the
       // viewport backdrop, so the outline is what reads as the grid.
-      g.rect(0, 0, RECT_CARD_WIDTH, RECT_CARD_HEIGHT).stroke({ color: 0x2a3a4a, width: 2 });
-      tex = this.renderAndPack(g, RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
+      g.rect(0, 0, CARD_WIDTH, CARD_HEIGHT).stroke({ color: 0x2a3a4a, width: 2 });
+      tex = this.renderAndPack(g, CARD_WIDTH, CARD_HEIGHT);
       g.destroy();
       this.rectTileCache.set(key, tex);
     }
@@ -193,21 +127,9 @@ export class CardTextureManager {
   }
 
   destroy(): void {
-    this.rectVisual.destroy();
     this.hexVisual.destroy();
-    this.rectCache.clear();
     this.hexCache.clear();
     this.rectTileCache.clear();
-    this.blankRectCache = null;
-  }
-
-  private bakeRect(
-    def: CardDefinition | null,
-    pos: RectCardTitlePosition,
-    label?: string,
-  ): Texture {
-    this.rectVisual.draw(def, pos, label);
-    return this.renderAndPack(this.rectVisual, RECT_CARD_WIDTH, RECT_CARD_HEIGHT);
   }
 
   private bakeHex(def: CardDefinition | null, bodyTexture: Texture | null): Texture {
@@ -259,18 +181,3 @@ function hexKey(def: CardDefinition | null, bodyTexture: Texture | null): string
   return `${defPart}:${texPart}`;
 }
 
-/** Cache key for `getRect`. Real definitions produce non-negative
- *  values via `(packed << 1) | bottomFlag`; `null` uses -1/-2 to
- *  encode the two title positions for the fallback card. */
-function rectKey(def: CardDefinition | null, pos: RectCardTitlePosition): number {
-  if (def === null) return pos === "bottom" ? -1 : -2;
-  return (packedKey(def) << 1) | (pos === "bottom" ? 1 : 0);
-}
-
-function insetFrame(tex: Texture, inset: number): Texture {
-  const { x, y, width, height } = tex.frame;
-  return new Texture({
-    source: tex.source,
-    frame: new Rectangle(x + inset, y + inset, width - inset * 2, height - inset * 2),
-  });
-}
