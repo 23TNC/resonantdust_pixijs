@@ -17,9 +17,12 @@ import type { LocalCard } from "../../server/data/DataManager";
 import type { CardManager } from "./CardManager";
 import { CardView } from "./CardView";
 import type { GameCard } from "./game/CardGame";
-import { GameHexCard, LayoutHexCard } from "./layout/hexagon/HexCard";
+// DISABLED non-generic render halves — marked for cleanup once the generic
+// pipeline is fully stable (see the disabled dispatch in `create`):
+// import { GameHexCard, LayoutHexCard } from "./layout/hexagon/HexCard";
+// import { LayoutRectCard } from "./layout/rectangle/RectCard";
 import type { LayoutCard } from "./layout/CardLayout";
-import { GameRectCard, LayoutRectCard } from "./layout/rectangle/RectCard";
+import { GameRectCard } from "./layout/rectangle/RectCard";
 import { LayoutGenericCard } from "./generic/LayoutGenericCard";
 
 const INVENTORY_LAYER = 1;
@@ -179,42 +182,33 @@ export class Card {
       debug.warn(["cards"], `[Card] no row for card ${cardId}, skipping spawn`);
       return null;
     }
-    // Per-card shape from the DSL `&shape` (not the type-level hex/rect guess):
-    // a card crosses to the generic PrimList path by emitting `$shape.generic`,
-    // no engine opt-in. Fall back to the type's shape if the def won't decode.
-    const { typeId } = DefinitionManager.unpack(row.packedDefinition);
-    const shape =
-      ctx.definitions.decode(row.packedDefinition)?.shape ??
-      ctx.definitions.shape(typeId) ??
-      "rect";
-    if (shape === "generic") {
-      // DSL-driven generic card (PrimList reconciler). Data-driven dispatch:
-      // a card crosses over by what its DSL emits for `shape`. Reuses the rect
-      // data half (GameRectCard) for the simulation side.
-      return new Card(
-        cardId,
-        ctx,
-        cardManager,
-        new GameRectCard(cardId, ctx),
-        new LayoutGenericCard(cardId, ctx),
-      );
-    }
-    if (shape === "hex") {
-      return new Card(
-        cardId,
-        ctx,
-        cardManager,
-        new GameHexCard(cardId, ctx),
-        new LayoutHexCard(cardId, ctx),
-      );
-    }
+    // EVERY card renders through the generic PrimList pipeline now (its
+    // `:visuals` builds `&prims` via the `^`-prim builders). The legacy
+    // shape-based dispatch to LayoutRectCard / LayoutHexCard is DISABLED below
+    // and kept commented for reference — MARKED FOR CLEANUP once the generic
+    // pipeline is fully stable (then this whole shape branch + the legacy Layout
+    // classes can be deleted). `GameRectCard` stays as the shared data/sim half.
     return new Card(
       cardId,
       ctx,
       cardManager,
       new GameRectCard(cardId, ctx),
-      new LayoutRectCard(cardId, ctx),
+      new LayoutGenericCard(cardId, ctx),
     );
+    // --- DISABLED: non-generic render dispatch (marked for cleanup) ----------
+    // const { typeId } = DefinitionManager.unpack(row.packedDefinition);
+    // const shape =
+    //   ctx.definitions.decode(row.packedDefinition)?.shape ??
+    //   ctx.definitions.shape(typeId) ??
+    //   "rect";
+    // if (shape === "hex") {
+    //   return new Card(cardId, ctx, cardManager,
+    //     new GameHexCard(cardId, ctx), new LayoutHexCard(cardId, ctx));
+    // }
+    // if (shape !== "generic") {
+    //   return new Card(cardId, ctx, cardManager,
+    //     new GameRectCard(cardId, ctx), new LayoutRectCard(cardId, ctx));
+    // }
   }
 
   constructor(

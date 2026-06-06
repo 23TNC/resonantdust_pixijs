@@ -1,3 +1,9 @@
+// ════════════════════════════════════════════════════════════════════════
+// LEGACY — non-generic render pipeline. DISABLED: no longer instantiated now
+// that every card renders through the generic PrimList pipeline (LayoutGenericCard
+// + the `^`-prim DSL builders). Kept for reference; MARKED FOR CLEANUP — delete
+// once the generic pipeline is fully stable.
+// ════════════════════════════════════════════════════════════════════════
 import { Container, Graphics, type Texture } from "pixi.js";
 import type { CardDefinition } from "../../../definitions/DefinitionManager";
 import { coverMatrix } from "../../../../assets/textures/coverFit";

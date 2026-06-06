@@ -106,6 +106,15 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
    *  already carries cards. */
   private readonly panLayer = new Container();
   private readonly tileLayer = new Container();
+  /** Depth-sorted layer for the generic draw path. Every generic tile's prims
+   *  (body fill + objects) are mounted here directly — not under a per-tile
+   *  container — and carry a `zIndex` derived from their world-pixel Y, so
+   *  `sortableChildren` interleaves them by screen depth: a prim lower on screen
+   *  (larger Y) draws on top, giving front tiles' objects occlusion over those
+   *  behind. Lives in `panLayer` (world-pixel space), so a pan is still one
+   *  transform write and never re-sorts — PIXI only re-sorts on the build/drop
+   *  that flips `sortDirty`, not on the per-frame pan. */
+  private readonly sortLayer = new Container();
   /** World/hex tile-object decoration (trees, rocks, centre objects + the card
    *  occlusion overlay). Only hex viewports carry one — a rect inventory has no
    *  terrain objects, so this stays `null` and `makeObjectOverlayForTile`
@@ -311,6 +320,11 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
     // stable world-pixel space; panLayer is repositioned to worldToLocal(0,0)
     // each pass so the whole grid pans by one transform write.
     this.panLayer.addChild(this.tileLayer);
+    // sortLayer sits above the legacy tile bodies and carries the generic draw
+    // path's depth-sorted prims. sortableChildren makes PIXI order its children
+    // by zIndex (world-Y) before each render.
+    this.sortLayer.sortableChildren = true;
+    this.panLayer.addChild(this.sortLayer);
     if (this.decorator) this.panLayer.addChild(this.decorator.container);
     this.container.addChild(this.bg);
     this.container.addChild(this.panLayer);
@@ -615,7 +629,7 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
     // renders the whole tile — body + objects — through one per-tile
     // PrimitiveLayer, replacing the hex bake + decorator. Non-generic tiles
     // return no prims and fall through to the legacy path below.
-    const prims = entry !== null ? tilePrims(entry.packed, entry.stock0, entry.stock1) : [];
+    const prims = entry !== null ? tilePrims(entry.packed, entry.stock0, entry.stock1, tileSeed(q, r)) : [];
     if (prims.length > 0) {
       if (prev?.tileSprite) {
         prev.tileSprite.visible = false;
@@ -623,26 +637,34 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
         this.spritePool.push(prev.tileSprite);
       }
       this.decorator?.dropTile(key); // prims own the objects now
-      const box = cardBox(this.grid.cellWidth, this.grid.cellHeight);
+      // The tile's world-pixel top-left corner. Prim coords are tile-local, so
+      // this origin (baked into the box) lifts each prim into the shared
+      // sortLayer's world-pixel space — replacing the per-tile container
+      // transform the layer used to carry. Same value as the old
+      // `layer.position`, just applied per-prim so the prims can be siblings of
+      // every other tile's and depth-sort against them.
+      const pc = this.worldPixel(q, r);
+      const origin = {
+        x: Math.round(pc.x - this.grid.cellWidth / 2),
+        y: Math.round(pc.y - this.grid.cellHeight / 2),
+      };
+      const box = cardBox(this.grid.cellWidth, this.grid.cellHeight, origin);
       let layer = prev?.primLayer;
       if (!layer) {
+        // Mount prims into the viewport's shared depth layer, not the layer
+        // itself — the PrimitiveLayer stays the logical owner (reconcile + ease
+        // + lifecycle) but the viewport draws + sorts the prims.
         layer = new PrimitiveLayer(box, {
           lod: this.ctx.lodTextures,
           whiteTexture: atlasWhite(this.ctx.textures, this.ctx.app.renderer),
           hexTexture: atlasHex(this.ctx.textures, this.ctx.app.renderer),
           seed: tileSeed(q, r),
           faction: tileFaction,
-        });
-        this.tileLayer.addChild(layer);
+        }, { target: this.sortLayer });
       } else {
         layer.setBox(box);
       }
       layer.draw(prims);
-      const pc = this.worldPixel(q, r);
-      layer.position.set(
-        Math.round(pc.x - this.grid.cellWidth / 2),
-        Math.round(pc.y - this.grid.cellHeight / 2),
-      );
       this.retained.set(key, {
         q,
         r,
@@ -653,9 +675,14 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
       return;
     }
 
-    // Legacy bake path. Drop any prim layer from a prior generic build.
+    // LEGACY (non-generic) bake path — getHex + the HexObjectDecorator. Now only
+    // reached when `tilePrims` is empty, i.e. a data-less / def_id-0 cell (every
+    // real tile builds prims via ring_prims/tile_object → the generic branch
+    // above). MARKED FOR CLEANUP — fold the empty-cell fallback into the generic
+    // path, then delete this branch + HexObjectDecorator, once generic is stable.
+    // Drop any prim layer from a prior generic build. destroy() tears down its
+    // prims, which removes their nodes from the shared sortLayer.
     if (prev?.primLayer) {
-      this.tileLayer.removeChild(prev.primLayer);
       prev.primLayer.destroy();
     }
     const sprite = prev?.tileSprite ?? this.acquireTileSprite();
@@ -718,8 +745,9 @@ export class LayoutWorld extends LayoutNode implements WorldViewProvider {
       this.tileLayer.removeChild(e.tileSprite);
       this.spritePool.push(e.tileSprite);
     }
+    // destroy() tears down the prims, removing their nodes from the shared
+    // sortLayer (the layer container itself was never in the scene graph).
     if (e.primLayer) {
-      this.tileLayer.removeChild(e.primLayer);
       e.primLayer.destroy();
     }
     this.decorator?.dropTile(key);

@@ -9,6 +9,7 @@ import {
   type ZoneId,
 } from "../../server/data/packing";
 import { owningSoul } from "../permissions";
+import { onContentReloaded } from "../definitions/contentBoot";
 import { isPositionHeld } from "../actions/chainState";
 import { Card, type CardPositionState, type StackDirection } from "./Card";
 import { GameHexCard } from "./layout/hexagon/HexCard";
@@ -65,6 +66,7 @@ export class CardManager {
   private readonly stackListeners = new Map<ZoneId, Set<StackChangeListener>>();
   private readonly globalStackListeners = new Set<StackChangeListener>();
   private readonly unsubscribe: () => void;
+  private readonly unsubContentReload: () => void;
   /** Cards currently being spliced out — suppress fireStackChange for these roots. */
   private readonly splicing = new Set<number>();
 
@@ -106,6 +108,21 @@ export class CardManager {
         // CardManager only cares about spawn/despawn transitions.
       }
     });
+    // A content reload can change a card's SHAPE (e.g. now `$shape.generic`),
+    // which selects a different Layout half at spawn time. Card instances are
+    // built once and keep their layout, so a persistent card (the player soul)
+    // would keep rendering the stale path after an edit. Re-create them all so
+    // each picks up its current shape.
+    this.unsubContentReload = onContentReloaded(() => this.respawnAll());
+  }
+
+  /** Destroy every Card and re-spawn from the current rows — picks up shape /
+   *  layout changes from a content reload. Each `destroy`/`spawn` fires the zone
+   *  add/remove events, so panels rebuild their views. */
+  private respawnAll(): void {
+    for (const cardId of [...this.cards.keys()]) this.destroy(cardId);
+    for (const cardId of this.ctx.data.cardsLocal.keys()) this.spawn(cardId);
+    this.repairParenting();
   }
 
   /**
@@ -870,6 +887,7 @@ export class CardManager {
 
   dispose(): void {
     this.unsubscribe();
+    this.unsubContentReload();
     for (const card of this.cards.values()) card.destroy();
     this.cards.clear();
     this.byZone.clear();

@@ -1,4 +1,5 @@
 import { BitmapText, Container, Sprite, Texture } from "pixi.js";
+import { TEXT_BAKE_PX, TEXT_FONT } from "../../../assets/fonts";
 import type { LodTextureManager } from "../../../assets/textures/LodTextureManager";
 import { footprintPx, pxX, pxY, type CardBox } from "./cardBox";
 import { resolveAsset } from "./resolveAsset";
@@ -26,6 +27,15 @@ export interface PrimDeps {
   /** White hex-mask texture (atlas-packed) for `hex` fills. Until wired, `hex`
    *  falls back to the rectangular white fill with a one-time warning. */
   hexTexture?: Texture;
+  /** Live fill fraction for a `progress` primitive's `target` row: 0..1 while
+   *  filling, or `< 0` when no such progress is active (the bar hides). The
+   *  engine (not the DSL) drives this — it reads the row's timing vs the server
+   *  clock each frame, so the bar fills without the DSL running per-frame. */
+  progress?: (target: number) => number;
+  /** Live fill fraction for a `progress` primitive with `source = 1`: the action
+   *  QUEUE/debounce countdown before a recipe is proposed (0..1, or `< 0` when no
+   *  queue is active → the bar hides). Same per-frame engine fill as `progress`. */
+  queue?: () => number;
 }
 
 /** A reconciled, retained primitive: owns one Pixi node + its current/target
@@ -83,10 +93,19 @@ abstract class BasePrim implements Primitive {
   abstract readonly node: Container;
   protected cur = blankFields();
   protected tgt = blankFields();
+  /** World-pixel offset from the box, added to the node position on every
+   *  write. `0` for self-mounted prims (cards); the tile corner for prims
+   *  externally mounted into the viewport's shared sort container. Captured
+   *  from the box on `update` so the per-step ease (`settle`) keeps applying it
+   *  without re-reading the box. */
+  protected originX = 0;
+  protected originY = 0;
   private seeded = false;
 
   update(n: VisualNode, box: CardBox): void {
     this.tgt = targetFromNode(n, box);
+    this.originX = box.originX;
+    this.originY = box.originY;
     this.applyDiscrete(n, box);
     if (!this.seeded) {
       this.cur = n.enter ? { ...this.tgt, ...n.enter } : { ...this.tgt };
@@ -158,7 +177,7 @@ export class FillPrim extends BasePrim {
 
   protected writeNode(): void {
     const c = this.cur;
-    this.node.position.set(c.x, c.y);
+    this.node.position.set(this.originX + c.x, this.originY + c.y);
     this.node.rotation = c.rot;
     this.node.alpha = c.alpha;
     this.node.tint = c.tint;
@@ -192,7 +211,7 @@ export class SpritePrim extends BasePrim {
 
   protected writeNode(): void {
     const c = this.cur;
-    this.node.position.set(c.x, c.y);
+    this.node.position.set(this.originX + c.x, this.originY + c.y);
     this.node.rotation = c.rot;
     this.node.alpha = c.alpha;
     this.node.tint = c.tint;
@@ -204,23 +223,101 @@ export class SpritePrim extends BasePrim {
  *  position / alpha / tint ease. */
 export class TextPrim extends BasePrim {
   readonly kind = "text" as const;
-  readonly node = new BitmapText({ text: "", style: { fontFamily: "sans-serif", fontSize: 16, fill: 0xffffff } });
+  // The font is BAKED ONCE at `TEXT_BAKE_PX` (see `fonts.ts`) — every card label
+  // shares that single glyph atlas (glyphs draw as batched quads). We NEVER drive
+  // `style.fontSize`: changing it re-rasterizes a fresh atlas per size and per
+  // zoom. Instead the prim's px height (`size.y`) becomes a `node.scale`, so
+  // resizing/zoom is a free transform on the same atlas.
+  readonly node = new BitmapText({ text: "", style: { fontFamily: TEXT_FONT, fontSize: TEXT_BAKE_PX } });
+  /** Glyph scale = target px height / baked px — recomputed on data/box change. */
+  private fontScale = 1;
 
   protected applyDiscrete(n: VisualNode, box: CardBox): void {
     this.node.text = n.text ?? "";
-    // Font size is the text's card-space height in px — set discretely, not
-    // eased (easing fontSize re-rasterizes the glyph atlas every frame).
-    const fontSize = Math.max(1, pxY(box, n.size.y));
-    if (this.node.style.fontSize !== fontSize) this.node.style.fontSize = fontSize;
+    this.fontScale = Math.max(0.01, pxY(box, n.size.y) / TEXT_BAKE_PX);
     setAnchor(this.node, n);
   }
 
   protected writeNode(): void {
     const c = this.cur;
-    this.node.position.set(c.x, c.y);
+    this.node.position.set(this.originX + c.x, this.originY + c.y);
     this.node.rotation = c.rot;
     this.node.alpha = c.alpha;
     this.node.tint = c.tint;
+    // Eased `scale` field (default 1) composes with the glyph scale.
+    this.node.scale.set(this.fontScale * c.scale);
+  }
+}
+
+/** `progress` — a self-contained progress bar: a dim track + a fill driven by a
+ *  `target` row's timing. The DSL sets `target` (which progress to track, from
+ *  `^card_data` `*d.progress.<i>.id`) + `style` (1 = ltr, 2 = rtl); it does NOT
+ *  set the fill — the engine resolves `target` to a live fraction
+ *  (`deps.progress`) each frame, so the bar fills over time without the DSL
+ *  running per-frame, and hides itself when the progress ends ("the engine
+ *  handles the reset"). `tint` is the fill colour; `size` the bar box. */
+export class ProgressPrim extends BasePrim {
+  readonly kind = "progress" as const;
+  readonly node = new Container();
+  private readonly track = new Sprite();
+  private readonly fill = new Sprite();
+  private ax = 0;
+  private ay = 0;
+  private target = 0;
+  private style = 1;
+  /** Fill source: 0 = a progress row (`target`), 1 = the action queue/debounce. */
+  private source = 0;
+  /** Last fraction read from the source (`< 0` = inactive/hidden). Drives
+   *  `settle`'s keep-alive so the bar re-renders while filling. */
+  private frac = -1;
+  constructor(private readonly deps: PrimDeps) {
+    super();
+    this.track.texture = deps.whiteTexture;
+    this.fill.texture = deps.whiteTexture;
+    this.node.addChild(this.track);
+    this.node.addChild(this.fill);
+  }
+
+  protected applyDiscrete(n: VisualNode, _box: CardBox): void {
+    this.target = n.target ?? 0;
+    this.style = n.style ?? 1;
+    this.source = n.source ?? 0;
+    this.ax = (n.anchor?.x ?? 0) / 100;
+    this.ay = (n.anchor?.y ?? 0) / 100;
+  }
+
+  protected writeNode(): void {
+    const c = this.cur;
+    // Live fraction from the engine: a progress row's timing (default) or the
+    // action queue/debounce countdown (`source = 1`).
+    this.frac = this.source === 1 ? (this.deps.queue?.() ?? -1) : (this.deps.progress?.(this.target) ?? -1);
+    if (this.frac < 0) {
+      this.node.visible = false;
+      return;
+    }
+    this.node.visible = true;
+    const w = c.w * c.scale;
+    const h = c.h * c.scale;
+    this.node.position.set(this.originX + c.x - this.ax * w, this.originY + c.y - this.ay * h);
+    this.node.rotation = c.rot;
+    this.node.alpha = c.alpha;
+    // Track: transparent — the bar fills over whatever's behind it (the title-bar
+    // rect for the recipe bar; the card seam for the queue bar). A visible track
+    // would draw a strip even at frac≈0, reading as a line/gap at the body edge.
+    this.track.visible = false;
+    // Fill: the tint colour, width = fraction · w. style 2 = rtl (anchored to
+    // the right edge); else ltr (from the left).
+    const fw = w * Math.max(0, Math.min(1, this.frac));
+    this.fill.tint = c.tint;
+    this.fill.setSize(fw, h);
+    this.fill.position.set(this.style === 2 ? w - fw : 0, 0);
+  }
+
+  override settle(): boolean {
+    const base = super.settle(); // eases geometry, calls writeNode (refreshes frac)
+    // Keep re-rendering while the bar is actively filling, so the live clock
+    // advances it without the DSL re-running. Done (≥1) / inactive (<0) settle.
+    return base || (this.frac >= 0 && this.frac < 1);
   }
 }
 
@@ -250,5 +347,7 @@ export function makePrimitive(kind: PrimKind, deps: PrimDeps): Primitive {
       return new SpritePrim(deps);
     case "text":
       return new TextPrim();
+    case "progress":
+      return new ProgressPrim(deps);
   }
 }

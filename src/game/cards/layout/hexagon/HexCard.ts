@@ -85,6 +85,12 @@ export class GameHexCard extends GameCard {
   }
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// LEGACY — non-generic render half. DISABLED: `Card.create` no longer
+// instantiates this (every card uses LayoutGenericCard). MARKED FOR CLEANUP —
+// delete once the generic pipeline is stable. NOTE: `GameHexCard` (the data /
+// sim half) above is STILL LIVE (drag/drop/stacking interaction); keep it.
+// ════════════════════════════════════════════════════════════════════════
 export class LayoutHexCard extends LayoutCard {
   static readonly RADIUS = HEX_CARD_RADIUS;
   static readonly WIDTH  = HEX_CARD_WIDTH;

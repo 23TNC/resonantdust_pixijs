@@ -8,10 +8,10 @@
  * `tilePrims` bridge produces it from a card's `:visuals` hook (the `^`
  * prim constructors filling the engine `prims` list).
  *
- * **Units.** `pos` / `size` / `anchor` are normalized **card-space**, 0..100
- * (0 = left/top edge, 100 = right/bottom edge). The renderer multiplies by the
- * card's pixel box (and folds dpr into the LOD footprint), so one spec is
- * correct at any card size and screen density — see `CardBox`.
+ * **Units.** `pos` / `size` are **pixels** — the DSL sources them from
+ * `<globals>` (card/cell dimensions) and asset px, so the renderer places them
+ * absolutely (no box normalization; dpr folds into the LOD footprint only — see
+ * `CardBox`). `anchor` is a 0..100 pivot; `scale` is the multiplier.
  *
  * **Index = identity.** A node's position in the array is its paint order AND
  * its reconciliation key. The set is expected to be stable per card type;
@@ -19,7 +19,7 @@
  * reconciler a cheap by-index diff).
  */
 
-export type PrimKind = "rect" | "hex" | "text" | "sprite";
+export type PrimKind = "rect" | "hex" | "text" | "sprite" | "progress";
 
 export interface Vec2 {
   x: number;
@@ -72,10 +72,26 @@ export interface VisualNode {
   texture?: AssetRef | null;
   /** Resolved display string for `text` (already localised). */
   text?: string;
+  /** `progress` primitive: which progress row to TRACK — an index into the
+   *  card's progress list (`*d.progress.<i>.id`). The DSL doesn't compute the
+   *  fill (it's not run per-frame); the engine resolves `target` to the row's
+   *  timing and fills the bar live. */
+  target?: number;
+  /** `progress` primitive: the bar style (`*d.progress.<i>.style`; 1 = ltr,
+   *  2 = rtl, …). The DSL chooses it — needn't come from the row. */
+  style?: number;
+  /** Intra-card paint order (`&h.z set`). Higher draws on top. Unset → the
+   *  reconciler uses the array index (push order), so `title` (last) stays on
+   *  top without anyone setting it. Orthogonal to the card's stack z. */
+  z?: number;
+  /** `progress` fill source: unset/0 = a progress row (via `target`), 1 = the
+   *  action queue/debounce fraction (`deps.queue`). */
+  source?: number;
   /** Optional seed for `current` on first creation, so the primitive eases in
    *  from this state instead of snapping to target (e.g. `{ alpha: 0 }`). */
   enter?: Partial<AnimatableFields>;
 }
 
-/** A card's full presentation. Index = paint order = reconciliation key. */
+/** A card's full presentation. Index = reconciliation key; paint order is each
+ *  node's `z` (falling back to the index when unset). */
 export type PrimList = VisualNode[];

@@ -1,4 +1,4 @@
-import { Graphics, RenderTexture, Texture, type Renderer } from "pixi.js";
+import { Graphics, Rectangle, RenderTexture, Texture, type Renderer } from "pixi.js";
 import type { TextureManager } from "../../../assets/textures/TextureManager";
 import { hexPoints } from "../layout/hexagon/HexVisual";
 import { WORLD_HEX_RADIUS } from "../../viewport/hex/hexSize";
@@ -13,19 +13,47 @@ import { WORLD_HEX_RADIUS } from "../../viewport/hex/hexSize";
 
 const TILE = 16; // small but >1×1 so setSize math has a real `orig`
 
+/** Transparent border baked around each fill before atlas packing, so a
+ *  neighbouring slot can't bleed into ours under bilinear sampling — the same
+ *  `BAKE_PADDING` idiom `CardTextureManager` / `LodTextureManager` already use.
+ *  Without it the hex mask, whose geometry sits flush to its bake bounds (height
+ *  = exactly 2·r), shows a stray horizontal line along the bottom from the art
+ *  packed below it in the shared atlas. */
+const BAKE_PADDING = 2;
+
 const whiteCache = new WeakMap<TextureManager, Texture>();
 const hexCache = new WeakMap<TextureManager, Texture>();
+
+/** Render `g` (sized to its `w × h` content bounds) into a RenderTexture grown
+ *  by a transparent `BAKE_PADDING` border, pack it, and return a Texture whose
+ *  frame is narrowed back to the inner `w × h` — the border stays reserved in
+ *  the atlas so adjacent slots can't bleed in, but callers see the original
+ *  size. Destroys `g` and the temp RT. Mirrors `CardTextureManager.renderAndPack`. */
+function renderAndPack(
+  g: Graphics,
+  w: number,
+  h: number,
+  textures: TextureManager,
+  renderer: Renderer,
+): Texture {
+  g.position.set(BAKE_PADDING, BAKE_PADDING);
+  const rt = RenderTexture.create({ width: w + BAKE_PADDING * 2, height: h + BAKE_PADDING * 2 });
+  renderer.render({ container: g, target: rt, clear: true });
+  g.destroy();
+  const packed = textures.pack(rt);
+  rt.destroy(true);
+  return new Texture({
+    source: packed.source,
+    frame: new Rectangle(packed.frame.x + BAKE_PADDING, packed.frame.y + BAKE_PADDING, w, h),
+  });
+}
 
 /** Atlas-packed white square, for solid `rect` fills (tinted). */
 export function atlasWhite(textures: TextureManager, renderer: Renderer): Texture {
   const cached = whiteCache.get(textures);
   if (cached) return cached;
   const g = new Graphics().rect(0, 0, TILE, TILE).fill({ color: 0xffffff });
-  const rt = RenderTexture.create({ width: TILE, height: TILE });
-  renderer.render({ container: g, target: rt, clear: true });
-  g.destroy();
-  const packed = textures.pack(rt);
-  rt.destroy(true);
+  const packed = renderAndPack(g, TILE, TILE, textures, renderer);
   whiteCache.set(textures, packed);
   return packed;
 }
@@ -42,11 +70,7 @@ export function atlasHex(textures: TextureManager, renderer: Renderer): Texture 
   const w = Math.ceil(Math.sqrt(3) * r);
   const h = Math.ceil(2 * r);
   const g = new Graphics().poly(hexPoints(w / 2, h / 2, r)).fill({ color: 0xffffff });
-  const rt = RenderTexture.create({ width: w, height: h });
-  renderer.render({ container: g, target: rt, clear: true });
-  g.destroy();
-  const packed = textures.pack(rt);
-  rt.destroy(true);
+  const packed = renderAndPack(g, w, h, textures, renderer);
   hexCache.set(textures, packed);
   return packed;
 }

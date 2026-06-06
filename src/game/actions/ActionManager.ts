@@ -171,6 +171,10 @@ export class ActionManager {
 
     this.unsubData = ctx.data.subscribeLocalCard((change) => {
       if (change.kind === "removed") {
+        // A consumed/removed card can't be re-bound — drop its predicted hold
+        // so it doesn't linger (predictions are kept past accept now; see
+        // `fireAction`).
+        this.clearPrediction(change.key);
         this.dropForCard(change.key);
         return;
       }
@@ -215,6 +219,12 @@ export class ActionManager {
       // rejection. With this hook, the death triggers
       // `recheckAllQueued` → `evaluateRoot` → death gate drops
       // the queue immediately.
+      //
+      // Also retire this card's predicted hold once the server's
+      // authoritative hold lands (see `reconcilePredictedHolds`) — done
+      // BEFORE the recheck so the matcher sees a consistent (server-held,
+      // not predicted) state in the same pass.
+      this.reconcilePredictedHolds(change.key, change.newRow);
       this.recheckAllQueued(change.key);
     });
 
@@ -735,7 +745,16 @@ export class ActionManager {
           `[ActionManager] proposeAction accepted: recipe=${action.recipeId} root=${rootId}`,
           3,
         );
-        cleanup();
+        // Delete the entry so a genuinely new assembly can re-evaluate, but
+        // KEEP the predicted holds: they make the matcher read the claimed cards
+        // as absent across the window between accept and the server's `slot_hold`
+        // landing in `cardsLocal`. Clearing them here (the old behavior) reopened
+        // that window — a recheck saw the cards still available and re-proposed
+        // the SAME recipe (a second cut_tree right after the first). The
+        // predictions now clear when the server hold lands
+        // (`reconcilePredictedHolds`, on the card update) or the card is consumed
+        // (the `removed` subscription). Rejection still clears them (see catch).
+        if (this.queue.get(rootId) === action) this.queue.delete(rootId);
       })
       .catch((err: unknown) => {
         const errStr = String(err);
@@ -856,6 +875,37 @@ export class ActionManager {
     const had2 = this.predPositionHold.delete(cardId);
     if (!had && !had2) return;
     this.notifyCard(cardId);
+  }
+
+  /** Retire a card's predicted hold once the server's AUTHORITATIVE hold lands
+   *  on its row. Predicted holds are kept past `proposeAction` accept (they gate
+   *  the matcher across the round-trip window — see `fireAction`); this clears
+   *  each the moment the real hold appears, so the matcher transitions from
+   *  predicted to server state without reopening a re-queue gap. Per-axis: a
+   *  slot prediction clears on server `slot_hold`, a position prediction on
+   *  server `position_hold`. */
+  private reconcilePredictedHolds(cardId: number, row: LocalCard): void {
+    const hadSlot = this.predSlotHold.has(cardId);
+    const hadPos = this.predPositionHold.has(cardId);
+    if (!hadSlot && !hadPos) return;
+    let changed = false;
+    if (hadSlot) {
+      const slotHeld =
+        (this.ctx.definitions.cardFlagFieldValueIn("cards_bk", row.flagsBk, "slot_hold_count") ?? 0) > 0;
+      if (slotHeld) {
+        this.predSlotHold.delete(cardId);
+        changed = true;
+      }
+    }
+    if (hadPos) {
+      const posHeld =
+        (this.ctx.definitions.cardFlagFieldValueAny(row.flagsState, row.flagsBk, "position_hold_count") ?? 0) > 0;
+      if (posHeld) {
+        this.predPositionHold.delete(cardId);
+        changed = true;
+      }
+    }
+    if (changed) this.notifyCard(cardId);
   }
 
   /** Re-fire the local-row listeners for `cardId` so subscribers

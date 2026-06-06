@@ -13,9 +13,15 @@ import type { PrimKind, PrimList, Vec2 } from "./visualSpec";
  *    (definitions never decode locales).
  */
 
-/** Instance state the VM's `:visuals` hooks read (`*faction`, `*aspect.*`, UI
- *  flags). Flat: numbers → Int/Float, strings → Sym (see the wasm `parse_host`). */
-export type VisualHost = Record<string, number | string>;
+/** A JSON-ish host value: scalars, or NESTED objects/arrays (the wasm
+ *  `parse_host` maps these to `Cell::Map`/`Arr`). Nesting is how `^card_data`
+ *  hands the DSL a structured record. */
+export type HostValue = number | string | boolean | HostValue[] | { [k: string]: HostValue };
+
+/** Instance state the VM's `:visuals` hooks read via `^name call` (`^faction`,
+ *  `^card_data`, …). Numbers → Int/Float, strings → Sym, objects/arrays →
+ *  Map/Arr (see the wasm `parse_host`). */
+export type VisualHost = Record<string, HostValue>;
 
 interface PrimNodeJson {
   kind: string;
@@ -31,6 +37,14 @@ interface PrimNodeJson {
    *  the reconciler picks a variant by seed (tile objects). */
   index?: number;
   text?: string;
+  /** `progress` primitive: row to track + bar style. */
+  target?: number;
+  style?: number;
+  /** Intra-card paint order (`&h.z`); unset → push order. */
+  z?: number;
+  /** `progress` fill source: unset/0 = a progress row (`target`), 1 = the action
+   *  queue/debounce fraction. */
+  source?: number;
 }
 
 /** Map the wasm `PrimNode` JSON onto the client `VisualNode[]` — wrap texture
@@ -48,18 +62,24 @@ function mapPrims(nodes: PrimNodeJson[]): PrimList {
     tint: n.tint,
     texture: n.texture != null ? { name: n.texture, index: n.index } : null,
     text: n.text != null ? (loc.string(n.text) ?? n.text) : undefined,
+    target: n.target,
+    style: n.style,
+    z: n.z,
+    source: n.source,
   }));
 }
 
-export function drawVisuals(packed: number, host: VisualHost, hook: "init" | "update"): PrimList {
+export function drawVisuals(packed: number, host: VisualHost, hook: "init" | "update" | "destroy"): PrimList {
   return mapPrims(JSON.parse(sharedContent().drawVisuals(packed, JSON.stringify(host), hook)) as PrimNodeJson[]);
 }
 
 /**
  * Render a world tile to a `PrimList` from its stored stock (the two zone stock
  * slots). The LOD variant + faction are chosen client-side by the reconciler's
- * `PrimDeps` (seed = the tile's `(q,r)` hash, faction = the viewport faction).
+ * `PrimDeps` (faction = the viewport faction). `seed` (the tile's `(q,r)` hash)
+ * is handed to the `:visuals` VM as `^seed`, so the ring scatter — slot angles
+ * and per-object scale — is deterministic per tile.
  */
-export function tilePrims(packed: number, stock0: number, stock1: number): PrimList {
-  return mapPrims(JSON.parse(sharedContent().tilePrims(packed, stock0, stock1)) as PrimNodeJson[]);
+export function tilePrims(packed: number, stock0: number, stock1: number, seed: number): PrimList {
+  return mapPrims(JSON.parse(sharedContent().tilePrims(packed, stock0, stock1, seed)) as PrimNodeJson[]);
 }

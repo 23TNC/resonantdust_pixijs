@@ -58,6 +58,13 @@ export class GameRectCard extends GameCard {
   }
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// LEGACY — non-generic render half. DISABLED: `Card.create` no longer
+// instantiates this (every card uses LayoutGenericCard). MARKED FOR CLEANUP —
+// delete once the generic pipeline is stable. NOTE: `GameRectCard` (the data /
+// sim half) and the `RECT_CARD_*` constants / `RectCardTitlePosition` above are
+// STILL LIVE (shared by the generic path + the drag ghost); keep those.
+// ════════════════════════════════════════════════════════════════════════
 export class LayoutRectCard extends LayoutCard {
   static readonly WIDTH  = RECT_CARD_WIDTH;
   static readonly HEIGHT = RECT_CARD_HEIGHT;

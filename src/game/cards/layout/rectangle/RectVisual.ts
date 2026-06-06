@@ -1,3 +1,9 @@
+// ════════════════════════════════════════════════════════════════════════
+// LEGACY — part of the non-generic render pipeline. No longer used by card
+// rendering (cards are generic); now reached ONLY by the drag ghost (CardFace).
+// MARKED FOR CLEANUP — remove once the drag ghost is migrated to the generic
+// pipeline.
+// ════════════════════════════════════════════════════════════════════════
 import { Container, Graphics, Text, type Texture } from "pixi.js";
 import type { CardDefinition } from "../../../definitions/DefinitionManager";
 import { coverMatrix } from "../../../../assets/textures/coverFit";

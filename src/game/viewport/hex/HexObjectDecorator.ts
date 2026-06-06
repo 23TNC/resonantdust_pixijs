@@ -1,3 +1,9 @@
+// ════════════════════════════════════════════════════════════════════════
+// LEGACY — non-generic world-object decorator. Only the empty/def_id-0 fallback
+// in LayoutWorld still references it (all real tiles render objects via the
+// generic ring_prims/tile_object path). MARKED FOR CLEANUP once the generic
+// pipeline handles empty cells.
+// ════════════════════════════════════════════════════════════════════════
 import { Container, type RenderTexture, Sprite } from "pixi.js";
 import type { GameContext } from "../../../GameContext";
 import { getTextureRegistry, type TextureDefinition } from "../../definitions/TextureRegistry";

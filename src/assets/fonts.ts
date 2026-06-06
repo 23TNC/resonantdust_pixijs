@@ -1,8 +1,11 @@
+import { BitmapFont } from "pixi.js";
+
 /** Font-loading. Browsers won't pick up a font referenced by Pixi's
  *  canvas-based `Text` rendering unless it's registered in
  *  `document.fonts` before the first text rasterisation. We use the
  *  `FontFace` API for the registration so it sits in plain JS — no
- *  separate CSS file required.
+ *  separate CSS file required. Also bakes the card-title bitmap font
+ *  (`BitmapFont.install`) so generic-card text shares one glyph atlas.
  *
  *  Awaiting `loadFonts()` once at bootstrap (see `main.ts`) blocks the
  *  first render until every font is ready, which sidesteps the
@@ -25,10 +28,20 @@ const FONTS: { family: string; url: string; weight: string }[] = [
  *  toolbar icons). Exported so consumers don't repeat the literal. */
 export const NOTO_EMOJI_FAMILY = "Noto Emoji";
 
+/** The generic-card text primitive (`TextPrim`) bakes ONE bitmap font at this
+ *  size and family and scales the node to hit each label's px height — so every
+ *  card title shares a single glyph atlas (batched quads) and zoom is a free
+ *  transform, never a re-rasterization. The browser font is system `sans-serif`
+ *  for now (no FontFace load needed; `BitmapFont.install` rasterizes from it). */
+export const TEXT_FONT = "card";
+export const TEXT_BAKE_PX = 64;
+
 let loadPromise: Promise<void> | null = null;
 
 /** Idempotent. Resolves once every font in `FONTS` is loaded and
- *  registered. Subsequent calls return the cached promise. */
+ *  registered (and the baked card-title bitmap font is installed). Subsequent
+ *  calls return the cached promise. Awaited once at bootstrap, so the bitmap
+ *  font exists before the first card draws. */
 export function loadFonts(): Promise<void> {
   if (loadPromise) return loadPromise;
   loadPromise = (async () => {
@@ -39,6 +52,10 @@ export function loadFonts(): Promise<void> {
         document.fonts.add(face);
       }),
     );
+    // Bake the card-title font once (after the FontFaces are registered, so a
+    // custom family would be available; today it's system sans-serif). `fill`
+    // is white so the prim's `tint` is the colour.
+    BitmapFont.install({ name: TEXT_FONT, style: { fontFamily: "sans-serif", fontSize: TEXT_BAKE_PX, fill: 0xffffff } });
   })();
   return loadPromise;
 }
