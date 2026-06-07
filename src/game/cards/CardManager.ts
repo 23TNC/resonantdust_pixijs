@@ -19,7 +19,7 @@ import {
   encodeLooseXY,
   looseKindForSurface,
   microIsCard,
-  stackState as stackBranch,
+  stackBranch,
   stackIndex,
   MAX_CHAIN_DEPTH,
   STACK_DIR_DOWN,
@@ -184,7 +184,7 @@ export class CardManager {
 
     debug.log(
       ["splice"],
-      `[splice] enter card=${cardId} isCard=${microIsCard(row.flagsBk)} microLocation=${row.microLocation} macroZone=${row.macroZone.packed} surface=${row.macroZone.surface}`,
+      `[splice] enter card=${cardId} isCard=${microIsCard(row.flags)} microLocation=${row.microLocation} macroZone=${row.macroZone.packed} surface=${row.macroZone.surface}`,
       1,
     );
 
@@ -192,7 +192,7 @@ export class CardManager {
     // (gap-tolerant rendering draws everything). Only a dying ROOT needs repair:
     // its members lose their anchor, so promote one to a new loose root and
     // re-root the rest onto it.
-    if (!microIsCard(row.flagsBk)) {
+    if (!microIsCard(row.flags)) {
       this.spliceRoot(cardId, row);
     }
 
@@ -236,7 +236,7 @@ export class CardManager {
     // inventory splice on its own bucket (the "world" kind defaults owner to
     // 0 otherwise). Preserving the offset keeps a free-placed root's
     // promoted-successor in the exact same visual spot.
-    const dMicro = decodeMicro(D_row.microLocation, D_row.flagsBk);
+    const dMicro = decodeMicro(D_row.microLocation, D_row.flags);
     const localQ = dMicro.kind === "loose" ? dMicro.localQ : 0;
     const localR = dMicro.kind === "loose" ? dMicro.localR : 0;
     this.setCardPosition(newRootId, {
@@ -288,7 +288,7 @@ export class CardManager {
   private membersOf(rootId: number): CardRow[] {
     const out: CardRow[] = [];
     for (const [, r] of this.ctx.data.cardsLocal) {
-      if (r.microLocation === rootId && microIsCard(r.flagsBk)) out.push(r);
+      if (r.microLocation === rootId && microIsCard(r.flags)) out.push(r);
     }
     return out;
   }
@@ -304,7 +304,7 @@ export class CardManager {
   ): CardRow | null {
     for (const r of this.membersOf(rootId)) {
       if (r.cardId === excludeId) continue;
-      if (stackBranch(r.flagsBk) === branch && stackIndex(r.flagsBk) === index) {
+      if (stackBranch(r.flags) === branch && stackIndex(r.flags) === index) {
         return r;
       }
     }
@@ -316,7 +316,7 @@ export class CardManager {
   private nextBranchIndex(rootId: number, branch: number): number {
     let max = -1;
     for (const r of this.membersOf(rootId)) {
-      if (stackBranch(r.flagsBk) === branch) max = Math.max(max, stackIndex(r.flagsBk));
+      if (stackBranch(r.flags) === branch) max = Math.max(max, stackIndex(r.flags));
     }
     return Math.min(max + 1, MAX_CHAIN_DEPTH - 1);
   }
@@ -324,7 +324,7 @@ export class CardManager {
   /** The chain root's row for `card` — `card` itself when loose, else the root
    *  it points at (one hop in the flat model). */
   private rootRowOf(card: CardRow): CardRow | null {
-    if (!microIsCard(card.flagsBk)) return card;
+    if (!microIsCard(card.flags)) return card;
     return this.ctx.data.cardsLocal.get(card.microLocation) ?? null;
   }
 
@@ -346,7 +346,7 @@ export class CardManager {
     nAbove: boolean,
   ): { incomingRow: CardRow; overflowTop: CardRow | null } {
     const root = incoming.microLocation;
-    const branch = stackBranch(incoming.flagsBk);
+    const branch = stackBranch(incoming.flags);
     const freeIdx = this.nextBranchIndex(root, branch);
     const branchFull = freeIdx >= MAX_CHAIN_DEPTH - 1
       && this.findMemberAt(root, branch, freeIdx, incoming.cardId) !== null;
@@ -355,7 +355,7 @@ export class CardManager {
       // pos_want: incoming goes above the occupant at the next free index.
       const placed = applyMicro(
         { kind: "stacked", root, branch, index: freeIdx },
-        incoming.flagsBk,
+        incoming.flags,
       );
       return { incomingRow: { ...incoming, ...placed }, overflowTop: branchFull ? occupant : null };
     }
@@ -363,7 +363,7 @@ export class CardManager {
     if (!branchFull) {
       const placed = applyMicro(
         { kind: "stacked", root, branch, index: freeIdx },
-        occupant.flagsBk,
+        occupant.flags,
       );
       this.ctx.data.setLocalCard(occupant.cardId, { ...occupant, ...placed });
     }
@@ -378,7 +378,7 @@ export class CardManager {
     if (soul) {
       const placed = applyMicro(
         { kind: "loose", localQ: 0, localR: 0, x: 0, y: 0, looseKind: looseKindForSurface(INVENTORY_LAYER) },
-        card.flagsBk,
+        card.flags,
       );
       this.ctx.data.setLocalCard(card.cardId, {
         ...card,
@@ -394,14 +394,14 @@ export class CardManager {
       // root has a within-cell `(x, y)` offset (LOOSE-kind placement), inherit
       // it so the evicted card lands visually next to its old root instead of
       // snapping to the cell centre.
-      const rMicro = decodeMicro(rootRow.microLocation, rootRow.flagsBk);
+      const rMicro = decodeMicro(rootRow.microLocation, rootRow.flags);
       const localQ = rMicro.kind === "loose" ? rMicro.localQ : 0;
       const localR = rMicro.kind === "loose" ? rMicro.localR : 0;
       const x = rMicro.kind === "loose" ? rMicro.x : 0;
       const y = rMicro.kind === "loose" ? rMicro.y : 0;
       const placed = applyMicro(
         { kind: "loose", localQ, localR, x, y, looseKind: looseKindForSurface(rootRow.macroZone.surface) },
-        card.flagsBk,
+        card.flags,
       );
       this.ctx.data.setLocalCard(card.cardId, { ...card, macroZone: rootRow.macroZone, ...placed });
       return;
@@ -456,9 +456,9 @@ export class CardManager {
     if (host) {
       const root = this.rootOf(hostId);
       const rootRow = this.ctx.data.cardsLocal.get(root);
-      const branch = microIsCard(host.flagsBk) ? stackBranch(host.flagsBk) : STACK_DIR_UP;
+      const branch = microIsCard(host.flags) ? stackBranch(host.flags) : STACK_DIR_UP;
       const index = this.nextBranchIndex(root, branch);
-      const placed = applyMicro({ kind: "stacked", root, branch, index }, deferredRow.flagsBk);
+      const placed = applyMicro({ kind: "stacked", root, branch, index }, deferredRow.flags);
       debug.log(
         ["splice", "defer"],
         `[defer] ${deferredRow.cardId} → root ${root} branch=${branch} index=${index}`,
@@ -477,7 +477,7 @@ export class CardManager {
     if (soul) {
       const placed = applyMicro(
         { kind: "loose", localQ: 0, localR: 0, x: 0, y: 0, looseKind: looseKindForSurface(INVENTORY_LAYER) },
-        deferredRow.flagsBk,
+        deferredRow.flags,
       );
       debug.log(["splice", "defer"], `[defer] ${deferredRow.cardId} → soul ${soul} inventory`, 1);
       this.ctx.data.setLocalCard(deferredRow.cardId, {
@@ -491,7 +491,7 @@ export class CardManager {
     // ---- Tier 3: fail-to-loose at the deferred row's own cell ------
     const placed = applyMicro(
       { kind: "loose", localQ: 0, localR: 0, x: 0, y: 0, looseKind: looseKindForSurface(deferredRow.macroZone.surface) },
-      deferredRow.flagsBk,
+      deferredRow.flags,
     );
     debug.log(["splice", "defer"], `[defer] ${deferredRow.cardId} no host — fail-to-loose`, 1);
     this.ctx.data.setLocalCard(deferredRow.cardId, { ...deferredRow, ...placed });
@@ -623,8 +623,8 @@ export class CardManager {
         looseKind: looseKindForSurface(state.surface ?? WORLD_LAYER),
       };
     }
-    const { microLocation, flagsBk } = applyMicro(micro, row.flagsBk);
-    const newRow: CardRow = { ...row, macroZone, microLocation, flagsBk };
+    const { microLocation, flags } = applyMicro(micro, row.flags);
+    const newRow: CardRow = { ...row, macroZone, microLocation, flags };
     // Local-only write: store the new row in DataManager's local overlay.
     // The server tier (`data.cards.server` / `data.cards.current`) is left
     // untouched — pixel placement in inventory is a client concern.
@@ -740,8 +740,8 @@ export class CardManager {
     // anchor, not a chain root — `mirrorCard` resolves it first, so treat it as
     // its own root if one slips through. The root must exist in the registry;
     // fall back to the card itself otherwise (broken chain).
-    if (!microIsCard(row.flagsBk)) return cardId;
-    if (stackBranch(row.flagsBk) === STACK_STATE_DEFERRED) return cardId;
+    if (!microIsCard(row.flags)) return cardId;
+    if (stackBranch(row.flags) === STACK_STATE_DEFERRED) return cardId;
     return this.cards.get(row.microLocation) ? row.microLocation : cardId;
   }
 
@@ -780,11 +780,11 @@ export class CardManager {
     // direction`. Order is `stackIndex` ascending (closest to root first).
     const direct: { card: Card; idx: number }[] = [];
     for (const [id, row] of this.ctx.data.cardsLocal) {
-      if (row.microLocation !== rootId || !microIsCard(row.flagsBk)) continue;
-      if (stackBranch(row.flagsBk) !== direction) continue;
+      if (row.microLocation !== rootId || !microIsCard(row.flags)) continue;
+      if (stackBranch(row.flags) !== direction) continue;
       const card = this.cards.get(id);
       if (!card) continue;
-      direct.push({ card, idx: stackIndex(row.flagsBk) });
+      direct.push({ card, idx: stackIndex(row.flags) });
     }
     direct.sort((a, b) => a.idx - b.idx);
     return direct.map((d) => d.card);
@@ -808,8 +808,8 @@ export class CardManager {
     const grabbed = this.cards.get(cardId);
     if (!grabbed) return [];
     const row = this.ctx.data.cardsLocal.get(cardId);
-    if (!row || !microIsCard(row.flagsBk)) return [grabbed];
-    const branch = stackBranch(row.flagsBk);
+    if (!row || !microIsCard(row.flags)) return [grabbed];
+    const branch = stackBranch(row.flags);
     if (branch === STACK_STATE_DEFERRED) return [grabbed];
     const chain = this.buildChain(row.microLocation, branch);
     const start = chain.findIndex((c) => c.cardId === cardId);
@@ -821,7 +821,7 @@ export class CardManager {
       // the cards *after* it terminate the run on a position hold.
       if (i > start) {
         const r = this.ctx.data.cardsLocal.get(member.cardId);
-        if (r && isPositionHeld(this.ctx, member.cardId, r.flagsState, r.flagsBk)) break;
+        if (r && isPositionHeld(this.ctx, member.cardId, r.flags)) break;
       }
       run.push(member);
     }

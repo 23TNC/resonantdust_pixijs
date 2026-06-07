@@ -181,7 +181,7 @@ export class SoulManager {
     const owner = this.data.cardsLocal.get(card.ownerId);
     return owner !== undefined
       && owner.ownerId === playerId
-      && (owner.flagsState & FLAG_OWNED_BY_PLAYER) !== 0;
+      && (owner.flags & FLAG_OWNED_BY_PLAYER) !== 0;
   }
 
   private holdInventory(soulCardId: number): void {

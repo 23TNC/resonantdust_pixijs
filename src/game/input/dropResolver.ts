@@ -224,7 +224,7 @@ export function applySourceGate(
   ctx: GameContext,
 ): DropIntent {
   if (intent.kind === "rejected" || intent.kind === "loose") return intent;
-  if (!ctx.definitions.hasCardFlag(sourceRow.flagsState, sourceRow.flagsBk, "surface_locked")) {
+  if (!ctx.definitions.hasCardFlag(sourceRow.flags, 0, "surface_locked")) {
     return intent;
   }
   const destSurface = destinationSurface(intent, ctx);
@@ -461,7 +461,7 @@ function targetCardFromHit(
   if (!(hit instanceof LayoutCard)) return null;
   if (hit.cardId === draggedId) return null;
   const row = ctx.data.cardsLocal.get(hit.cardId);
-  if (row && ctx.definitions.hasCardFlag(row.flagsState, row.flagsBk, "dead")) return null;
+  if (row && ctx.definitions.hasCardFlag(row.flags, 0, "dead")) return null;
   return ctx.cards?.get(hit.cardId) ?? null;
 }
 
@@ -481,10 +481,10 @@ function targetCardFromHit(
 function targetBlocksDrop(c: DropContext, target: Card): boolean {
   const row = c.ctx.data.cardsLocal.get(target.cardId);
   if (!row) return false;
-  if (c.ctx.definitions.hasCardFlag(row.flagsState, row.flagsBk, "dead")) return true;
+  if (c.ctx.definitions.hasCardFlag(row.flags, 0, "dead")) return true;
   const dropHoldCount = c.ctx.definitions.cardFlagFieldValueIn(
-    "cards_bk",
-    row.flagsBk,
+    "flags",
+    row.flags,
     "drop_hold_count",
   ) ?? 0;
   if (dropHoldCount > 0) return true;
@@ -676,7 +676,7 @@ function findCardAtTile(
     // sits in `cardsLocal` until GC retention runs. Letting the
     // resolver pick it up would let the player stack onto a doomed
     // chain. Same reasoning as `targetBlocksDrop`.
-    if (ctx.definitions.hasCardFlag(row.flagsState, row.flagsBk, "dead")) continue;
+    if (ctx.definitions.hasCardFlag(row.flags, 0, "dead")) continue;
     // A loose card on a grid surface carries its cell in `microLocation`.
     const { localQ: otherLocalQ, localR: otherLocalR } = microLooseCell(row.microLocation);
     if (otherLocalQ !== localQ || otherLocalR !== localR) continue;

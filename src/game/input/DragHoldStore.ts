@@ -2,7 +2,7 @@
  *
  *  Same pattern as `ActionManager`'s prediction store: per-card state
  *  that's purely client-local (the server has no concept of drags) and
- *  shouldn't leak into `Card.flagsState` / `Card.flagsBk`. The drop
+ *  shouldn't leak into `Card.flags` / `Card.flags`. The drop
  *  resolver consults this in addition to the server's
  *  `drop_hold_count > 0` so a card mid-drag rejects incoming local
  *  drops without round-tripping to the server.

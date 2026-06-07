@@ -1,4 +1,4 @@
-/** Content/definition access — backed by the shared `resonantdust-wasm` runtime
+/** Content/definition access — backed by the shared `resonantdust-shared` runtime
  *  loaded from the gate (`contentBoot`). Replaces the deleted legacy
  *  `resonantdust_content` wasm.
  *
@@ -32,7 +32,7 @@ import {
   cardFlagFieldValueIn as wasmCardFlagFieldValueIn,
   hasCardFlag as wasmHasCardFlag,
   cardTypeId as wasmCardTypeId,
-} from "../../wasm/pkg/resonantdust_wasm";
+} from "../../shared/pkg/resonantdust_shared";
 import {
   findRecipeMatch as findRecipeMatchInternal,
   type CardRow as MatcherCardRow,
@@ -273,12 +273,12 @@ export class DefinitionManager {
     return wasmCardFlagFieldValueAny(flags, flags, name);
   }
 
-  cardFlagBitIn(field: "cards_state" | "cards_bk", name: string): number | undefined {
+  cardFlagBitIn(field: "flags" | "flags_bk" | "stock", name: string): number | undefined {
     return wasmCardFlagBitIn(field, name);
   }
 
   cardFlagFieldShape(
-    field: "cards_state" | "cards_bk",
+    field: "flags" | "flags_bk" | "stock",
     name: string,
   ): [number, number] | undefined {
     const arr = wasmCardFlagFieldShape(field, name);
@@ -287,7 +287,7 @@ export class DefinitionManager {
   }
 
   cardFlagFieldValueIn(
-    field: "cards_state" | "cards_bk",
+    field: "flags" | "flags_bk" | "stock",
     host: number,
     name: string,
   ): number | undefined {

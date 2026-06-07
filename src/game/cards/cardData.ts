@@ -32,14 +32,13 @@ export {
   microLooseCell,
   // flag accessors / mutators
   microIsCard,
-  stackState,
+  stackBranch,
   stackIndex,
   zoneBorn,
   decodeMicro,
   applyMicro,
   looseKindForSurface,
   // flag bit masks
-  MICRO_IS_CARD,
   ZONE_BORN,
   // stackState values — stacked branch
   STACK_DIR_HEX,

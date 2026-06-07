@@ -199,8 +199,8 @@ export class ViewportPanel implements ManagedPanel {
     if (!cards) return;
     for (const [cardId, row] of this.ctx.data.cardsLocal) {
       if (row.macroZone.surface !== this.surface || row.macroZone.owner !== this.owner) continue;
-      if (microIsCard(row.flagsBk)) continue;            // stacked — no free offset
-      const micro = decodeMicro(row.microLocation, row.flagsBk);
+      if (microIsCard(row.flags)) continue;            // stacked — no free offset
+      const micro = decodeMicro(row.microLocation, row.flags);
       if (micro.kind !== "loose") continue;
       // Snap kinds (`& 0b10`) already render centred — nothing to nudge.
       if ((micro.looseKind & 0b10) !== 0) continue;

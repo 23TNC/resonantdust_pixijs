@@ -24,7 +24,7 @@ export class GameCard {
   }
 
   applyData(row: CardRow): void {
-    this.isMember = microIsCard(row.flagsBk);
+    this.isMember = microIsCard(row.flags);
     this.microLocation = row.microLocation;
   }
 

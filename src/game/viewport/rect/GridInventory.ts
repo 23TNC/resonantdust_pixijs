@@ -123,7 +123,7 @@ export class GridInventory {
   private cellOf(card: Card): { q: number; r: number } | null {
     const row = this.ctx.data.cardsLocal.get(card.cardId);
     if (!row) return null;
-    const micro = decodeMicro(row.microLocation, row.flagsBk);
+    const micro = decodeMicro(row.microLocation, row.flags);
     if (micro.kind !== "loose") return null;
     return { q: micro.localQ, r: micro.localR };
   }
@@ -135,7 +135,7 @@ export class GridInventory {
     for (let i = 0; i < FIND_ROOT_MAX_DEPTH; i++) {
       const row = this.ctx.data.cardsLocal.get(current.cardId);
       if (!row) return null;
-      if (!microIsCard(row.flagsBk)) return current;
+      if (!microIsCard(row.flags)) return current;
       const parent = this.ctx.cards?.get(row.microLocation);
       if (!parent) return null;
       current = parent;

@@ -412,8 +412,8 @@ export class LifecycleResolutionManager {
 
   private isOwnedMagnetic(card: Card, playerId: number): boolean {
     const def = this.ctx.definitions;
-    if (!def.hasCardFlag(card.flagsState, card.flagsBk, "magnetic")) return false;
-    if (def.hasCardFlag(card.flagsState, card.flagsBk, "dead")) return false;
+    if (!def.hasCardFlag(card.flags, 0, "magnetic")) return false;
+    if (def.hasCardFlag(card.flags, 0, "dead")) return false;
     // The magnetic-resolution gate is per-player. Walk the card's owner
     // chain to the controlling player (`owningPlayer` stops at the
     // `is_owned_by_player` boundary and returns its `owner_id`); a card
@@ -433,9 +433,9 @@ export class LifecycleResolutionManager {
       if (c.cardId === magneticCard.cardId) continue;
       if (c.macroZone.packed !== magneticCard.macroZone.packed) continue;
       const def = this.ctx.definitions;
-      if (def.hasCardFlag(c.flagsState, c.flagsBk, "magnetic")) continue;
-      if ((def.cardFlagFieldValueIn("cards_bk", c.flagsBk, "slot_hold_count") ?? 0) > 0) continue;
-      if (def.hasCardFlag(c.flagsState, c.flagsBk, "dead")) continue;
+      if (def.hasCardFlag(c.flags, 0, "magnetic")) continue;
+      if ((def.cardFlagFieldValueIn("flags", c.flags, "slot_claim_count") ?? 0) > 0) continue;
+      if (def.hasCardFlag(c.flags, 0, "dead")) continue;
       out.push(c);
     }
     return out;

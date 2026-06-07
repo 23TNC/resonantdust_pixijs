@@ -350,8 +350,8 @@ export class DetailsPanel extends LayoutNode {
     const stockValues =
       cardType === 7
         ? [
-            ctx.definitions.cardFlagFieldValueIn("cards_bk", row.flagsBk, "tile_stock_0") ?? 0,
-            ctx.definitions.cardFlagFieldValueIn("cards_bk", row.flagsBk, "tile_stock_1") ?? 0,
+            ctx.definitions.cardFlagFieldValueIn("stock", row.stock, "stock_0") ?? 0,
+            ctx.definitions.cardFlagFieldValueIn("stock", row.stock, "stock_1") ?? 0,
           ]
         : undefined;
     // World hex from `(macro_zone, micro_zone)` for any card above

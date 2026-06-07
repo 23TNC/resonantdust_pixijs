@@ -189,7 +189,7 @@ export class ActionManager {
       if (change.kind === "added") {
         // A loose card (`!micro_is_card`) is a chain root. Stacked members
         // and still-deferred rows (resolved by `mirrorCard` first) aren't.
-        const isRoot = !microIsCard(change.row.flagsBk);
+        const isRoot = !microIsCard(change.row.flags);
         if (isRoot && change.row.dead !== 2) {
           this.evaluateRoot(change.key);
         }
@@ -234,7 +234,7 @@ export class ActionManager {
     // root state in the unified model — state 3 (`STACKED_DEFERRED`)
     // is transient and resolved by `mirrorCard` before reaching here.
     for (const row of ctx.data.cardsLocal.values()) {
-      if (!microIsCard(row.flagsBk)) {
+      if (!microIsCard(row.flags)) {
         this.evaluateRoot(row.cardId);
       }
     }
@@ -337,7 +337,7 @@ export class ActionManager {
     // because `applyPredictedHolds` just stamped `predict_position_hold`
     // on it), `evaluateRoot(axe)` lands here — and pre-fix would
     // nuke every cut_tree queue that depends on the axe.
-    if (microIsCard(rootRow.flagsBk)) {
+    if (microIsCard(rootRow.flags)) {
       this.dropForRoot(looseRootId, "no longer a loose root");
       return;
     }
@@ -352,7 +352,7 @@ export class ActionManager {
     // by the server's `card N is already claimed by another in-flight
     // action` check). The gate clears naturally when the recipe
     // completes (`action_completion::apply` releases `slot_hold`).
-    if (isSlotHeld(this.ctx, rootRow.cardId, rootRow.flagsState, rootRow.flagsBk)) {
+    if (isSlotHeld(this.ctx, rootRow.cardId, rootRow.flags)) {
       return;
     }
 
@@ -373,7 +373,7 @@ export class ActionManager {
     //     duplicate the server rejects.
     // Both collapse into "magnetic-card chains are off-limits to
     // ActionManager until the magnetic flag clears."
-    if (this.ctx.definitions.hasCardFlag(rootRow.flagsState, rootRow.flagsBk, "magnetic")) {
+    if (this.ctx.definitions.hasCardFlag(rootRow.flags, 0, "magnetic")) {
       const existing = this.queue.get(looseRootId);
       if (existing && !existing.submitted) {
         this.dropForRoot(looseRootId, "root is magnetic — owned by LifecycleResolutionManager");
@@ -418,15 +418,15 @@ export class ActionManager {
           packedDef: tileCardRow.packedDefinition,
           stock0:
             this.ctx.definitions.cardFlagFieldValueIn(
-              "cards_bk",
-              tileCardRow.flagsBk,
-              "tile_stock_0",
+              "stock",
+              tileCardRow.stock,
+              "stock_0",
             ) ?? 0,
           stock1:
             this.ctx.definitions.cardFlagFieldValueIn(
-              "cards_bk",
-              tileCardRow.flagsBk,
-              "tile_stock_1",
+              "stock",
+              tileCardRow.stock,
+              "stock_1",
             ) ?? 0,
         };
       } else {
@@ -475,7 +475,7 @@ export class ActionManager {
         // claimed children as available bindings, and we propose the
         // same recipe twice. See the post-corpus_b.2-accept rejection
         // for the canonical trace.
-        if (isSlotHeld(this.ctx, row.cardId, row.flagsState, row.flagsBk)) return null;
+        if (isSlotHeld(this.ctx, row.cardId, row.flags)) return null;
         return {
           cardId: row.cardId,
           packedDefinition: row.packedDefinition,
@@ -891,7 +891,7 @@ export class ActionManager {
     let changed = false;
     if (hadSlot) {
       const slotHeld =
-        (this.ctx.definitions.cardFlagFieldValueIn("cards_bk", row.flagsBk, "slot_hold_count") ?? 0) > 0;
+        (this.ctx.definitions.cardFlagFieldValueIn("flags", row.flags, "slot_claim_count") ?? 0) > 0;
       if (slotHeld) {
         this.predSlotHold.delete(cardId);
         changed = true;
@@ -899,7 +899,7 @@ export class ActionManager {
     }
     if (hadPos) {
       const posHeld =
-        (this.ctx.definitions.cardFlagFieldValueAny(row.flagsState, row.flagsBk, "position_hold_count") ?? 0) > 0;
+        (this.ctx.definitions.cardFlagFieldValueAny(row.flags, row.flags, "position_hold_count") ?? 0) > 0;
       if (posHeld) {
         this.predPositionHold.delete(cardId);
         changed = true;
@@ -964,7 +964,7 @@ function resolveTileCardHex(
   for (let depth = 0; depth < 32 && cur !== undefined; depth++) {
     // A loose card carries its cell in `microLocation`; a member hops to its
     // root (one step in the flat model). Return the loose root's cell.
-    if (!microIsCard(cur.flagsBk)) {
+    if (!microIsCard(cur.flags)) {
       const { localQ, localR } = microLooseCell(cur.microLocation);
       return { q: localQ, r: localR };
     }

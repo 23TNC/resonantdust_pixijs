@@ -11,7 +11,7 @@
  *  Call `initContent()` once during `main.ts` startup, before constructing
  *  anything that touches `DefinitionManager`. */
 
-import init, { Content, Locales } from "../../wasm/pkg/resonantdust_wasm";
+import init, { Content, Locales } from "../../shared/pkg/resonantdust_shared";
 
 /** Shape of the gate's `/content` payload. */
 interface ContentPayload {

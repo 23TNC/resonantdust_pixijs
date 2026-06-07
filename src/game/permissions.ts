@@ -62,7 +62,7 @@ export function owningPlayer(ctx: OwnerWalkCtx, cardId: number): number | null {
   for (let i = 0; i < OWNER_WALK_DEPTH_CAP; i++) {
     const row = ctx.data.cardsLocal.get(cur);
     if (!row) return null;
-    if ((row.flagsState & FLAG_OWNED_BY_PLAYER) !== 0) return row.ownerId;
+    if ((row.flags & FLAG_OWNED_BY_PLAYER) !== 0) return row.ownerId;
     if (row.ownerId === 0) return null;
     cur = row.ownerId;
   }

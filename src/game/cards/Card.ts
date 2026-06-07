@@ -144,14 +144,14 @@ export class Card {
     // `stackIndex` (RectCard layout), so no per-card predecessor lookup is
     // needed. Loose cards have no parent; a still-deferred member (resolved
     // by `mirrorCard` before chain walks normally see it) isn't in a chain.
-    const micro = decodeMicro(row.microLocation, row.flagsBk);
+    const micro = decodeMicro(row.microLocation, row.flags);
     if (micro.kind !== "stacked") return 0;
     if (micro.branch === STACK_STATE_DEFERRED) return 0;
     return micro.root;
   }
 
   private static stackDirectionOf(row: CardRow): StackDirection | null {
-    const micro = decodeMicro(row.microLocation, row.flagsBk);
+    const micro = decodeMicro(row.microLocation, row.flags);
     if (micro.kind !== "stacked") return null;
     // Deferred members have no chain direction until mirror-time resolution.
     return directionForBranch(micro.branch);
@@ -472,14 +472,14 @@ export class Card {
     // caught by `zoneChanged` (macroZone changes). Stacked members aren't loose,
     // so they're excluded.
     const tileChanged =
-      !microIsCard(row.flagsBk) &&
+      !microIsCard(row.flags) &&
       row.macroZone.surface >= WORLD_LAYER &&
       newMicroLocation !== this.currentMicroLocation;
 
     if (zoneChanged || parentChanged || directionChanged || tileChanged) {
       debug.log(
         ["splice"],
-        `[splice] onDataChange card=${this.cardId} isCard=${microIsCard(row.flagsBk)} microLocation=${row.microLocation} zone=${this.currentZoneId}->${newZoneId} parent=${this.currentParentId}->${newParentId} dir=${this.currentStackDirection}->${newStackDirection}`,
+        `[splice] onDataChange card=${this.cardId} isCard=${microIsCard(row.flags)} microLocation=${row.microLocation} zone=${this.currentZoneId}->${newZoneId} parent=${this.currentParentId}->${newParentId} dir=${this.currentStackDirection}->${newStackDirection}`,
         2,
       );
       // Orphan check before mutating state, so we can early-out cleanly

@@ -17,7 +17,7 @@ import {
   type MacroZone,
   makeMacroZone,
   microIsCard,
-  stackState,
+  stackBranch,
   stackIndex,
   LOOSE_RECT,
   STACK_STATE_DEFERRED,
@@ -50,54 +50,47 @@ const INVENTORY_LAYER = 1;
  *  can walk the owner chain to find an owning soul without importing
  *  `permissions.ts` (which would create a permissions → GameContext
  *  → DataManager import cycle). Source of truth: `content/cards/flags.json`. */
-const FLAG_OWNED_BY_PLAYER = 1 << 4;
+const FLAG_OWNED_BY_PLAYER = 1 << 24;
 /** Bounded walk to mirror `permissions::owningSoul`'s server-side
  *  intent — climb `ownerId` until we land on a soul (card with
  *  `FLAG_OWNED_BY_PLAYER` set). Mirrors the depth cap from
  *  `OWNER_WALK_DEPTH_CAP` in `cards.rs`. */
 const OWNER_WALK_DEPTH_CAP = 32;
 
-// Bit masks for `Card.flagsState` / `Card.flagsBk`. Source of truth:
-// `content/cards/flags.json`. Mirrored here as compile-time
-// constants — DataManager is a hot-path mirror and per-call
-// wasm-registry lookups add avoidable overhead. Keep these in sync
-// with the registry on any renumber; the canonical query is
-// `definitions.cardFlagBitIn(...)` / `cardFlagFieldShape(...)`.
+// Bit masks for the propagating `Card.flags` word. Source of truth:
+// `resonantdust_data::flags` (the `flags` section). Mirrored here as
+// compile-time constants — DataManager is a hot-path mirror and per-call
+// wasm-registry lookups add avoidable overhead. Keep these in sync with the
+// registry on any renumber.
 //
-// Post unified-hold-counts rework: `slot_hold` is no longer a state
-// bit — it's a refcount field in `flags_bk` (`slot_hold_count`).
-// Readers asking "is slot-held?" check `(flagsBk & SLOT_HOLD_COUNT_MASK) !== 0`.
-const FLAG_ACTION_DEAD = 1 << 0;
+// Post flags/stock schema split: state bits, placement, and the refcount holds
+// ALL live in the single `flags` u32 (see packing.ts). `flagsBk` is now only the
+// non-propagating dirty/preserve byte (not read here); `stock` is its own byte.
+const FLAG_ACTION_DEAD = 1 << 26;
 /** Server *requires* the row's position. Mirror splices on conflict
  *  with the incoming card winning the slot (existing occupant
  *  re-anchors one step up the chain). Overflow past
  *  `MAX_CHAIN_DEPTH` evicts the topmost card via the
  *  inventory→loose→nearby-tile cascade. Paired with
  *  [`FLAG_POS_WANT`] — same splice primitive, opposite winner. */
-const FLAG_POS_NEED = 1 << 1;
-const FLAG_LIFECYCLE_PENDING = 1 << 2;
+const FLAG_POS_NEED = 1 << 27;
 /** Server *prefers* the row's position. Mirror splices on conflict
  *  with the existing occupant winning the slot (incoming card
  *  stacks above it). Overflow past `MAX_CHAIN_DEPTH` evicts the
  *  topmost card via the inventory→loose→nearby-tile cascade.
  *  Paired with [`FLAG_POS_NEED`] — same splice primitive,
  *  opposite winner. */
-const FLAG_POS_WANT = 1 << 12;
-// `progress_style` is the u3 field at bits 5..=7 of `Card.flagsState`.
-// Set on the actor's completion row by `action_completion::commit`;
-// the client reads it to render a progress bar during the in-flight
-// window.
-const FLAG_PROGRESS_STYLE_SHIFT = 5;
-const FLAG_PROGRESS_STYLE_MASK = 0b111;
-// `slot_hold_count` is a u3 refcount at bits 13..=15 of `Card.flagsBk`.
-// Mask covers the field's window; non-zero value means "this card is
-// exclusively held by an in-flight action."
-const FLAG_SLOT_HOLD_COUNT_MASK = 0b111 << 13;
-// `progress_style` value used for the synthetic magnetic-expiry bar.
-// `ltr` matches the cw render the success recipes already declare,
-// so the visual is consistent across the magnetic phase and the
-// subsequent action commit.
-const LIFECYCLE_PROGRESS_STYLE = 1;
+const FLAG_POS_WANT = 1 << 28;
+// `slot_claim_count` is a u3 refcount at bits 8..=10 of `Card.flags` (the
+// exclusive hold, formerly `slot_hold_count`). Mask covers the field's window;
+// non-zero means "this card is exclusively held by an in-flight action."
+const FLAG_SLOT_HOLD_COUNT_MASK = 0b111 << 8;
+// TODO(progress-from-recipe): `progress_style` was cut from the card flag word
+// in the flags/stock split. Progress bars are stubbed off until the client
+// derives the bar from the driving recipe instead of a per-card field.
+const FLAG_PROGRESS_STYLE_SHIFT = 0;
+const FLAG_PROGRESS_STYLE_MASK = 0;
+const LIFECYCLE_PROGRESS_STYLE = 0;
 /** A single progress indicator on a card. Today the `progress` array on
  *  `LocalCard` is populated with at most one entry (the future
  *  completion row with the highest `valid_at`, last-write-wins). The
@@ -686,7 +679,7 @@ export class DataManager {
     if (change.kind === "removed") {
       debug.log(
         ["spacetime"],
-        `[spacetime] card row removed t=${nowSecs} id=${change.key} prev=${prev ? `flagsState=0x${prev.flagsState.toString(16)} flagsBk=0x${prev.flagsBk.toString(16)} microLocation=${prev.microLocation} macroZone=${prev.macroZone.packed} surface=${prev.macroZone.surface}` : "absent"}`,
+        `[spacetime] card row removed t=${nowSecs} id=${change.key} prev=${prev ? `flagsState=0x${prev.flags.toString(16)} flagsBk=0x${prev.flags.toString(16)} microLocation=${prev.microLocation} macroZone=${prev.macroZone.packed} surface=${prev.macroZone.surface}` : "absent"}`,
         0,
       );
       if (prev === undefined) return;
@@ -698,14 +691,14 @@ export class DataManager {
     const serverRow = change.kind === "added" ? change.row : change.newRow;
     // Flat-root placement of the incoming row: loose vs stacked-member vs
     // deferred (a stacked member in the deferred branch).
-    const serverMicro = decodeMicro(serverRow.microLocation, serverRow.flagsBk);
+    const serverMicro = decodeMicro(serverRow.microLocation, serverRow.flags);
     const isStackedMember =
       serverMicro.kind === "stacked" && serverMicro.branch !== STACK_STATE_DEFERRED;
     const isDeferred =
       serverMicro.kind === "stacked" && serverMicro.branch === STACK_STATE_DEFERRED;
     debug.log(
       ["spacetime"],
-      `[spacetime] card row ${change.kind} t=${nowSecs} id=${change.key} validAt=${validAtOf(serverRow.validAt)} isCard=${microIsCard(serverRow.flagsBk)} flagsState=0x${serverRow.flagsState.toString(16)} flagsBk=0x${serverRow.flagsBk.toString(16)} microLocation=${serverRow.microLocation} macroZone=${serverRow.macroZone.packed} surface=${serverRow.macroZone.surface}`,
+      `[spacetime] card row ${change.kind} t=${nowSecs} id=${change.key} validAt=${validAtOf(serverRow.validAt)} isCard=${microIsCard(serverRow.flags)} flagsState=0x${serverRow.flags.toString(16)} flagsBk=0x${serverRow.flags.toString(16)} microLocation=${serverRow.microLocation} macroZone=${serverRow.macroZone.packed} surface=${serverRow.macroZone.surface}`,
       0,
     );
 
@@ -719,7 +712,7 @@ export class DataManager {
     // never see. Bail before any of it: don't write the row, don't
     // fire the event. If a fresh row for the same id arrives later
     // it'll come in as "added" again and we'll handle it correctly.
-    if (prev === undefined && (serverRow.flagsState & FLAG_ACTION_DEAD) !== 0) {
+    if (prev === undefined && (serverRow.flags & FLAG_ACTION_DEAD) !== 0) {
       return;
     }
 
@@ -800,7 +793,7 @@ export class DataManager {
         // Stacked member (deferred already short-circuited above). The client
         // owns the chain locally unless the server asserts `pos_need` /
         // `pos_want` (a forced placement, resolved by the splice path below).
-        const forced = (serverRow.flagsState & (FLAG_POS_NEED | FLAG_POS_WANT)) !== 0;
+        const forced = (serverRow.flags & (FLAG_POS_NEED | FLAG_POS_WANT)) !== 0;
         preservePosition = !forced;
         serverForcesStackPosition = forced;
       }
@@ -824,23 +817,23 @@ export class DataManager {
       // owning soul's inventory bucket so it's visible + recoverable.
       const placed = applyMicro(
         { kind: "loose", localQ: 0, localR: 0, x: 0, y: 0, looseKind: LOOSE_RECT },
-        serverRow.flagsBk,
+        serverRow.flags,
       );
       baseRow = {
         ...serverRow,
         macroZone: makeMacroZone(orphanInventoryBucket, INVENTORY_LAYER, 0, 0),
         microLocation: placed.microLocation,
-        flagsBk: placed.flagsBk,
+        flags: placed.flags,
       };
     } else if (preservePosition && prev !== undefined) {
       // Keep the local placement (cell/offset or root/branch/index) over the
       // server's, but adopt the server's other flags (holds, dirty markers).
-      const placed = applyMicro(decodeMicro(prev.microLocation, prev.flagsBk), serverRow.flagsBk);
+      const placed = applyMicro(decodeMicro(prev.microLocation, prev.flags), serverRow.flags);
       baseRow = {
         ...serverRow,
         macroZone: prev.macroZone,
         microLocation: placed.microLocation,
-        flagsBk: placed.flagsBk,
+        flags: placed.flags,
       };
     } else {
       baseRow = serverRow;
@@ -866,7 +859,7 @@ export class DataManager {
       !orphanSlot &&
       serverMicro.kind === "stacked" &&
       serverMicro.branch !== STACK_STATE_DEFERRED &&
-      (serverRow.flagsState & (FLAG_POS_NEED | FLAG_POS_WANT)) !== 0 &&
+      (serverRow.flags & (FLAG_POS_NEED | FLAG_POS_WANT)) !== 0 &&
       this.cardManager !== null
     ) {
       // A different local card already occupies the forced (root, branch, index)
@@ -881,8 +874,8 @@ export class DataManager {
         // `pos_need` outranks `pos_want` when both bits are set —
         // need's "incoming wins" semantic is the stricter assertion.
         const nAbove =
-          (serverRow.flagsState & FLAG_POS_NEED) === 0 &&
-          (serverRow.flagsState & FLAG_POS_WANT) !== 0;
+          (serverRow.flags & FLAG_POS_NEED) === 0 &&
+          (serverRow.flags & FLAG_POS_WANT) !== 0;
         const result = this.cardManager.insertIntoSlotChain(serverRow, occupant, nAbove);
         baseRow = result.incomingRow;
         spliceOverflow = result.overflowTop;
@@ -891,7 +884,7 @@ export class DataManager {
     // Preserve `dead: 2` once the layout has finished its animation —
     // otherwise a subsequent server push with the flag still set would
     // regress us to `1` and replay the animation.
-    const flagDead = (serverRow.flagsState & FLAG_ACTION_DEAD) !== 0;
+    const flagDead = (serverRow.flags & FLAG_ACTION_DEAD) !== 0;
     const dead: 1 | 2 | undefined = flagDead
       ? (prev?.dead === 2 ? 2 : 1)
       : undefined;
@@ -952,54 +945,11 @@ export class DataManager {
       prev.def !== undefined
         ? prev.def
         : this.definitions.decode(baseRow.packedDefinition);
-    // Synthetic magnetic-expiry progress. A magnetic anchor in its
-    // pending phase (magnetic flag set, no `slot_hold` claiming it
-    // for an in-flight recipe) has no server-side completion row to
-    // count down against — the expiry is computed from
-    // `def.lifecycleDurationMs` and the install row's `validAt`. Build
-    // a progress entry so the player can see how long until
-    // `LifecycleResolutionManager` flips to the failure path. As soon
-    // as a propose_action stitches the anchor as root (`slot_hold`
-    // set) OR `scanProgress` finds a real completion row, this
-    // branch is skipped and the action-completion progress takes over
-    // naturally. Cleared at death too (no point counting down).
-    if (
-      progress === undefined &&
-      def !== null &&
-      def.lifecycleDurationMs &&
-      (baseRow.flagsState & FLAG_LIFECYCLE_PENDING) !== 0 &&
-      (baseRow.flagsBk & FLAG_SLOT_HOLD_COUNT_MASK) === 0 &&
-      !flagDead
-    ) {
-      // Install row = earliest validAt for this card_id. Older rows
-      // can be GC'd, but the install row carries the magnetic flag
-      // and is force-position, so it sticks around until the card
-      // dies or transitions out of the magnetic phase. Walk the
-      // server tier to find it — small per-card row count makes this
-      // cheap.
-      let installValidAt = validAtOf(baseRow.validAt);
-      for (const [packed, row] of this.cards.server) {
-        if (row.cardId !== change.key) continue;
-        const v = validAtOf(packed);
-        if (v < installValidAt) installValidAt = v;
-      }
-      progress = [
-        {
-          style: LIFECYCLE_PROGRESS_STYLE,
-          startSecs: installValidAt,
-          endSecs: installValidAt + def.lifecycleDurationMs,
-        },
-      ];
-      // Same continuity carry as above — if the previous local row
-      // already had this synthetic entry, hold onto its startSecs so
-      // re-promotes don't flicker the bar back to 0.
-      if (prev?.progress) {
-        const carried = prev.progress.find(
-          (pp) => pp.endSecs === progress![0]!.endSecs && pp.style === progress![0]!.style,
-        );
-        if (carried) progress[0]!.startSecs = carried.startSecs;
-      }
-    }
+    // TODO(magnetic-relocate): the synthetic magnetic-expiry progress bar was
+    // removed here — its `magnetic` lifecycle-pending flag and `progress_style`
+    // were both cut from the card flag word in the flags/stock split. Reinstate
+    // (deriving style from the recipe / lifecycle def) when lifecycle returns
+    // gate-side.
     const nextRow: LocalCard = {
       ...baseRow,
       def,
@@ -1052,7 +1002,7 @@ export class DataManager {
    *  cutoff `promote` uses, so "future" is judged on the identical timeline. */
   private kickFutureProgress(row: Card): void {
     const style =
-      (row.flagsState >>> FLAG_PROGRESS_STYLE_SHIFT) & FLAG_PROGRESS_STYLE_MASK;
+      (row.flags >>> FLAG_PROGRESS_STYLE_SHIFT) & FLAG_PROGRESS_STYLE_MASK;
     if (style === 0) return;
     if (validAtOf(row.validAt) <= this.reducers.serverNowMs()) return;
     const current = this.cards.current.get(row.cardId);
@@ -1085,7 +1035,7 @@ export class DataManager {
       if (row.cardId !== cardId) continue;
       const validAt = validAtOf(packed);
       if (validAt <= startSecs) continue;
-      const style = (row.flagsState >>> FLAG_PROGRESS_STYLE_SHIFT) & FLAG_PROGRESS_STYLE_MASK;
+      const style = (row.flags >>> FLAG_PROGRESS_STYLE_SHIFT) & FLAG_PROGRESS_STYLE_MASK;
       if (style === 0) continue;
       if (validAt > bestValidAt) {
         bestValidAt = validAt;
@@ -1105,28 +1055,28 @@ export class DataManager {
    *  later cleanup pass can compact). Each bump fires `fireCardLocal`
    *  so downstream listeners (Card.onDataChange) tween. */
   private renumberAfterForcedStackPosition(forcedId: number, forced: LocalCard): void {
-    if (!microIsCard(forced.flagsBk)) return;
-    const forcedBranch = stackState(forced.flagsBk);
-    const forcedIdx = stackIndex(forced.flagsBk);
+    if (!microIsCard(forced.flags)) return;
+    const forcedBranch = stackBranch(forced.flags);
+    const forcedIdx = stackIndex(forced.flags);
     const forcedRoot = forced.microLocation;
 
     const bumps: { id: number; oldRow: LocalCard; newRow: LocalCard }[] = [];
     for (const [id, row] of this.cardsLocal) {
       if (id === forcedId) continue;
-      if (!microIsCard(row.flagsBk)) continue;
+      if (!microIsCard(row.flags)) continue;
       if (row.microLocation !== forcedRoot) continue;
       // Only bump the same branch — top / bottom / hex have independent
       // index spaces under the same root.
-      if (stackState(row.flagsBk) !== forcedBranch) continue;
-      const idx = stackIndex(row.flagsBk);
+      if (stackBranch(row.flags) !== forcedBranch) continue;
+      const idx = stackIndex(row.flags);
       if (idx < forcedIdx) continue;
       const newIdx = Math.min(idx + 1, 15);
       if (newIdx === idx) continue;
       const placed = applyMicro(
         { kind: "stacked", root: forcedRoot, branch: forcedBranch, index: newIdx },
-        row.flagsBk,
+        row.flags,
       );
-      bumps.push({ id, oldRow: row, newRow: { ...row, microLocation: placed.microLocation, flagsBk: placed.flagsBk } });
+      bumps.push({ id, oldRow: row, newRow: { ...row, microLocation: placed.microLocation, flags: placed.flags } });
     }
     for (const { id, oldRow, newRow } of bumps) {
       this.cardsLocal.set(id, newRow);

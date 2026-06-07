@@ -93,7 +93,7 @@ export class LayoutGenericCard extends LayoutCard {
     if (
       !this.destroying &&
       (row as LocalCard).dead === 1 &&
-      !isSlotHeld(this.ctx, row.cardId, row.flagsState, row.flagsBk)
+      !isSlotHeld(this.ctx, row.cardId, row.flags)
     ) {
       this.destroying = true;
       this.rebuildSpec("destroy");
@@ -112,7 +112,7 @@ export class LayoutGenericCard extends LayoutCard {
    *  rect-specific and omitted). LOOSE is handled fully; STACKED fans by the
    *  gap-collapsed `chainStep` (drag-aware), same as the rect chain. */
   private applyPosition(row: CardRow): void {
-    const micro = decodeMicro(row.microLocation, row.flagsBk);
+    const micro = decodeMicro(row.microLocation, row.flags);
     if (micro.kind === "loose") {
       this.stackZ = null;
       this.stackOffsetY = 0;
@@ -319,7 +319,7 @@ export class LayoutGenericCard extends LayoutCard {
    *    reads `*d.progress.<i>.id`/`.style` to author a `^progress` prim. */
   private buildCardData(): HostValue {
     const micro = this.currentRow
-      ? decodeMicro(this.currentRow.microLocation, this.currentRow.flagsBk)
+      ? decodeMicro(this.currentRow.microLocation, this.currentRow.flags)
       : null;
     const stacked = micro?.kind === "stacked";
     // Fan direction as a y-sign the DSL multiplies the index by: -1 up / +1 down

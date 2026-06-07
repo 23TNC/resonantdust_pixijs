@@ -1,3 +1,6 @@
 [submodule "src/content"]
 	path = src/content
 	url = git@github.com:23TNC/resonantdust_content.git
+[submodule "src/shared"]
+	path = src/shared
+	url = git@github.com:23TNC/resonantdust_shared.git

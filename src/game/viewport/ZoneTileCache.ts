@@ -108,8 +108,8 @@ export class ZoneTileCache {
     if (tileCard) {
       return {
         packed: tileCard.packedDefinition,
-        stock0: this.ctx.definitions.cardFlagFieldValueIn("cards_bk", tileCard.flagsBk, "tile_stock_0") ?? 0,
-        stock1: this.ctx.definitions.cardFlagFieldValueIn("cards_bk", tileCard.flagsBk, "tile_stock_1") ?? 0,
+        stock0: this.ctx.definitions.cardFlagFieldValueIn("stock", tileCard.stock, "stock_0") ?? 0,
+        stock1: this.ctx.definitions.cardFlagFieldValueIn("stock", tileCard.stock, "stock_1") ?? 0,
         source: "card",
       };
     }
@@ -171,11 +171,11 @@ export class ZoneTileCache {
    *  root's cell by chasing the chain to the first Free ancestor. Returns
    *  `null` when the chain dead-ends (root reaped) or exceeds the depth cap. */
   private resolveTileCardHex(
-    row: { flagsBk: number; microLocation: number },
+    row: { flags: number; microLocation: number },
   ): { q: number; r: number } | null {
-    let cur: { flagsBk: number; microLocation: number } | undefined = row;
+    let cur: { flags: number; microLocation: number } | undefined = row;
     for (let depth = 0; depth < 32 && cur !== undefined; depth++) {
-      if (!microIsCard(cur.flagsBk)) {
+      if (!microIsCard(cur.flags)) {
         const { localQ, localR } = microLooseCell(cur.microLocation);
         return { q: localQ, r: localR };
       }

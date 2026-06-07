@@ -415,7 +415,7 @@ export class MainScene extends Scene {
     let n = 0;
     for (const row of ctx.data.cardsLocal.values()) {
       if (row.ownerId !== this.playerId) continue;
-      if ((row.flagsState & FLAG_OWNED_BY_PLAYER) === 0) continue;
+      if ((row.flags & FLAG_OWNED_BY_PLAYER) === 0) continue;
       if (((row.packedDefinition >> 12) & 0xf) !== SOUL_CARD_TYPE) continue;
       n++;
     }
@@ -427,7 +427,7 @@ export class MainScene extends Scene {
   private firstOwnedSoul(ctx: GameContext): number | null {
     for (const row of ctx.data.cardsLocal.values()) {
       if (row.ownerId !== this.playerId) continue;
-      if ((row.flagsState & FLAG_OWNED_BY_PLAYER) === 0) continue;
+      if ((row.flags & FLAG_OWNED_BY_PLAYER) === 0) continue;
       if (((row.packedDefinition >> 12) & 0xf) !== SOUL_CARD_TYPE) continue;
       return row.cardId;
     }

@@ -181,34 +181,38 @@ export function regionOfZone(macroZone: bigint): { macroRegion: bigint; bit: num
   return { macroRegion, bit };
 }
 
-// ---- micro placement (mirror of content/src/packed.rs) ------------------
+// ---- micro placement + flags (mirror of card_model.rs / flags.rs) -------
 //
-// A card's micro placement lives in `microLocation` (u32) + three flag fields
-// in `flagsBk`, plus the `zoneBorn` flag in `flagsState`. Gated by
-// `micro_is_card`:
-//   set   → microLocation is a root card_id; branch = stackState, slot =
-//           stackIndex (the card is a flat stack member).
-//   clear → microLocation is loose coords + offset
-//           `[localQ:3 (29-31) | localR:3 (26-28) | x:i12 (14-25) | y:i12 (2-13) | rsvd:2]`.
+// A card's micro placement lives in `microLocation` (u32) + the `stack`/`index`
+// fields of the propagating `flags` word. Gated by the `stack` field (bits 0-3);
+// `stack === 0` is the loose sentinel:
+//   stack !== 0 → microLocation is a root card_id; branch = stack - 1, slot =
+//                 index (the card is a flat stack member).
+//   stack === 0 → microLocation is loose coords + offset
+//                 `[localQ:3 (29-31) | localR:3 (26-28) | x:i12 (14-25) | y:i12 (2-13) | rsvd:2]`;
+//                 the loose kind is in the `index` field.
 //
-// Bit positions MUST match `content/cards/flags.json` (the client mirrors them
-// by hand — "same file, same PR" with `flags.json`).
+// Bit positions MUST match `resonantdust_data::flags` (the client mirrors them
+// by hand — "same change, same PR"). The three columns:
+//   flags    (u32) — propagating: state bits, placement (stack/index), holds.
+//   flagsBk  (u8)  — non-propagating dirty/preserve markers.
+//   stock    (u8)  — tile-card per-row stock slots (u2 each).
 
-/** `flagsBk` bit: microLocation is a root card_id (card is a stack member). */
-export const MICRO_IS_CARD = 1 << 24;
-const STACK_STATE_SHIFT = 25; // flagsBk bits 25-26
-const STACK_STATE_MASK = 0b11 << STACK_STATE_SHIFT;
-const STACK_INDEX_SHIFT = 27; // flagsBk bits 27-30
-const STACK_INDEX_MASK = 0b1111 << STACK_INDEX_SHIFT;
-/** `flagsState` bit: card was generated from zone tile data. */
-export const ZONE_BORN = 1 << 13;
+const STACK_SHIFT = 0; // flags bits 0-3 (0 = loose sentinel)
+const STACK_MASK = 0xf << STACK_SHIFT;
+const INDEX_SHIFT = 4; // flags bits 4-7 (slot-in-stack, or loose kind)
+const INDEX_MASK = 0xf << INDEX_SHIFT;
+/** `flags` bit: card was generated from zone tile data. */
+export const ZONE_BORN = 1 << 29;
+/** `flags` placement mask (`stack` + `index`) — preserved/cleared together. */
+const PLACEMENT_MASK = STACK_MASK | INDEX_MASK;
 
-/** `stackState` values for the **stacked** branch (micro_is_card set). */
+/** `branch` values for a stack member (stored as `stack - 1`). */
 export const STACK_DIR_HEX = 0;
 export const STACK_DIR_UP = 1;
 export const STACK_DIR_DOWN = 2;
 export const STACK_STATE_DEFERRED = 3;
-/** `stackState` values for the **loose** branch (micro_is_card clear). */
+/** Loose `kind` values (in the `index` field when `stack === 0`). */
 export const LOOSE_HEX = 0;
 export const LOOSE_RECT = 1;
 export const SNAP_HEX = 2;
@@ -216,6 +220,14 @@ export const SNAP_RECT = 3;
 
 /** Max stack index (u4). Chains saturate here; placement fails over to loose. */
 export const MAX_STACK_INDEX = 15;
+
+// Stock byte (per-card tile stock): two u2 slots.
+const STOCK_SLOT_BITS = 2;
+const STOCK_SLOT_MASK = 0b11;
+/** Read tile-card per-row stock `slot` (0 or 1) from the `stock` byte. */
+export function cardStock(stock: number, slot: number): number {
+  return (stock >>> ((slot & 1) * STOCK_SLOT_BITS)) & STOCK_SLOT_MASK;
+}
 
 const MICRO_LOOSE_LQ_SHIFT = 29;
 const MICRO_LOOSE_LR_SHIFT = 26;
@@ -270,21 +282,26 @@ export function microLooseCell(microLocation: number): {
   };
 }
 
-/** `micro_is_card` flag test (on `flagsBk`). */
-export function microIsCard(flagsBk: number): boolean {
-  return (flagsBk & MICRO_IS_CARD) !== 0;
+/** Raw `stack` field (0 = loose; nonzero = branch + 1) on `flags`. */
+function stackField(flags: number): number {
+  return (flags & STACK_MASK) >>> STACK_SHIFT;
 }
-/** `stack_state` branch/kind value (on `flagsBk`). */
-export function stackState(flagsBk: number): number {
-  return (flagsBk & STACK_STATE_MASK) >>> STACK_STATE_SHIFT;
+/** `stack !== 0` test — microLocation is a root card_id (a stack member). */
+export function microIsCard(flags: number): boolean {
+  return stackField(flags) !== 0;
 }
-/** `stack_index` slot value (on `flagsBk`). */
-export function stackIndex(flagsBk: number): number {
-  return (flagsBk & STACK_INDEX_MASK) >>> STACK_INDEX_SHIFT;
+/** Stack `branch` value (`stack - 1`; 0 when loose). On `flags`. */
+export function stackBranch(flags: number): number {
+  const s = stackField(flags);
+  return s === 0 ? 0 : s - 1;
 }
-/** `zone_born` flag test (on `flagsState`). */
-export function zoneBorn(flagsState: number): boolean {
-  return (flagsState & ZONE_BORN) !== 0;
+/** `index` field — slot-in-stack when stacked, loose kind when loose. On `flags`. */
+export function stackIndex(flags: number): number {
+  return (flags & INDEX_MASK) >>> INDEX_SHIFT;
+}
+/** `zone_born` flag test (on `flags`). */
+export function zoneBorn(flags: number): boolean {
+  return (flags & ZONE_BORN) !== 0;
 }
 
 /** Default placement `kind` for a card landing on `surface`. The per-card
@@ -304,7 +321,7 @@ export function looseKindForSurface(surface: number): number {
 
 /** A card's decoded micro placement — the client mirror of the server's
  *  `Micro` enum. `stacked` = a flat stack member of `root`; `loose` = coords +
- *  offset. Decode with [`decodeMicro`]; rebuild `(microLocation, flagsBk)` with
+ *  offset. Decode with [`decodeMicro`]; rebuild `(microLocation, flags)` with
  *  [`applyMicro`]. */
 export type Micro =
   | { kind: "stacked"; root: number; branch: number; index: number }
@@ -317,38 +334,40 @@ export type Micro =
       looseKind: number;
     };
 
-/** Decode a row's `(microLocation, flagsBk)` into a [`Micro`]. */
-export function decodeMicro(microLocation: number, flagsBk: number): Micro {
-  if (microIsCard(flagsBk)) {
+/** Decode a row's `(microLocation, flags)` into a [`Micro`]. */
+export function decodeMicro(microLocation: number, flags: number): Micro {
+  if (microIsCard(flags)) {
     return {
       kind: "stacked",
       root: microLocation >>> 0,
-      branch: stackState(flagsBk),
-      index: stackIndex(flagsBk),
+      branch: stackBranch(flags),
+      index: stackIndex(flags),
     };
   }
   const { localQ, localR, x, y } = unpackMicroLoose(microLocation);
-  return { kind: "loose", localQ, localR, x, y, looseKind: stackState(flagsBk) };
+  // Loose: the `index` field carries the loose kind.
+  return { kind: "loose", localQ, localR, x, y, looseKind: stackIndex(flags) };
 }
 
-/** Rebuild `(microLocation, flagsBk)` for a [`Micro`], preserving the non-stack
- *  bits of `baseFlagsBk` (hold counts, dirty/preserve markers). The single
- *  write helper — mirror of the server's `Micro::apply`. */
+/** Rebuild `(microLocation, flags)` for a [`Micro`], preserving the non-placement
+ *  bits of `baseFlags` (state bits + hold counts). The single write helper —
+ *  mirror of the server's `Micro::apply`. Stack members store `branch + 1` so the
+ *  `stack === 0` loose sentinel stays distinct. */
 export function applyMicro(
   micro: Micro,
-  baseFlagsBk: number,
-): { microLocation: number; flagsBk: number } {
-  let flagsBk = baseFlagsBk & ~(MICRO_IS_CARD | STACK_STATE_MASK | STACK_INDEX_MASK);
+  baseFlags: number,
+): { microLocation: number; flags: number } {
+  let flags = baseFlags & ~PLACEMENT_MASK;
   if (micro.kind === "stacked") {
-    flagsBk |=
-      MICRO_IS_CARD |
-      ((micro.branch & 0b11) << STACK_STATE_SHIFT) |
-      ((micro.index & 0xf) << STACK_INDEX_SHIFT);
-    return { microLocation: micro.root >>> 0, flagsBk: flagsBk >>> 0 };
+    flags |=
+      (((micro.branch & 0xf) + 1) << STACK_SHIFT) |
+      ((micro.index & 0xf) << INDEX_SHIFT);
+    return { microLocation: micro.root >>> 0, flags: flags >>> 0 };
   }
-  flagsBk |= (micro.looseKind & 0b11) << STACK_STATE_SHIFT;
+  // Loose: stack stays 0 (sentinel); `index` carries the loose kind.
+  flags |= (micro.looseKind & 0xf) << INDEX_SHIFT;
   return {
     microLocation: packMicroLoose(micro.localQ, micro.localR, micro.x, micro.y),
-    flagsBk: flagsBk >>> 0,
+    flags: flags >>> 0,
   };
 }

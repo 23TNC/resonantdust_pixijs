@@ -146,7 +146,7 @@ export class DragManager {
     // position_locked (permanent — world tiles, anchored event cards).
     // Either bit blocks pickup. See content/cards/flags.json.
     const row = this.ctx.data.cardsLocal.get(data.hit.cardId);
-    if (row && this.pickupBlocked(data.hit.cardId, row.flagsState, row.flagsBk)) return;
+    if (row && this.pickupBlocked(data.hit.cardId, row.flags)) return;
 
     // Permission check: does the local player have authority to pick
     // this card up? Today the rule is ownership; future widenings
@@ -195,7 +195,7 @@ export class DragManager {
     // behaves exactly as the old single-card drag.
     const carried = this.ctx.cards?.carriedRun(card.cardId) ?? [card];
     const followers = carried.slice(1);
-    const micro = decodeMicro(row?.microLocation ?? 0, row?.flagsBk ?? 0);
+    const micro = decodeMicro(row?.microLocation ?? 0, row?.flags ?? 0);
     const runDirection: StackDirection =
       micro.kind === "stacked" ? directionForBranch(micro.branch) ?? "top" : "top";
 
@@ -398,15 +398,15 @@ export class DragManager {
    *  recipes both has-predicate-matching the same axe) compose; the
    *  bit-flag form (`position_hold`) is a tombstone — derived from
    *  `count > 0`. */
-  private pickupBlocked(cardId: number, flagsState: number, flagsBk: number): boolean {
+  private pickupBlocked(cardId: number, flags: number): boolean {
     // `isPositionHeld` subsumes the former `position_locked` bit
     // (now expressed as a permanent +1 on `position_hold_count`,
     // per unified-hold-counts rework). Dead cards still appear in
     // `cardsLocal` until GC retention sweeps them; the player should
     // not be able to pick one up. Mirrors the `dead` check in
     // `dropResolver::targetBlocksDrop`.
-    return isPositionHeld(this.ctx, cardId, flagsState, flagsBk)
-        || this.ctx.definitions.hasCardFlag(flagsState, flagsBk, "dead");
+    return isPositionHeld(this.ctx, cardId, flags)
+        || this.ctx.definitions.hasCardFlag(flags, 0, "dead");
   }
 }
 

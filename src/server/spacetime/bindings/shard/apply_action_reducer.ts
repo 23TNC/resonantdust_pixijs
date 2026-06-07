@@ -15,7 +15,6 @@ export default {
   completionMs: __t.u64(),
   boundIds: __t.array(__t.u32()),
   boundMasks: __t.byteArray(),
-  boundStyles: __t.byteArray(),
   destroyIds: __t.array(__t.u32()),
   createDefs: __t.array(__t.u16()),
   createSurfaces: __t.byteArray(),

@@ -6,7 +6,7 @@
  *  prediction window is invisible at the read site.
  *
  *  Predictions live in `ActionManager` (scene-scoped), not in
- *  `Card.flagsState` / `Card.flagsBk` — splitting the two preserves
+ *  `Card.flags` / `Card.flags` — splitting the two preserves
  *  the invariant that the row's columns mirror server state exactly.
  *  `ctx.actions` may be null (outside `MainScene`); in that case the
  *  prediction lookup short-circuits to `false` and we read flag bits
@@ -29,28 +29,26 @@ import type { GameContext } from "../../GameContext";
 export function isSlotHeld(
   ctx: GameContext,
   cardId: number,
-  _flagsState: number,
-  flagsBk: number,
+  flags: number,
 ): boolean {
   const count = ctx.definitions.cardFlagFieldValueIn(
-    "cards_bk",
-    flagsBk,
-    "slot_hold_count",
+    "flags",
+    flags,
+    "slot_claim_count",
   ) ?? 0;
   if (count > 0) return true;
   return ctx.actions?.isSlotHeldPrediction(cardId) === true;
 }
 
-/** True if `cardId`'s row carries `position_hold_count > 0` (in
- *  `flagsBk`) OR a proposeAction round-trip is currently predicting
+/** True if `cardId`'s row carries `position_hold_count > 0` (in the
+ *  `flags` word) OR a proposeAction round-trip is currently predicting
  *  one. */
 export function isPositionHeld(
   ctx: GameContext,
   cardId: number,
-  flagsState: number,
-  flagsBk: number,
+  flags: number,
 ): boolean {
-  const count = ctx.definitions.cardFlagFieldValueAny(flagsState, flagsBk, "position_hold_count") ?? 0;
+  const count = ctx.definitions.cardFlagFieldValueAny(flags, 0, "position_hold_count") ?? 0;
   if (count > 0) return true;
   return ctx.actions?.isPositionHeldPrediction(cardId) === true;
 }
