@@ -17,7 +17,6 @@ import {
   branchForDirection,
   decodeMicro,
   encodeLooseXY,
-  looseKindForSurface,
   microIsCard,
   stackBranch,
   stackIndex,
@@ -377,7 +376,7 @@ export class CardManager {
     const soul = owningSoul(this.ctx, card.cardId);
     if (soul) {
       const placed = applyMicro(
-        { kind: "loose", localQ: 0, localR: 0, x: 0, y: 0, looseKind: looseKindForSurface(INVENTORY_LAYER) },
+        { kind: "loose", localQ: 0, localR: 0, x: 0, y: 0 },
         card.flags,
       );
       this.ctx.data.setLocalCard(card.cardId, {
@@ -400,7 +399,7 @@ export class CardManager {
       const x = rMicro.kind === "loose" ? rMicro.x : 0;
       const y = rMicro.kind === "loose" ? rMicro.y : 0;
       const placed = applyMicro(
-        { kind: "loose", localQ, localR, x, y, looseKind: looseKindForSurface(rootRow.macroZone.surface) },
+        { kind: "loose", localQ, localR, x, y },
         card.flags,
       );
       this.ctx.data.setLocalCard(card.cardId, { ...card, macroZone: rootRow.macroZone, ...placed });
@@ -476,7 +475,7 @@ export class CardManager {
     const soul = owningSoul(this.ctx, deferredRow.cardId);
     if (soul) {
       const placed = applyMicro(
-        { kind: "loose", localQ: 0, localR: 0, x: 0, y: 0, looseKind: looseKindForSurface(INVENTORY_LAYER) },
+        { kind: "loose", localQ: 0, localR: 0, x: 0, y: 0 },
         deferredRow.flags,
       );
       debug.log(["splice", "defer"], `[defer] ${deferredRow.cardId} → soul ${soul} inventory`, 1);
@@ -490,7 +489,7 @@ export class CardManager {
 
     // ---- Tier 3: fail-to-loose at the deferred row's own cell ------
     const placed = applyMicro(
-      { kind: "loose", localQ: 0, localR: 0, x: 0, y: 0, looseKind: looseKindForSurface(deferredRow.macroZone.surface) },
+      { kind: "loose", localQ: 0, localR: 0, x: 0, y: 0 },
       deferredRow.flags,
     );
     debug.log(["splice", "defer"], `[defer] ${deferredRow.cardId} no host — fail-to-loose`, 1);
@@ -562,15 +561,14 @@ export class CardManager {
     let macroZone = row.macroZone;
     let micro: Micro;
     if (state.kind === "loose") {
-      // Loose in the current container at within-cell offset (x, y). Inventory
-      // is a rect-cell grid now; cell (0, 0) + offset is the single-bucket case.
+      // Loose in the current container at within-cell offset (x, y). Cell (0, 0)
+      // + offset is the single-bucket case.
       micro = {
         kind: "loose",
         localQ: 0,
         localR: 0,
         x: clampOffset(state.x),
         y: clampOffset(state.y),
-        looseKind: looseKindForSurface(row.macroZone.surface),
       };
     } else if (state.kind === "inventory") {
       // Move to the bucket `(soulCardId, surface)`. `ownerId` is independent of
@@ -582,18 +580,16 @@ export class CardManager {
         localR: 0,
         x: clampOffset(state.x),
         y: clampOffset(state.y),
-        looseKind: looseKindForSurface(state.surface ?? INVENTORY_LAYER),
       };
     } else if (state.kind === "cell") {
-      // Stay in the current container, snap to rect-grid cell (q, r) with no
-      // within-cell offset. Inventory one-card-per-cell occupancy.
+      // Stay in the current container, snap to hex-grid cell (q, r) with no
+      // within-cell offset. One-card-per-cell occupancy.
       micro = {
         kind: "loose",
         localQ: state.q,
         localR: state.r,
         x: 0,
         y: 0,
-        looseKind: looseKindForSurface(row.macroZone.surface),
       };
     } else if (state.kind === "stacked") {
       // Flat-root: become a member of the parent's chain ROOT in `direction`,
@@ -607,10 +603,8 @@ export class CardManager {
       // Viewport cell drop at `(q, r)`: cell within the chunk + optional
       // within-cell `(offsetX, offsetY)` offset (in pixels, i12 storage —
       // ±2047). Owner from the viewport — `0` for the world, a soul
-      // `card_id` for an inventory bucket. The renderer applies
-      // the offset iff the card's `looseKind` is `LOOSE_*` (0/1); for SNAP
-      // kinds the renderer ignores it, so storing 0/0 is the norm there.
-      // `looseKind` itself comes from `looseKindForSurface(surface)`.
+      // `card_id` for an inventory bucket. The renderer always applies the
+      // offset; a snapped drop just carries a zero offset.
       const zoneQ = Math.floor(state.q / ZONE_SIZE) * ZONE_SIZE;
       const zoneR = Math.floor(state.r / ZONE_SIZE) * ZONE_SIZE;
       macroZone = makeMacroZone(state.owner ?? 0, state.surface ?? WORLD_LAYER, zoneQ, zoneR);
@@ -620,7 +614,6 @@ export class CardManager {
         localR: state.r - zoneR,
         x: clampOffset(state.offsetX ?? 0),
         y: clampOffset(state.offsetY ?? 0),
-        looseKind: looseKindForSurface(state.surface ?? WORLD_LAYER),
       };
     }
     const { microLocation, flags } = applyMicro(micro, row.flags);

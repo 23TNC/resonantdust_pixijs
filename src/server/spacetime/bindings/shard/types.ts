@@ -19,7 +19,7 @@ export const Card = __t.object("Card", {
   packedDefinition: __t.u16(),
   flags: __t.u32(),
   flagsBk: __t.u8(),
-  stock: __t.u8(),
+  stock: __t.u32(),
 });
 export type Card = __Infer<typeof Card>;
 

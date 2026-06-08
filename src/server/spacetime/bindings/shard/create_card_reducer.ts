@@ -12,9 +12,7 @@ import {
 
 export default {
   clientTimeMs: __t.u64(),
-  playerId: __t.u32(),
-  soulIndex: __t.u32(),
-  soulPacked: __t.u16(),
-  humanPacked: __t.u16(),
-  loadoutPacked: __t.array(__t.u16()),
+  ownerId: __t.u32(),
+  surface: __t.u8(),
+  packedDefinition: __t.u16(),
 };

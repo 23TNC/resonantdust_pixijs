@@ -19,7 +19,6 @@ import {
   microIsCard,
   stackBranch,
   stackIndex,
-  LOOSE_RECT,
   STACK_STATE_DEFERRED,
 } from "./packing";
 import { validAtOf, WORLD_LAYER } from "./packing";
@@ -781,14 +780,12 @@ export class DataManager {
     let serverForcesStackPosition = false;
     if (!orphanSlot) {
       if (serverMicro.kind === "loose") {
-        // Position-ownership splits on `looseKind` (the per-card stack_state):
-        //   - LOOSE_HEX / LOOSE_RECT (bit `0b10` clear): client owns the cell
-        //     + within-cell offset — arbitrary placement; the server's view
-        //     shouldn't clobber a drag/splice transplant.
-        //   - SNAP_HEX / SNAP_RECT (bit `0b10` set): server owns — soul-walk
-        //     and other server-driven writes are authoritative; preserving
-        //     locally would silently drop those moves.
-        preservePosition = (serverMicro.looseKind & 0b10) === 0;
+        // Loose position is client-local by default (drag/splice transplants the
+        // server view shouldn't clobber); the server only wins when it asserts a
+        // forced placement via `pos_need` / `pos_want`. (There is no longer a
+        // loose "kind" to split position-ownership on — snap is render-only.)
+        const forced = (serverRow.flags & (FLAG_POS_NEED | FLAG_POS_WANT)) !== 0;
+        preservePosition = !forced;
       } else {
         // Stacked member (deferred already short-circuited above). The client
         // owns the chain locally unless the server asserts `pos_need` /
@@ -816,7 +813,7 @@ export class DataManager {
       // Orphaned member (root not loaded) → loose-rect at cell (0,0) in the
       // owning soul's inventory bucket so it's visible + recoverable.
       const placed = applyMicro(
-        { kind: "loose", localQ: 0, localR: 0, x: 0, y: 0, looseKind: LOOSE_RECT },
+        { kind: "loose", localQ: 0, localR: 0, x: 0, y: 0 },
         serverRow.flags,
       );
       baseRow = {

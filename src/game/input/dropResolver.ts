@@ -13,7 +13,6 @@ import type { GameContext } from "../../GameContext";
 import type { LayoutNode } from "../layout/LayoutNode";
 import {
   INVENTORY_LAYER,
-  looseKindForSurface,
   makeMacroZone,
   microLooseCell,
   regionOfZone,
@@ -607,15 +606,12 @@ function resolveWorldDropCoords(
   // visually — centre at the same screen point — so the offset from the
   // cell centre is `(cursor − grab + halfCard) − cellCentre`. Clamped to
   // i12 (the `micro_location.x/y` storage width).
-  let offsetX = 0;
-  let offsetY = 0;
-  const destKind = looseKindForSurface(view.surface);
-  const destIsLoose = (destKind & 0b10) === 0;
-  if (destIsLoose) {
-    const cellCenter = view.worldToLocal(q, r);
-    offsetX = clampI12(Math.round(cardCenterX - cellCenter.x));
-    offsetY = clampI12(Math.round(cardCenterY - cellCenter.y));
-  }
+  // Every surface is a uniform hex cell now; a free drop carries the within-cell
+  // offset (a snap would just be a zero offset). Always compute it from where the
+  // card visually landed.
+  const cellCenter = view.worldToLocal(q, r);
+  const offsetX = clampI12(Math.round(cardCenterX - cellCenter.x));
+  const offsetY = clampI12(Math.round(cardCenterY - cellCenter.y));
   debug.log(
     ["drag"],
     `[drop] viewport hit → owner=${view.owner} surface=${view.surface} (q=${q}, r=${r}) offset=(${offsetX}, ${offsetY})`,

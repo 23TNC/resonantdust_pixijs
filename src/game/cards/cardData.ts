@@ -37,7 +37,6 @@ export {
   zoneBorn,
   decodeMicro,
   applyMicro,
-  looseKindForSurface,
   // flag bit masks
   ZONE_BORN,
   // stackState values — stacked branch
@@ -45,11 +44,6 @@ export {
   STACK_DIR_UP,
   STACK_DIR_DOWN,
   STACK_STATE_DEFERRED,
-  // stackState values — loose branch
-  LOOSE_HEX,
-  LOOSE_RECT,
-  SNAP_HEX,
-  SNAP_RECT,
   MAX_STACK_INDEX,
   type Micro,
 } from "../../server/data/packing";

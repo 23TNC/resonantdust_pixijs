@@ -35,10 +35,10 @@ import {
 
 // Import all reducer arg schemas
 import AcquireCardShardReducer from "./acquire_card_shard_reducer";
-import AddCardReducer from "./add_card_reducer";
 import ApplyActionReducer from "./apply_action_reducer";
 import ApplyActionTileReducer from "./apply_action_tile_reducer";
 import ClaimPendingReducer from "./claim_pending_reducer";
+import CreateCardReducer from "./create_card_reducer";
 import EnsureRegionReducer from "./ensure_region_reducer";
 import MoveSoulReducer from "./move_soul_reducer";
 import PlaceCardReducer from "./place_card_reducer";
@@ -47,7 +47,6 @@ import ReleasePendingReducer from "./release_pending_reducer";
 import RequestBlueprintReducer from "./request_blueprint_reducer";
 import RequestZoneReducer from "./request_zone_reducer";
 import SetShardIdentityReducer from "./set_shard_identity_reducer";
-import SpawnSoulReducer from "./spawn_soul_reducer";
 
 // Import all procedure arg schemas
 
@@ -167,10 +166,10 @@ const tablesSchema = __schema({
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
   __reducerSchema("acquire_card_shard", AcquireCardShardReducer),
-  __reducerSchema("add_card", AddCardReducer),
   __reducerSchema("apply_action", ApplyActionReducer),
   __reducerSchema("apply_action_tile", ApplyActionTileReducer),
   __reducerSchema("claim_pending", ClaimPendingReducer),
+  __reducerSchema("create_card", CreateCardReducer),
   __reducerSchema("ensure_region", EnsureRegionReducer),
   __reducerSchema("move_soul", MoveSoulReducer),
   __reducerSchema("place_card", PlaceCardReducer),
@@ -179,7 +178,6 @@ const reducersSchema = __reducers(
   __reducerSchema("request_blueprint", RequestBlueprintReducer),
   __reducerSchema("request_zone", RequestZoneReducer),
   __reducerSchema("set_shard_identity", SetShardIdentityReducer),
-  __reducerSchema("spawn_soul", SpawnSoulReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

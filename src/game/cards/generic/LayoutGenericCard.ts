@@ -120,9 +120,10 @@ export class LayoutGenericCard extends LayoutCard {
       const q = row.macroZone.zoneQ + micro.localQ;
       const r = row.macroZone.zoneR + micro.localR;
       const cell = this.worldView?.cellToPixel(q, r);
-      const applyOffset = (micro.looseKind & 0b10) === 0;
-      const ox = applyOffset ? micro.x : 0;
-      const oy = applyOffset ? micro.y : 0;
+      // The within-cell offset is always applied; a snapped card simply carries a
+      // zero offset (snap is now render-only — no loose "kind").
+      const ox = micro.x;
+      const oy = micro.y;
       if (cell) {
         // Centre the BODY square on the cell (body_height, not the taller total) —
         // the title strip then sticks out above/below the cell.

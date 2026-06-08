@@ -26,4 +26,6 @@ export default {
   statFields: __t.byteArray(),
   statBytes: __t.byteArray(),
   statDeltas: __t.array(__t.i8()),
+  stockCardIds: __t.array(__t.u32()),
+  stockValues: __t.array(__t.u32()),
 };

@@ -19,5 +19,5 @@ export default __t.row({
   packedDefinition: __t.u16().name("packed_definition"),
   flags: __t.u32(),
   flagsBk: __t.u8().name("flags_bk"),
-  stock: __t.u8(),
+  stock: __t.u32(),
 });
