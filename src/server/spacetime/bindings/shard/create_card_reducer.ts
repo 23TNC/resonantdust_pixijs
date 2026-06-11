@@ -15,4 +15,9 @@ export default {
   ownerId: __t.u32(),
   surface: __t.u8(),
   packedDefinition: __t.u16(),
+  stock: __t.u32(),
+  macroZone: __t.u64(),
+  q: __t.u8(),
+  r: __t.u8(),
+  distance: __t.u16(),
 };

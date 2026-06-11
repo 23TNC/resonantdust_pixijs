@@ -40,6 +40,7 @@ import ApplyActionTileReducer from "./apply_action_tile_reducer";
 import ClaimPendingReducer from "./claim_pending_reducer";
 import CreateCardReducer from "./create_card_reducer";
 import EnsureRegionReducer from "./ensure_region_reducer";
+import MoveCardsReducer from "./move_cards_reducer";
 import MoveSoulReducer from "./move_soul_reducer";
 import PlaceCardReducer from "./place_card_reducer";
 import ReleaseCardShardReducer from "./release_card_shard_reducer";
@@ -171,6 +172,7 @@ const reducersSchema = __reducers(
   __reducerSchema("claim_pending", ClaimPendingReducer),
   __reducerSchema("create_card", CreateCardReducer),
   __reducerSchema("ensure_region", EnsureRegionReducer),
+  __reducerSchema("move_cards", MoveCardsReducer),
   __reducerSchema("move_soul", MoveSoulReducer),
   __reducerSchema("place_card", PlaceCardReducer),
   __reducerSchema("release_card_shard", ReleaseCardShardReducer),

@@ -20,6 +20,8 @@ export default {
   createSurfaces: __t.byteArray(),
   createMacroZones: __t.array(__t.u64()),
   createOwners: __t.array(__t.u32()),
+  createDistances: __t.array(__t.u16()),
+  createStocks: __t.array(__t.u32()),
   unlockTargets: __t.array(__t.u32()),
   unlockBlueprints: __t.array(__t.u16()),
   statSouls: __t.array(__t.u32()),
@@ -28,4 +30,8 @@ export default {
   statDeltas: __t.array(__t.i8()),
   stockCardIds: __t.array(__t.u32()),
   stockValues: __t.array(__t.u32()),
+  rerootIds: __t.array(__t.u32()),
+  rerootMacroZones: __t.array(__t.u64()),
+  rerootMicroLocations: __t.array(__t.u32()),
+  rerootStackStates: __t.byteArray(),
 };

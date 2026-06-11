@@ -15,4 +15,5 @@ export default __t.row({
   macroRegion: __t.u64().name("macro_region"),
   zonePresence: __t.u64().name("zone_presence"),
   zoneAvailable: __t.u64().name("zone_available"),
+  distance: __t.u16(),
 });

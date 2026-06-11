@@ -65,6 +65,7 @@ export const Region = __t.object("Region", {
   macroRegion: __t.u64(),
   zonePresence: __t.u64(),
   zoneAvailable: __t.u64(),
+  distance: __t.u16(),
 });
 export type Region = __Infer<typeof Region>;
 
@@ -126,9 +127,6 @@ export const Zone = __t.object("Zone", {
   t10: __t.u64(),
   t11: __t.u64(),
   t12: __t.u64(),
-  t13: __t.u64(),
-  t14: __t.u64(),
-  t15: __t.u64(),
 });
 export type Zone = __Infer<typeof Zone>;
 

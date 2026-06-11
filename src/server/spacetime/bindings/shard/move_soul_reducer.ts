@@ -18,7 +18,12 @@ export default {
   clientTimeMs: __t.u64(),
   callerPlayerId: __t.u32(),
   soulId: __t.u32(),
-  get path() {
-    return __t.array(TilePoint);
+  soulDef: __t.u16(),
+  fromQ: __t.i32(),
+  fromR: __t.i32(),
+  get dest() {
+    return TilePoint;
   },
+  departMs: __t.u64(),
+  arrivalMs: __t.u64(),
 };
